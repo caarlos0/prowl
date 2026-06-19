@@ -67,6 +67,13 @@ pub(crate) fn save(repo: &Repo, me: &str, sections: &Sections) {
         sections,
     };
     if let Ok(bytes) = serde_json::to_vec(&data) {
-        let _ = std::fs::write(path, bytes);
+        if std::fs::write(&path, bytes).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
     }
 }

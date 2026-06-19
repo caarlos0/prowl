@@ -8,12 +8,93 @@ mod imp {
     use std::cmp::Ordering;
     use std::io::IsTerminal;
     use std::os::fd::AsRawFd;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
+
+    use crate::render::{HIDE_CURSOR, SHOW_CURSOR};
 
     // The terminal state to restore, shared so the Ctrl-C handler — which exits
     // via `process::exit`, skipping destructors — can put it back too.
     static SAVED: Mutex<Option<(i32, libc::termios)>> = Mutex::new(None);
+
+    // Terminal state captured for the Ctrl-Z (SIGTSTP) / resume (SIGCONT)
+    // handlers. Set once from `quiet`, then only read, so the handlers can reach
+    // it without locking (`OnceLock::get` is just an atomic load). `termios` is a
+    // plain C struct, hence `Send + Sync`.
+    struct Suspend {
+        fd: i32,
+        original: libc::termios,
+        quiet: libc::termios,
+    }
+    static SUSPEND: OnceLock<Suspend> = OnceLock::new();
+
+    /// Write a static escape sequence straight to stdout — `write(2)` is one of
+    /// the few calls safe to make from a signal handler (`print!` is not).
+    fn raw_write(s: &str) {
+        unsafe {
+            libc::write(libc::STDOUT_FILENO, s.as_ptr().cast(), s.len());
+        }
+    }
+
+    fn set_handler(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = handler as *const () as libc::sighandler_t;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = libc::SA_RESTART;
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+
+    /// (Re)install the SIGTSTP handler. Split out because `on_tstp` resets the
+    /// disposition to the default before stopping, so `on_cont` must re-arm it.
+    fn arm_tstp() {
+        set_handler(libc::SIGTSTP, on_tstp);
+    }
+
+    /// Ctrl-Z: show the cursor and restore the shell's terminal mode, then let
+    /// the default SIGTSTP actually stop us. `SIGTSTP` is masked for the duration
+    /// of this handler, so the re-raised signal is delivered (with the default
+    /// disposition) once we return — stopping the process cleanly.
+    extern "C" fn on_tstp(_sig: libc::c_int) {
+        if let Some(s) = SUSPEND.get() {
+            unsafe {
+                libc::tcsetattr(s.fd, libc::TCSANOW, &s.original);
+                raw_write(SHOW_CURSOR);
+                libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+                libc::raise(libc::SIGTSTP);
+            }
+        }
+    }
+
+    /// Resume (`fg`): re-arm the suspend handler, re-quiet stdin, and hide the
+    /// cursor again so the dashboard picks up where it left off.
+    extern "C" fn on_cont(_sig: libc::c_int) {
+        if let Some(s) = SUSPEND.get() {
+            arm_tstp();
+            unsafe {
+                libc::tcsetattr(s.fd, libc::TCSANOW, &s.quiet);
+            }
+            raw_write(HIDE_CURSOR);
+        }
+    }
+
+    /// Install the Ctrl-Z / resume handlers that keep the cursor in sync. Called
+    /// once, after `quiet` has captured the terminal modes.
+    fn install_suspend(fd: i32, original: libc::termios, quiet: libc::termios) {
+        if SUSPEND
+            .set(Suspend {
+                fd,
+                original,
+                quiet,
+            })
+            .is_err()
+        {
+            return;
+        }
+        arm_tstp();
+        set_handler(libc::SIGCONT, on_cont);
+    }
 
     /// Drop guard that restores the terminal mode on a normal or `?` return.
     pub struct QuietInput;
@@ -49,6 +130,8 @@ mod imp {
             SAVED.lock().unwrap().take();
             return None;
         }
+        // Keep the cursor visible in the shell if the user suspends with Ctrl-Z.
+        install_suspend(fd, term, quiet);
         Some(QuietInput)
     }
 

@@ -2,7 +2,7 @@
 //! indicator, matching caarlos0's `tmux-window-icon` script. Catppuccin Mocha
 //! colors, Nerd Font glyphs, 24-bit truecolor.
 
-use crate::model::{CheckSuite, PrNode};
+use crate::model::{CheckSuite, CheckSuites, PrNode};
 use anstyle::{RgbColor, Style};
 
 pub type Rgb = (u8, u8, u8);
@@ -146,7 +146,18 @@ pub fn fg(rgb: Rgb) -> Style {
 }
 
 /// Check-suite conclusions that count as a failure.
-pub const FAIL_CONCLUSIONS: [&str; 3] = ["FAILURE", "STARTUP_FAILURE", "CANCELLED"];
+pub const FAIL_CONCLUSIONS: [&str; 5] = [
+    "FAILURE",
+    "STARTUP_FAILURE",
+    "CANCELLED",
+    "TIMED_OUT",
+    "ACTION_REQUIRED",
+];
+
+/// Terminal-failure conclusions that are genuine even with zero runs: the suite
+/// failed before producing any check run, so the phantom filter must not mask
+/// it. A zero-run `FAILURE`/`CANCELLED`, by contrast, is a phantom subscription.
+const TERMINAL_FAIL_CONCLUSIONS: [&str; 1] = ["STARTUP_FAILURE"];
 
 /// Whether a check suite actually ran (produced ≥1 check run). Zero-run suites
 /// are phantom subscriptions GitHub ignores, so we do too; a `null` run count
@@ -155,15 +166,17 @@ fn ran(s: &CheckSuite) -> bool {
     s.check_runs.as_ref().is_some_and(|r| r.total_count > 0)
 }
 
-/// Count the check suites that ran and concluded in a failing state.
+/// Count the check suites that concluded in a failing state. A suite counts if
+/// it ran, or if it concluded in a terminal failure that legitimately produces
+/// no runs (e.g. a zero-run `STARTUP_FAILURE`), which the phantom filter must
+/// not mask.
 pub fn fail_count(suites: &[CheckSuite]) -> usize {
     suites
         .iter()
-        .filter(|s| ran(s))
         .filter(|s| {
-            s.conclusion
-                .as_deref()
-                .is_some_and(|c| FAIL_CONCLUSIONS.contains(&c))
+            s.conclusion.as_deref().is_some_and(|c| {
+                FAIL_CONCLUSIONS.contains(&c) && (ran(s) || TERMINAL_FAIL_CONCLUSIONS.contains(&c))
+            })
         })
         .count()
 }
@@ -201,20 +214,32 @@ pub fn derive_status(
 
 /// The check suites of a PR's last commit (empty if none).
 pub fn last_suites(pr: &PrNode) -> &[CheckSuite] {
-    pr.commits
-        .nodes
-        .first()
-        .map(|c| c.commit.check_suites.nodes.as_slice())
+    last_check_suites(pr)
+        .map(|s| s.nodes.as_slice())
         .unwrap_or(&[])
+}
+
+/// The last commit's check suites, with the server-reported total.
+fn last_check_suites(pr: &PrNode) -> Option<&CheckSuites> {
+    pr.commits.nodes.first().map(|c| &c.commit.check_suites)
 }
 
 /// Derive a PR node's status from its fields.
 pub fn pr_status(pr: &PrNode) -> Option<Status> {
-    derive_status(
+    let status = derive_status(
         pr.state.as_deref(),
         pr.mergeable.as_deref(),
         last_suites(pr),
-    )
+    );
+    // We only fetch the first page of check suites; if the server reports more
+    // than we received, a dropped suite could be failing — a "pass" is unproven,
+    // so surface it as pending rather than a false green.
+    if status == Some(Status::Pass)
+        && last_check_suites(pr).is_some_and(|s| s.total_count > s.nodes.len() as u64)
+    {
+        return Some(Status::Pending);
+    }
+    status
 }
 
 #[cfg(test)]
@@ -303,10 +328,22 @@ mod tests {
             Some("FAILURE"),
             Some("CANCELLED"),
             Some("STARTUP_FAILURE"),
+            Some("TIMED_OUT"),
+            Some("ACTION_REQUIRED"),
             None,
             Some("NEUTRAL"),
         ]);
-        assert_eq!(fail_count(&s), 3);
+        assert_eq!(fail_count(&s), 5);
+    }
+
+    #[test]
+    fn timed_out_counts_as_failure() {
+        let s = suites(&[Some("TIMED_OUT")]);
+        assert_eq!(fail_count(&s), 1);
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Fail)
+        );
     }
 
     #[test]
@@ -337,6 +374,25 @@ mod tests {
         // Only phantom suites -> no real CI -> none.
         let s = vec![suite(Some("FAILURE"), 0), suite(None, 0)];
         assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), None);
+    }
+
+    #[test]
+    fn zero_run_startup_failure_counts_as_failing() {
+        // A genuine terminal failure: the suite failed to start, so it produced
+        // zero runs. Unlike a zero-run FAILURE/CANCELLED phantom, it must not be
+        // masked by the phantom filter — a broken pipeline can't read green.
+        let s = vec![suite(Some("SUCCESS"), 4), suite(Some("STARTUP_FAILURE"), 0)];
+        assert_eq!(fail_count(&s), 1);
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Fail)
+        );
+        // A lone zero-run STARTUP_FAILURE is still a failure, not "none".
+        let s = vec![suite(Some("STARTUP_FAILURE"), 0)];
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Fail)
+        );
     }
 
     #[test]

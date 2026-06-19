@@ -69,14 +69,33 @@ struct Author {
 }
 
 /// Stable (non-draft, non-prerelease) release tags, most recent first.
+///
+/// Releases are paginated until enough stable tags are found (we need one more
+/// than [`RELEASES`] to have a compare base for the oldest shown release), or
+/// the pages run out. Without this, a run of prereleases (common during
+/// goreleaser `-rc.N`) could fill the first page and hide every stable tag.
 fn stable_tags(client: &Client, repo: &Repo) -> Result<Vec<String>> {
-    let path = format!("repos/{}/{}/releases?per_page=50", repo.owner, repo.name);
-    let releases: Vec<Release> = client.get(&path)?;
-    Ok(releases
-        .into_iter()
-        .filter(|r| !r.draft && !r.prerelease)
-        .map(|r| r.tag_name)
-        .collect())
+    let want = RELEASES + 1;
+    let mut tags = Vec::new();
+    // Bounded so a repo with thousands of prereleases can't loop forever.
+    for page in 1..=20 {
+        let path = format!(
+            "repos/{}/{}/releases?per_page=50&page={page}",
+            repo.owner, repo.name
+        );
+        let releases: Vec<Release> = client.get(&path)?;
+        let exhausted = releases.len() < 50;
+        tags.extend(
+            releases
+                .into_iter()
+                .filter(|r| !r.draft && !r.prerelease)
+                .map(|r| r.tag_name),
+        );
+        if tags.len() >= want || exhausted {
+            break;
+        }
+    }
+    Ok(tags)
 }
 
 /// Count my commits among a comparison's commits (the compare API returns at

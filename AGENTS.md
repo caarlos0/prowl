@@ -26,8 +26,10 @@ stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 - **Don't add a TUI framework** (ratatui, etc.): it cannot emit OSC-8 hyperlinks
   and does not degrade to plain text when piped. Both are required.
 - **Styling:** `anstyle` for SGR incl. 24-bit truecolor; OSC-8 links, the bell,
-  and the screen clear are emitted by hand. Everything is gated on a `styled`
-  flag (true only when stdout is a TTY) so piped/`--once` output is plain.
+  and the screen clear are emitted by hand. All of it is gated on a `styled`
+  flag, so output is plain when piped, on a non-TTY, or with `--once`, and styled
+  only on an interactive TTY watch. A false `styled` flag drops the SGR colors,
+  OSC-8 hyperlinks, glyphs, and the clear, leaving plain ASCII.
 - **One status palette.** Colors and glyphs live only in `status.rs` (Catppuccin
   Mocha + Nerd Font). Don't redefine them elsewhere.
 
