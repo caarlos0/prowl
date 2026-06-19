@@ -62,11 +62,13 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
         } else {
             Cell::styled(format!("#{}", r.number), status::fg(BLUE))
         };
-        let state_text = r.merge_state.clone().unwrap_or_else(|| "?".to_string());
-        let state = Cell::styled(
-            status::state_label(&state_text).to_string(),
-            status::state_style(&state_text),
-        );
+        let state_raw = r.merge_state.clone().unwrap_or_else(|| "?".to_string());
+        let state_text = if ascii {
+            status::state_label(&state_raw).to_string()
+        } else {
+            status::state_glyph(&state_raw).to_string()
+        };
+        let state = Cell::styled(state_text, status::state_style(&state_raw));
         let queue_text = match &r.queue {
             Some((pos, state)) => format!("#{pos} {state}"),
             None => "-".to_string(),

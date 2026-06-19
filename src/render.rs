@@ -245,25 +245,39 @@ pub fn reference(
         }
     }
     for st in ordered {
-        let label = status::state_label(st);
         let meaning = status::state_meaning(st);
-        let tail = if meaning.is_empty() {
-            String::new()
+        let c = status::state_style(st);
+        if ascii {
+            // Label form (matches the ASCII/piped STATE column).
+            let label = status::state_label(st);
+            let tail = if meaning.is_empty() {
+                String::new()
+            } else {
+                format!(" \u{2014} {meaning}")
+            };
+            if styled {
+                let _ = writeln!(
+                    out,
+                    "  {}{label}{}{}{tail}{}",
+                    c.render(),
+                    c.render_reset(),
+                    dim.render(),
+                    dim.render_reset()
+                );
+            } else {
+                let _ = writeln!(out, "  {label}{tail}");
+            }
         } else {
-            format!(" \u{2014} {meaning}")
-        };
-        if styled {
-            let c = status::state_style(st);
+            // Glyph form (matches the Nerd Font STATE column); always styled.
+            let g = status::state_glyph(st);
             let _ = writeln!(
                 out,
-                "  {}{label}{}{}{tail}{}",
+                "  {}{g}{} {}{meaning}{}",
                 c.render(),
                 c.render_reset(),
                 dim.render(),
                 dim.render_reset()
             );
-        } else {
-            let _ = writeln!(out, "  {label}{tail}");
         }
     }
     out

@@ -124,6 +124,21 @@ pub fn state_label(state: &str) -> &str {
     }
 }
 
+/// Nerd Font glyph for a `mergeStateStatus` value (FontAwesome range, so it
+/// renders in any Nerd Font). Used on a TTY; `--ascii`/piped output falls back
+/// to [`state_label`].
+pub fn state_glyph(state: &str) -> char {
+    match state {
+        "CLEAN" | "HAS_HOOKS" => '\u{f00c}', // check
+        "UNSTABLE" => '\u{f06a}',            // exclamation-circle
+        "BLOCKED" => '\u{f023}',             // lock
+        "BEHIND" => '\u{f063}',              // arrow-down
+        "DIRTY" => '\u{f127}',               // broken link (conflict)
+        "DRAFT" => '\u{f040}',               // pencil
+        _ => '\u{f128}',                     // question mark
+    }
+}
+
 /// A truecolor foreground style.
 pub fn fg(rgb: Rgb) -> Style {
     Style::new().fg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into()))
@@ -319,5 +334,20 @@ mod tests {
         assert_eq!(state_label("DIRTY"), "CONFLICTS");
         assert_eq!(state_label("CLEAN"), "CLEAN");
         assert_eq!(state_label("BLOCKED"), "BLOCKED");
+    }
+
+    #[test]
+    fn state_glyphs_are_distinct_from_status_glyphs() {
+        let states = ["CLEAN", "UNSTABLE", "BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"];
+        let status_glyphs: Vec<char> = ORDER.iter().map(|s| status_style(*s).0).collect();
+        for st in states {
+            let g = state_glyph(st);
+            assert!(
+                !status_glyphs.contains(&g),
+                "state glyph for {st} collides with a status glyph"
+            );
+        }
+        assert_eq!(state_glyph("CLEAN"), '\u{f00c}');
+        assert_eq!(state_glyph("DIRTY"), '\u{f127}');
     }
 }

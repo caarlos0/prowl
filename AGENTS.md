@@ -38,7 +38,9 @@ everything else is testable modules:
   `parse_graphql()`.
 - `model.rs` — serde structs + `fetch_*` for the three queries; query strings.
 - `status.rs` — **the** palette: `Status`, `status_style`, glyphs/ASCII,
-  `derive_status` (precedence), `fail_count`, `state_style`, legend names.
+  `derive_status` (precedence), `fail_count`; and the `mergeStateStatus`
+  helpers `state_style`, `state_label` (DIRTY → CONFLICTS), `state_glyph`,
+  `state_meaning`.
 - `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8,
   headers, reference legend, status line, loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
