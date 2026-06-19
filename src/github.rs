@@ -57,21 +57,11 @@ pub fn detect_repo() -> Result<Repo> {
 /// or `notgithub.com` are rejected.
 fn parse_remote(url: &str) -> Option<Repo> {
     let s = url.trim().trim_end_matches(".git");
-    // Split the remote into (host, path), handling both scheme URLs
-    // (`https://host/path`, `ssh://user@host/path`) and the scp-like ssh
-    // form (`user@host:path`).
-    let (host, path) = if let Some((_, rest)) = s.split_once("://") {
-        let rest = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
-        rest.split_once('/')?
-    } else {
-        let (userhost, path) = s.split_once(':')?;
-        let host = userhost.rsplit_once('@').map_or(userhost, |(_, h)| h);
-        (host, path)
-    };
-    if host != "github.com" {
-        return None;
-    }
-    let (owner, name) = path.split_once('/')?;
+    let s = s.split_once("://").map_or(s, |(_, rest)| rest); // drop any scheme
+    let s = s.rsplit_once('@').map_or(s, |(_, rest)| rest); // drop any user@
+    let rest = s.strip_prefix("github.com")?; // exact host prefix
+    let rest = rest.strip_prefix([':', '/'])?; // host must end at a separator
+    let (owner, name) = rest.split_once('/')?;
     if owner.is_empty() || name.is_empty() || name.contains('/') {
         return None;
     }
