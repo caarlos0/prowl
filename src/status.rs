@@ -1,0 +1,191 @@
+//! Shared status palette — the single source of truth for the CI/PR status
+//! indicator, matching caarlos0's `tmux-window-icon` script. Catppuccin Mocha
+//! colors, Nerd Font glyphs, 24-bit truecolor.
+
+use crate::model::{CheckSuite, PrNode};
+use anstyle::{RgbColor, Style};
+
+pub type Rgb = (u8, u8, u8);
+
+// Catppuccin Mocha palette (the subset the dashboard uses).
+pub const GREEN: Rgb = (166, 227, 161); // #a6e3a1
+pub const RED: Rgb = (243, 139, 168); // #f38ba8
+pub const YELLOW: Rgb = (249, 226, 175); // #f9e2af
+pub const MAUVE: Rgb = (203, 166, 247); // #cba6f7
+pub const PEACH: Rgb = (250, 179, 135); // #fab387
+pub const BLUE: Rgb = (137, 180, 250); // #89b4fa
+pub const LAVENDER: Rgb = (180, 190, 254); // #b4befe
+
+/// CI/PR status. Glyphs/colors are fixed by the shared palette.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    Merged,
+    Conflicts,
+    Fail,
+    Pending,
+    Pass,
+}
+
+/// Glyph + truecolor for a status — the single lookup both views share.
+pub fn status_style(s: Status) -> (char, Rgb) {
+    match s {
+        Status::Pass => ('\u{F058}', GREEN),
+        Status::Fail => ('\u{F057}', RED),
+        Status::Pending => ('\u{F111}', YELLOW),
+        Status::Merged => ('\u{E0A0}', MAUVE),
+        Status::Conflicts => ('\u{F071}', PEACH),
+    }
+}
+
+/// ASCII fallback letter for a status (non-Nerd-Font terminals / piped output).
+pub fn status_ascii(s: Status) -> char {
+    match s {
+        Status::Pass => 'P',
+        Status::Fail => 'x',
+        Status::Pending => '.',
+        Status::Merged => 'm',
+        Status::Conflicts => '!',
+    }
+}
+
+/// The glyph to render, honoring the ASCII toggle.
+pub fn glyph(s: Status, ascii: bool) -> char {
+    if ascii {
+        status_ascii(s)
+    } else {
+        status_style(s).0
+    }
+}
+
+/// A truecolor foreground style.
+pub fn fg(rgb: Rgb) -> Style {
+    Style::new().fg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into()))
+}
+
+/// Check-suite conclusions that count as a failure.
+pub const FAIL_CONCLUSIONS: [&str; 3] = ["FAILURE", "STARTUP_FAILURE", "CANCELLED"];
+
+/// Count the check suites that concluded in a failing state.
+pub fn fail_count(suites: &[CheckSuite]) -> usize {
+    suites
+        .iter()
+        .filter(|s| {
+            s.conclusion
+                .as_deref()
+                .is_some_and(|c| FAIL_CONCLUSIONS.contains(&c))
+        })
+        .count()
+}
+
+/// Derive a PR's status with the precedence
+/// `merged > conflicts > fail > pending > pass > none`.
+pub fn derive_status(
+    state: Option<&str>,
+    mergeable: Option<&str>,
+    suites: &[CheckSuite],
+) -> Option<Status> {
+    if state == Some("MERGED") {
+        return Some(Status::Merged);
+    }
+    if mergeable == Some("CONFLICTING") {
+        return Some(Status::Conflicts);
+    }
+    if fail_count(suites) > 0 {
+        return Some(Status::Fail);
+    }
+    if suites.iter().any(|s| s.conclusion.is_none()) {
+        return Some(Status::Pending);
+    }
+    if !suites.is_empty() {
+        return Some(Status::Pass);
+    }
+    None
+}
+
+/// The check suites of a PR's last commit (empty if none).
+pub fn last_suites(pr: &PrNode) -> &[CheckSuite] {
+    pr.commits
+        .nodes
+        .first()
+        .map(|c| c.commit.check_suites.nodes.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Derive a PR node's status from its fields.
+pub fn pr_status(pr: &PrNode) -> Option<Status> {
+    derive_status(pr.state.as_deref(), pr.mergeable.as_deref(), last_suites(pr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn suites(concls: &[Option<&str>]) -> Vec<CheckSuite> {
+        concls
+            .iter()
+            .map(|c| CheckSuite {
+                conclusion: c.map(str::to_string),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn palette_glyphs_and_colors_are_exact() {
+        assert_eq!(status_style(Status::Pass), ('\u{F058}', (166, 227, 161)));
+        assert_eq!(status_style(Status::Fail), ('\u{F057}', (243, 139, 168)));
+        assert_eq!(status_style(Status::Pending), ('\u{F111}', (249, 226, 175)));
+        assert_eq!(status_style(Status::Merged), ('\u{E0A0}', (203, 166, 247)));
+        assert_eq!(status_style(Status::Conflicts), ('\u{F071}', (250, 179, 135)));
+    }
+
+    #[test]
+    fn ascii_letters() {
+        assert_eq!(status_ascii(Status::Pass), 'P');
+        assert_eq!(status_ascii(Status::Fail), 'x');
+        assert_eq!(status_ascii(Status::Pending), '.');
+        assert_eq!(status_ascii(Status::Merged), 'm');
+        assert_eq!(status_ascii(Status::Conflicts), '!');
+    }
+
+    #[test]
+    fn precedence_is_respected() {
+        // merged beats everything, even conflicts + failures.
+        let s = suites(&[Some("FAILURE")]);
+        assert_eq!(
+            derive_status(Some("MERGED"), Some("CONFLICTING"), &s),
+            Some(Status::Merged)
+        );
+        // conflicts beats failing checks.
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("CONFLICTING"), &s),
+            Some(Status::Conflicts)
+        );
+        // fail beats pending.
+        let s = suites(&[Some("FAILURE"), None]);
+        assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), Some(Status::Fail));
+        // pending beats pass.
+        let s = suites(&[Some("SUCCESS"), None]);
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Pending)
+        );
+        // all concluded, no failures -> pass.
+        let s = suites(&[Some("SUCCESS"), Some("NEUTRAL")]);
+        assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), Some(Status::Pass));
+        // no check suites -> none.
+        assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &[]), None);
+    }
+
+    #[test]
+    fn counts_only_failing_conclusions() {
+        let s = suites(&[
+            Some("SUCCESS"),
+            Some("FAILURE"),
+            Some("CANCELLED"),
+            Some("STARTUP_FAILURE"),
+            None,
+            Some("NEUTRAL"),
+        ]);
+        assert_eq!(fail_count(&s), 3);
+    }
+}
