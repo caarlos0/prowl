@@ -2,7 +2,7 @@
 //! indicator, matching caarlos0's `tmux-window-icon` script. Catppuccin Mocha
 //! colors, Nerd Font glyphs, 24-bit truecolor.
 
-use crate::model::{CheckSuite, PrNode};
+use crate::model::{CheckSuite, CheckSuites, PrNode};
 use anstyle::{RgbColor, Style};
 
 pub type Rgb = (u8, u8, u8);
@@ -201,20 +201,32 @@ pub fn derive_status(
 
 /// The check suites of a PR's last commit (empty if none).
 pub fn last_suites(pr: &PrNode) -> &[CheckSuite] {
-    pr.commits
-        .nodes
-        .first()
-        .map(|c| c.commit.check_suites.nodes.as_slice())
+    last_check_suites(pr)
+        .map(|s| s.nodes.as_slice())
         .unwrap_or(&[])
+}
+
+/// The last commit's check suites, with the server-reported total.
+fn last_check_suites(pr: &PrNode) -> Option<&CheckSuites> {
+    pr.commits.nodes.first().map(|c| &c.commit.check_suites)
 }
 
 /// Derive a PR node's status from its fields.
 pub fn pr_status(pr: &PrNode) -> Option<Status> {
-    derive_status(
+    let status = derive_status(
         pr.state.as_deref(),
         pr.mergeable.as_deref(),
         last_suites(pr),
-    )
+    );
+    // We only fetch the first page of check suites; if the server reports more
+    // than we received, a dropped suite could be failing — a "pass" is unproven,
+    // so surface it as pending rather than a false green.
+    if status == Some(Status::Pass)
+        && last_check_suites(pr).is_some_and(|s| s.total_count > s.nodes.len() as u64)
+    {
+        return Some(Status::Pending);
+    }
+    status
 }
 
 #[cfg(test)]
