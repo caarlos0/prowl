@@ -16,13 +16,7 @@
             "nodes": [
               {
                 "commit": {
-                  "checkSuites": {
-                    "totalCount": 2,
-                    "nodes": [
-                      { "conclusion": "SUCCESS", "checkRuns": { "totalCount": 3 } },
-                      { "conclusion": null, "checkRuns": null }
-                    ]
-                  }
+                  "checkSuites": null
                 }
               }
             ]

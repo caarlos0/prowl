@@ -17,6 +17,7 @@
               {
                 "commit": {
                   "checkSuites": {
+                    "totalCount": 12,
                     "nodes": [
                       {
                         "conclusion": "SUCCESS",
@@ -112,6 +113,7 @@
               {
                 "commit": {
                   "checkSuites": {
+                    "totalCount": 13,
                     "nodes": [
                       {
                         "conclusion": "SUCCESS",
@@ -213,6 +215,7 @@
               {
                 "commit": {
                   "checkSuites": {
+                    "totalCount": 0,
                     "nodes": []
                   }
                 }

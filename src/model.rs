@@ -1,4 +1,4 @@
-//! Typed serde models for the three `gh api graphql` queries, plus the fetch
+//! Typed serde models for the three GitHub GraphQL queries, plus the fetch
 //! helpers that run them. Queries are sent verbatim (the merged query's page
 //! size is the only thing we interpolate, so `--merged-limit` is honored).
 
@@ -92,7 +92,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
       ... on PullRequest {
         number title url state mergeable mergeStateStatus isDraft updatedAt
         mergeQueueEntry { position state }
-        commits(last: 1) { nodes { commit { checkSuites(first: 50) { nodes { conclusion checkRuns(first: 1) { totalCount } } } } } }
+        commits(last: 1) { nodes { commit { checkSuites(first: 50) { totalCount nodes { conclusion checkRuns(first: 1) { totalCount } } } } } }
       }
     }
   }
@@ -150,6 +150,10 @@ pub struct Commit {
 
 #[derive(Debug, Deserialize)]
 pub struct CheckSuites {
+    /// Total suites the server reports, which can exceed the page we fetched.
+    /// Used to detect a truncated page so a dropped suite can't render green.
+    #[serde(rename = "totalCount")]
+    pub total_count: u64,
     pub nodes: Vec<CheckSuite>,
 }
 
@@ -173,7 +177,7 @@ pub struct CheckRuns {
 
 pub fn mine_search(repo: &Repo, me: &str) -> String {
     format!(
-        "repo:{}/{} is:pr is:open author:{} archived:false",
+        "repo:{}/{} is:pr is:open author:{} archived:false sort:updated-desc",
         repo.owner, repo.name, me
     )
 }

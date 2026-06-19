@@ -1,4 +1,4 @@
-//! Offline, fixture-based tests: real (and a crafted) `gh api graphql`
+//! Offline, fixture-based tests: real (and a crafted) GitHub GraphQL API
 //! responses are parsed through the same path the binary uses, then turned into
 //! rows and rendered. No network access.
 
@@ -123,6 +123,22 @@ fn mine_tolerates_null_check_runs_and_partial_errors() {
     // The accessible suite passed; the inaccessible (null) one is ignored.
     assert_eq!(rows[0].status, Some(Status::Pass));
     assert_eq!(rows[0].fail, 0);
+}
+
+#[test]
+fn mine_partial_null_surfaces_graphql_error() {
+    // `data` is present but a required (non-Option) field — `checkSuites` — is
+    // null, so typing the data fails. With an `errors` array attached, the real
+    // GitHub message must surface instead of a generic JSON parse error.
+    let err = github::parse_graphql::<MineData>(
+        include_str!("fixtures/mine_null_checksuites.json").as_bytes(),
+    )
+    .expect_err("a null non-Option field should fail to type");
+    assert!(
+        err.to_string()
+            .contains("Resource not accessible by integration"),
+        "expected the GraphQL error to surface, got: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
