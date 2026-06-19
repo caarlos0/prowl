@@ -23,3 +23,11 @@ ureq = { version = "3.3.0", default-features = false, features = ["json", "rustl
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# On Linux the default keyring backend is the in-process `mock`, which doesn't
+# persist across runs. Use the kernel keyutils backend (`linux-native`): it
+# persists the token in the user's session keyring with no system C library
+# (the `*-sync-persistent` combo feature would pull in dbus/libdbus-sys, which
+# needs libdbus-1-dev on the host). macOS/Windows feature sets are unchanged.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "^3", default-features = false, features = ["linux-native"] }
