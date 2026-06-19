@@ -1,4 +1,4 @@
-//! Typed serde models for the three `gh api graphql` queries, plus the fetch
+//! Typed serde models for the three GitHub GraphQL queries, plus the fetch
 //! helpers that run them. Queries are sent verbatim (the merged query's page
 //! size is the only thing we interpolate, so `--merged-limit` is honored).
 

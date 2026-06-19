@@ -5,8 +5,8 @@ Thanks for your interest in prowl!
 ## Prerequisites
 
 - A recent Rust toolchain (the crate uses edition 2024; Rust 1.95+).
-- The [`gh`](https://cli.github.com) CLI, authenticated (`gh auth login`) — prowl
-  shells out to it, and the live `--once` run uses it.
+- A GitHub token for live runs: set `PROWL_TOKEN` or `GITHUB_TOKEN`, or run
+  `prowl --login` once for the browser device flow. No `gh` CLI needed.
 
 ## Build, run, test, lint
 
@@ -34,8 +34,8 @@ clippy is clean with `-D warnings`, and the tests pass without network access.
 
 ## Tests
 
-Tests run fully offline against JSON fixtures captured from `gh api graphql`
-(`tests/fixtures/`). When you change a GraphQL query or the parsing/derivation
+Tests run fully offline against JSON fixtures captured from the GitHub GraphQL
+API (`tests/fixtures/`). When you change a GraphQL query or the parsing/derivation
 logic, re-capture or hand-edit the relevant fixture and update the assertions in
 `tests/parsing.rs` (and the per-module unit tests).
 
