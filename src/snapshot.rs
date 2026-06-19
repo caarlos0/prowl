@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn fail_count_and_title_changes_are_detected() {
         let base = pr_row(1, Some(Status::Fail), 1, "t");
-        let s = Snapshot::build(None, None, Some(&[base.clone()]));
+        let s = Snapshot::build(None, None, Some(std::slice::from_ref(&base)));
         let more_fails = Snapshot::build(None, None, Some(&[pr_row(1, Some(Status::Fail), 2, "t")]));
         let retitled = Snapshot::build(None, None, Some(&[pr_row(1, Some(Status::Fail), 1, "t2")]));
         assert_ne!(s, more_fails);

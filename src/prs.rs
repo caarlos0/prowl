@@ -38,7 +38,7 @@ pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
             }
         })
         .collect();
-    rows.sort_by(|a, b| b.number.cmp(&a.number));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.number));
     rows
 }
 

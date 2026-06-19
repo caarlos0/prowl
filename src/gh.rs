@@ -46,8 +46,20 @@ pub fn run(args: &[&str]) -> Result<Vec<u8>> {
         .output()
         .context("failed to run `gh` (is the GitHub CLI installed and on PATH?)")?;
     if !out.status.success() {
+        // A short label (e.g. "api graphql") rather than the full args, which
+        // for GraphQL would dump the entire query.
+        let label = args
+            .iter()
+            .take(2)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("`gh {}` failed: {}", args.join(" "), stderr.trim());
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            bail!("`gh {label}` failed ({})", out.status);
+        }
+        bail!("`gh {label}` failed: {detail}");
     }
     Ok(out.stdout)
 }

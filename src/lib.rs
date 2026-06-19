@@ -4,9 +4,6 @@
 //! thin binary so the parsing/rendering/change-detection logic can be exercised
 //! by offline, fixture-based tests under `tests/`.
 
-// TODO(quality): remove this once every module is wired into the render path.
-#![allow(dead_code)]
-
 pub mod cli;
 pub mod gh;
 pub mod merged;
