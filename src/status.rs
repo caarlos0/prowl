@@ -126,6 +126,15 @@ pub fn state_style(state: &str) -> Style {
     }
 }
 
+/// Display label for a `mergeStateStatus` value. GitHub's `DIRTY` reads as
+/// `CONFLICTS`; everything else is shown verbatim.
+pub fn state_label(state: &str) -> &str {
+    match state {
+        "DIRTY" => "CONFLICTS",
+        other => other,
+    }
+}
+
 /// A truecolor foreground style.
 pub fn fg(rgb: Rgb) -> Style {
     Style::new().fg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into()))
@@ -314,5 +323,12 @@ mod tests {
         assert_eq!(state_style("BLOCKED"), fg(YELLOW));
         assert_eq!(state_style("DIRTY"), fg(RED));
         assert_eq!(state_style("WHATEVER"), Style::new().dimmed());
+    }
+
+    #[test]
+    fn dirty_is_labelled_conflicts() {
+        assert_eq!(state_label("DIRTY"), "CONFLICTS");
+        assert_eq!(state_label("CLEAN"), "CLEAN");
+        assert_eq!(state_label("BLOCKED"), "BLOCKED");
     }
 }

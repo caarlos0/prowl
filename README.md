@@ -10,8 +10,8 @@ existing GitHub auth — no tokens, no config.
 
 ```
 ▌ Open PRs  3
-   P  #6656  feat: goreleaser check --allow-deprecations  CLEAN    -  -  …/pull/6656
- ▸ !  #6475  feat: install scripts                        DIRTY    -  3  …/pull/6475
+   P  #6656  feat: goreleaser check --allow-deprecations  CLEAN      -  -  …/pull/6656
+ ▸ !  #6475  feat: install scripts                        CONFLICTS  -  3  …/pull/6475
 
 ▌ Merged PRs  1
    m  #6649  fix(mcp): clean subfolder path               main  1w   …/pull/6649

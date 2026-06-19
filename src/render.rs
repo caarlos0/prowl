@@ -247,6 +247,7 @@ pub fn reference(
         }
     }
     for st in ordered {
+        let label = status::state_label(st);
         let meaning = status::state_meaning(st);
         let tail = if meaning.is_empty() {
             String::new()
@@ -257,14 +258,14 @@ pub fn reference(
             let c = status::state_style(st);
             let _ = writeln!(
                 out,
-                "  {}{st}{}{}{tail}{}",
+                "  {}{label}{}{}{tail}{}",
                 c.render(),
                 c.render_reset(),
                 dim.render(),
                 dim.render_reset()
             );
         } else {
-            let _ = writeln!(out, "  {st}{tail}");
+            let _ = writeln!(out, "  {label}{tail}");
         }
     }
     out
