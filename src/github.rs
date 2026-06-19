@@ -52,11 +52,26 @@ pub fn detect_repo() -> Result<Repo> {
 }
 
 /// Extract `owner/name` from a github.com remote URL (https or ssh forms).
+///
+/// The host is compared exactly so look-alikes such as `github.com.evil.tld`
+/// or `notgithub.com` are rejected.
 fn parse_remote(url: &str) -> Option<Repo> {
     let s = url.trim().trim_end_matches(".git");
-    let idx = s.find("github.com")?;
-    let rest = s[idx + "github.com".len()..].trim_start_matches([':', '/']);
-    let (owner, name) = rest.split_once('/')?;
+    // Split the remote into (host, path), handling both scheme URLs
+    // (`https://host/path`, `ssh://user@host/path`) and the scp-like ssh
+    // form (`user@host:path`).
+    let (host, path) = if let Some((_, rest)) = s.split_once("://") {
+        let rest = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+        rest.split_once('/')?
+    } else {
+        let (userhost, path) = s.split_once(':')?;
+        let host = userhost.rsplit_once('@').map_or(userhost, |(_, h)| h);
+        (host, path)
+    };
+    if host != "github.com" {
+        return None;
+    }
+    let (owner, name) = path.split_once('/')?;
     if owner.is_empty() || name.is_empty() || name.contains('/') {
         return None;
     }
@@ -197,7 +212,15 @@ mod tests {
             assert_eq!(r.owner, "goreleaser");
             assert_eq!(r.name, "goreleaser");
         }
-        assert!(parse_remote("https://gitlab.com/a/b.git").is_none());
+        for url in [
+            "https://gitlab.com/a/b.git",
+            "https://github.com.evil.tld/a/b.git",
+            "https://notgithub.com/a/b.git",
+            "git@github.com.evil.tld:a/b.git",
+            "ssh://git@notgithub.com/a/b.git",
+        ] {
+            assert!(parse_remote(url).is_none(), "{url}");
+        }
     }
 
     #[test]
