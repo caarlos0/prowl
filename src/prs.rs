@@ -123,6 +123,7 @@ mod tests {
                 nodes: vec![CommitNode {
                     commit: Commit {
                         check_suites: crate::model::CheckSuites {
+                            total_count: concls.len() as u64,
                             nodes: concls
                                 .iter()
                                 .map(|c| CheckSuite {
@@ -168,5 +169,15 @@ mod tests {
         });
         let rows = build_rows(vec![p]);
         assert_eq!(rows[0].queue, Some((3, "QUEUED".to_string())));
+    }
+
+    #[test]
+    fn truncated_check_suites_degrade_pass_to_pending() {
+        // The server reports 50 suites but we only fetched 1; a failing suite
+        // could be hiding beyond the page, so the green is unproven -> pending.
+        let mut p = pr(1, "MERGEABLE", "CLEAN", &[Some("SUCCESS")]);
+        p.commits.nodes[0].commit.check_suites.total_count = 50;
+        let rows = build_rows(vec![p]);
+        assert_eq!(rows[0].status, Some(Status::Pending));
     }
 }
