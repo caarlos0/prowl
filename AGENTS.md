@@ -52,6 +52,8 @@ everything else is testable modules:
 - `commits.rs` — "commits by me" counts for the previous/next stable release
   (GitHub releases + compare REST APIs); best-effort, never fatal.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
+- `cache.rs` — per-repo on-disk cache of the last `Sections` under
+  `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 ## Key behaviors
@@ -66,6 +68,10 @@ everything else is testable modules:
   not ring). The first refresh is silent. Changed rows get a `▸` marker.
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
+- **Cache:** on a watch start, prowl paints the cached `Sections` immediately
+  (status line `cached HH:MM:SS · refreshing…`), seeds change-detection from it
+  so the first live refresh highlights what changed while prowl wasn't running,
+  but stays silent (no startup bell). `--no-cache` skips both read and write.
 
 ## The three GraphQL queries + REST (see `model.rs` / `commits.rs`)
 

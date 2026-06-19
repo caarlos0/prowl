@@ -5,7 +5,7 @@ use crate::render::{Cell, Table};
 use crate::status::{self, BLUE, YELLOW};
 use anstyle::Style;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueRow {
     pub position: i64,
     pub number: i64,

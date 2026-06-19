@@ -5,6 +5,7 @@
 //! by offline, fixture-based tests under `tests/`.
 
 pub mod auth;
+pub mod cache;
 pub mod changes;
 pub mod cli;
 pub mod commits;
@@ -25,7 +26,8 @@ use github::{Client, Repo};
 use std::io::{IsTerminal, Write};
 
 /// A fetched snapshot of every enabled section (`None` = section disabled).
-struct Sections {
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Sections {
     merged: Option<Vec<merged::MergedRow>>,
     queue: Option<Vec<queue::QueueRow>>,
     prs: Option<Vec<prs::PrRow>>,
@@ -201,6 +203,14 @@ fn trailing(change: Option<bool>, next: Option<&str>, styled: bool) -> String {
     s
 }
 
+/// Trailing line shown under the instant cached paint, before the first fetch.
+fn cached_trailing(saved_at: &str, styled: bool) -> String {
+    let msg = format!("cached {saved_at} \u{00b7} refreshing\u{2026}");
+    let mut s = render::empty_line(&msg, styled);
+    s.push('\n');
+    s
+}
+
 /// Render the "Commits" section: my commit counts for the previous and next
 /// stable release.
 fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
@@ -282,16 +292,22 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
+    let repo = match &cli.repo {
+        Some(slug) => Repo::parse(slug)?,
+        None => github::detect_repo()?,
+    };
+
     let watch = styled && !cli.once;
 
-    // In watch mode, hide the cursor for the whole session (starting with the
-    // loading screen) and make sure it is restored on every exit path: the
-    // CursorGuard handles a normal/`?`-error return, and the Ctrl-C handler
-    // handles SIGINT (which would otherwise skip the guard).
-    //
-    // Paint a loading screen up front, too: resolving the repo/user and the
-    // first fetch are several API calls, and we don't want to stare at a blank
-    // or stale screen until the first frame is ready.
+    // Change-detection / last-good state, seeded from the cache below so the
+    // first refresh can highlight what changed while prowl wasn't running.
+    let mut prev: Option<Tracker> = None;
+    let mut last_good: Option<Sections> = None;
+
+    // In watch mode, hide the cursor for the whole session and restore it on
+    // every exit path (CursorGuard for normal/`?` returns, the Ctrl-C handler
+    // for SIGINT). Then paint instantly from the cache if we have it — otherwise
+    // a loading screen — while the first live fetch runs.
     let _cursor = if watch {
         print!("{}", render::HIDE_CURSOR);
         let _ = ctrlc::set_handler(|| {
@@ -299,17 +315,36 @@ pub fn run() -> Result<()> {
             let _ = std::io::stdout().flush();
             std::process::exit(130);
         });
-        println!("{}{}", render::clear(), render::loading(styled));
-        std::io::stdout().flush()?;
+        match (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
+            Some(c) => {
+                let mut frame = String::from(render::clear());
+                frame.push_str(&render_body(
+                    &c.sections,
+                    &cli,
+                    &repo,
+                    &c.me,
+                    &Changes::default(),
+                    styled,
+                ));
+                frame.push_str(&cached_trailing(&c.saved_at, styled));
+                print!("{frame}");
+                std::io::stdout().flush()?;
+                prev = Some(Tracker::build(
+                    c.sections.prs.as_deref(),
+                    c.sections.merged.as_deref(),
+                ));
+                last_good = Some(c.sections);
+            }
+            None => {
+                println!("{}{}", render::clear(), render::loading(styled));
+                std::io::stdout().flush()?;
+            }
+        }
         Some(CursorGuard)
     } else {
         None
     };
 
-    let repo = match &cli.repo {
-        Some(slug) => Repo::parse(slug)?,
-        None => github::detect_repo()?,
-    };
     let me = client.me()?;
     // The default branch is the head of the "next release" commit range.
     // Resolved once; falls back to `main` if it can't be determined.
@@ -320,6 +355,9 @@ pub fn run() -> Result<()> {
     // Single render: --once, or whenever stdout is not a TTY.
     if cli.once || !styled {
         let sections = fetch(&cli, &client, &repo, &me, &default_branch)?;
+        if !cli.no_cache {
+            cache::save(&repo, &me, &sections);
+        }
         let frame = render_body(&sections, &cli, &repo, &me, &Changes::default(), styled)
             + &trailing(None, None, styled);
         print!("{frame}");
@@ -330,9 +368,9 @@ pub fn run() -> Result<()> {
     // Watch loop. Each tick clears the screen and re-renders; the bell rings
     // once when a PR of mine merges or an open PR's status changes, and those
     // rows are flagged on the redraw. A failed fetch keeps the last good data,
-    // shows a dim error line, and does not ring.
-    let mut prev: Option<Tracker> = None;
-    let mut last_good: Option<Sections> = None;
+    // shows a dim error line, and does not ring. `armed` keeps the first
+    // refresh after a cached start from ringing (it still highlights changes).
+    let mut armed = false;
     loop {
         match fetch(&cli, &client, &repo, &me, &default_branch) {
             Ok(sections) => {
@@ -348,8 +386,12 @@ pub fn run() -> Result<()> {
                 print!("{frame}");
                 std::io::stdout().flush()?;
 
-                if bell && !cli.no_bell {
+                if armed && bell && !cli.no_bell {
                     render::ring_bell();
+                }
+                armed = true;
+                if !cli.no_cache {
+                    cache::save(&repo, &me, &sections);
                 }
                 prev = Some(tracker);
                 last_good = Some(sections);

@@ -51,6 +51,10 @@ pub struct Cli {
     /// Authenticate with GitHub (device flow) and exit.
     #[arg(long)]
     pub login: bool,
+
+    /// Don't read or write the on-disk cache (always start from a fresh fetch).
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 /// The dashboard sections, usable with `--only`.

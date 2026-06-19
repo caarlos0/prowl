@@ -3,7 +3,8 @@
 A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
 **merge queue**, and your **recently merged PRs**. It refreshes on an interval
 and **rings the terminal bell** the moment one of your PRs merges or an open
-PR's CI/merge status changes — and flags whatever changed.
+PR's CI/merge status changes — and flags whatever changed. On startup it paints
+instantly from a local cache, then refreshes in the background.
 
 It talks to the GitHub API directly. On first run it walks you through a
 one-time browser **device login** (or set `GITHUB_TOKEN`) — no `gh` CLI needed.

@@ -5,7 +5,7 @@ use crate::github::{Client, Repo};
 use anyhow::Result;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitStats {
     /// False when the stats could not be computed (kept best-effort so a
     /// failure here never takes down the rest of the dashboard).
@@ -18,7 +18,7 @@ pub struct CommitStats {
     pub next: Option<Count>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Count {
     pub mine: usize,
     /// True if the range exceeded the compare API's 250-commit window, so

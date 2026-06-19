@@ -8,7 +8,7 @@ use crate::timefmt;
 use anstyle::Style;
 use std::collections::HashSet;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MergedRow {
     pub number: i64,
     pub title: String,

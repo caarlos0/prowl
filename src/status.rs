@@ -19,7 +19,7 @@ pub const TEAL: Rgb = (148, 226, 213); // #94e2d5
 pub const PINK: Rgb = (245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
 
 /// CI/PR status. Glyphs/colors are fixed by the shared palette.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     Merged,
     Conflicts,

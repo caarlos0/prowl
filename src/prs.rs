@@ -8,7 +8,7 @@ use crate::status::{self, BLUE, RED, Status, YELLOW};
 use anstyle::Style;
 use std::collections::HashSet;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrRow {
     pub number: i64,
     pub is_draft: bool,
