@@ -227,14 +227,14 @@ pub fn reference(
             let g = status::fg(status::status_style(s).1);
             let _ = writeln!(
                 out,
-                "  {}{ch}{} {}{meaning}{}",
+                "  {}{ch}{}  {}{meaning}{}",
                 g.render(),
                 g.render_reset(),
                 dim.render(),
                 dim.render_reset()
             );
         } else {
-            let _ = writeln!(out, "  {ch} {meaning}");
+            let _ = writeln!(out, "  {ch}  {meaning}");
         }
     }
     if has_none {
@@ -280,7 +280,7 @@ pub fn reference(
             let g = status::state_glyph(st);
             let _ = writeln!(
                 out,
-                "  {}{g}{} {}{meaning}{}",
+                "  {}{g}{}  {}{meaning}{}",
                 c.render(),
                 c.render_reset(),
                 dim.render(),
