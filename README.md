@@ -1,5 +1,7 @@
 # prowl
 
+> A tiny terminal radar for your GitHub pull requests.
+
 A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
 **merge queue**, your **recently merged PRs**, and the **commits you've
 shipped** per release. It refreshes on an interval and **rings the terminal
