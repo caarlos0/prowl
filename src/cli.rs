@@ -131,14 +131,17 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     let n: u64 = num
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid duration `{s}`"))?;
-    let secs = match unit {
-        "" | "s" | "sec" | "secs" => n,
-        "m" | "min" | "mins" => n * 60,
-        "h" | "hr" | "hrs" => n * 3600,
-        "d" | "day" | "days" => n * 86_400,
-        "w" | "wk" | "wks" => n * 604_800,
+    let factor: u64 = match unit {
+        "" | "s" | "sec" | "secs" => 1,
+        "m" | "min" | "mins" => 60,
+        "h" | "hr" | "hrs" => 3600,
+        "d" | "day" | "days" => 86_400,
+        "w" | "wk" | "wks" => 604_800,
         other => bail!("invalid duration unit `{other}` (use s/m/h/d/w)"),
     };
+    let secs = n
+        .checked_mul(factor)
+        .ok_or_else(|| anyhow::anyhow!("duration too large"))?;
     Ok(Duration::from_secs(secs))
 }
 
@@ -164,6 +167,11 @@ mod tests {
         for bad in ["", "abc", "10x", "m"] {
             assert!(parse_duration(bad).is_err(), "expected `{bad}` to fail");
         }
+    }
+
+    #[test]
+    fn rejects_overflow() {
+        assert!(parse_duration("99999999999999w").is_err());
     }
 
     #[test]
