@@ -92,11 +92,29 @@ fn count_mine(commits: &[CommitNode], total: usize, me: &str) -> Count {
     }
 }
 
+/// Percent-encode a ref so characters like `#` and `/` can't truncate the URL
+/// or inject path segments. Keeps the RFC 3986 unreserved set untouched.
+fn encode_ref(reff: &str) -> String {
+    let mut out = String::with_capacity(reff.len());
+    for b in reff.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// My commits in `base..head` via the compare API.
 fn compare_mine(client: &Client, repo: &Repo, me: &str, base: &str, head: &str) -> Result<Count> {
     let path = format!(
         "repos/{}/{}/compare/{}...{}",
-        repo.owner, repo.name, base, head
+        repo.owner,
+        repo.name,
+        encode_ref(base),
+        encode_ref(head)
     );
     let cmp: Comparison = client.get(&path)?;
     Ok(count_mine(&cmp.commits, cmp.total_commits, me))
@@ -114,7 +132,11 @@ fn reachable_mine(
     for page in 1..=max_pages {
         let path = format!(
             "repos/{}/{}/commits?sha={}&author={}&per_page=100&page={}",
-            repo.owner, repo.name, reff, me, page
+            repo.owner,
+            repo.name,
+            encode_ref(reff),
+            me,
+            page
         );
         let nodes: Vec<CommitNode> = client.get(&path)?;
         let n = nodes.len();
@@ -192,5 +214,14 @@ mod tests {
         let got = count_mine(&c, 300, "caarlos0");
         assert_eq!(got.mine, 1);
         assert!(got.capped);
+    }
+
+    #[test]
+    fn encodes_url_breaking_refs() {
+        // `#` would truncate the URL, `/` would inject a path segment.
+        assert_eq!(encode_ref("v1.2.3#rc"), "v1.2.3%23rc");
+        assert_eq!(encode_ref("feature/foo"), "feature%2Ffoo");
+        // Unreserved characters stay readable.
+        assert_eq!(encode_ref("v1.2.3-beta_1~x"), "v1.2.3-beta_1~x");
     }
 }
