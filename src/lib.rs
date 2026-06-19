@@ -303,11 +303,14 @@ impl Drop for CursorGuard {
 /// Entry point: authenticate, resolve repo + user, then render once or watch.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let styled = std::io::stdout().is_terminal();
+    // Auth can drive the interactive device flow whenever there's a terminal,
+    // but rendering is plain under `--once` (single-shot/scriptable output).
+    let interactive = std::io::stdout().is_terminal();
+    let styled = interactive && !cli.once;
 
     // Authenticate first (this may run the interactive device flow and print
     // prompts, so it must happen before we hide the cursor / clear the screen).
-    let token = auth::token(cli.login, styled)?;
+    let token = auth::token(cli.login, interactive)?;
     let client = Client::new(token);
 
     if cli.login {
@@ -321,7 +324,8 @@ pub fn run() -> Result<()> {
         None => github::detect_repo()?,
     };
 
-    let watch = styled && !cli.once;
+    // `styled` already implies `!cli.once`, so watch mode is just `styled`.
+    let watch = styled;
 
     // Change-detection / last-good state, seeded from the cache below so the
     // first refresh can highlight what changed while prowl wasn't running.
