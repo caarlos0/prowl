@@ -174,12 +174,22 @@ fn file_set(token: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).context("creating config directory")?;
     }
-    std::fs::write(&path, token).context("writing token file")?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .context("chmod 600 token file")?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        // Create the file 0600 up front so the token is never world-readable.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .context("opening token file")?;
+        f.write_all(token.as_bytes())
+            .context("writing token file")?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(&path, token).context("writing token file")?;
     Ok(())
 }
