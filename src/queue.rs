@@ -54,6 +54,7 @@ pub fn to_table(rows: &[QueueRow]) -> Table {
             )
         };
         out.push(vec![
+            Cell::plain(" "),
             Cell::styled(r.position.to_string(), pos),
             Cell::styled(format!("#{}", r.number), pr),
             Cell::styled(r.author.clone(), author),
@@ -62,7 +63,9 @@ pub fn to_table(rows: &[QueueRow]) -> Table {
         ]);
     }
     Table {
-        header: vec!["#", "PR", "AUTHOR", "TITLE", "URL"],
+        // A leading (always-blank) marker column keeps the queue aligned with
+        // the Open PRs and Merged PRs tables, which lead with the change marker.
+        header: vec!["", "#", "PR", "AUTHOR", "TITLE", "URL"],
         rows: out,
     }
 }
