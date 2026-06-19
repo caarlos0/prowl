@@ -146,7 +146,13 @@ pub fn fg(rgb: Rgb) -> Style {
 }
 
 /// Check-suite conclusions that count as a failure.
-pub const FAIL_CONCLUSIONS: [&str; 3] = ["FAILURE", "STARTUP_FAILURE", "CANCELLED"];
+pub const FAIL_CONCLUSIONS: [&str; 5] = [
+    "FAILURE",
+    "STARTUP_FAILURE",
+    "CANCELLED",
+    "TIMED_OUT",
+    "ACTION_REQUIRED",
+];
 
 /// Whether a check suite actually ran (produced ≥1 check run). Zero-run suites
 /// are phantom subscriptions GitHub ignores, so we do too; a `null` run count
@@ -303,10 +309,22 @@ mod tests {
             Some("FAILURE"),
             Some("CANCELLED"),
             Some("STARTUP_FAILURE"),
+            Some("TIMED_OUT"),
+            Some("ACTION_REQUIRED"),
             None,
             Some("NEUTRAL"),
         ]);
-        assert_eq!(fail_count(&s), 3);
+        assert_eq!(fail_count(&s), 5);
+    }
+
+    #[test]
+    fn timed_out_counts_as_failure() {
+        let s = suites(&[Some("TIMED_OUT")]);
+        assert_eq!(fail_count(&s), 1);
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Fail)
+        );
     }
 
     #[test]
