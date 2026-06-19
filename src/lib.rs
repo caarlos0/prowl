@@ -78,6 +78,162 @@ fn fetch(
     })
 }
 
+/// Synthetic dashboard data for `--demo` (screenshots): no auth, repo, or
+/// network. Times are relative to now so the ages look fresh. Temporary.
+fn demo_sections() -> Sections {
+    use chrono::{SecondsFormat, Utc};
+    let ago = |secs: i64| {
+        (Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339_opts(SecondsFormat::Secs, true)
+    };
+    let pr =
+        |number, is_draft, title: &str, status, merge_state: &str, queue, fail, secs| prs::PrRow {
+            number,
+            is_draft,
+            title: title.to_string(),
+            status,
+            merge_state: Some(merge_state.to_string()),
+            queue,
+            fail,
+            url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
+            updated_at: Some(ago(secs)),
+        };
+    use status::Status::*;
+    let prs = vec![
+        pr(
+            128,
+            false,
+            "feat(render): truecolor status palette",
+            Some(Pass),
+            "CLEAN",
+            None,
+            0,
+            300,
+        ),
+        pr(
+            127,
+            false,
+            "fix(term): restore cursor on SIGTSTP",
+            Some(Fail),
+            "BLOCKED",
+            None,
+            2,
+            1080,
+        ),
+        pr(
+            125,
+            false,
+            "perf(cache): paint from disk on startup",
+            Some(Pending),
+            "UNSTABLE",
+            None,
+            0,
+            2400,
+        ),
+        pr(
+            124,
+            true,
+            "wip: nix flake + home-manager module",
+            None,
+            "DRAFT",
+            None,
+            0,
+            7200,
+        ),
+        pr(
+            120,
+            false,
+            "chore(deps): bump ureq to 3.x",
+            Some(Conflicts),
+            "DIRTY",
+            None,
+            0,
+            10800,
+        ),
+        pr(
+            118,
+            false,
+            "feat(queue): inline merge-queue position",
+            Some(Pass),
+            "CLEAN",
+            Some((1, "QUEUED".to_string())),
+            0,
+            3600,
+        ),
+    ];
+
+    let qrow = |position, number, author: &str, title: &str, mine| queue::QueueRow {
+        position,
+        number,
+        author: author.to_string(),
+        title: title.to_string(),
+        url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
+        mine,
+    };
+    let queue = vec![
+        qrow(
+            1,
+            118,
+            "caarlos0",
+            "feat(queue): inline merge-queue position",
+            true,
+        ),
+        qrow(
+            2,
+            131,
+            "dependabot[bot]",
+            "build(deps): bump anstyle to 1.1",
+            false,
+        ),
+        qrow(3, 117, "octocat", "docs: clarify the --only flag", false),
+    ];
+
+    let mrow = |number, title: &str, secs| merged::MergedRow {
+        number,
+        title: title.to_string(),
+        url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
+        base: "main".to_string(),
+        merged_at: Some(ago(secs)),
+        updated_at: Some(ago(secs)),
+    };
+    let merged = vec![
+        mrow(119, "feat(status): ignore phantom check suites", 720),
+        mrow(116, "fix(github): exact-match the remote host", 7200),
+        mrow(112, "ci: build a snapshot on pull requests", 86_400),
+        mrow(108, "feat(render): OSC-8 hyperlinks for URLs", 259_200),
+    ];
+
+    let count = |mine, capped| commits::Count { mine, capped };
+    let commits = commits::CommitStats {
+        available: true,
+        upcoming: Some(count(7, false)),
+        releases: vec![
+            commits::ReleaseCount {
+                tag: "v0.4.0".to_string(),
+                count: count(12, false),
+            },
+            commits::ReleaseCount {
+                tag: "v0.3.0".to_string(),
+                count: count(9, false),
+            },
+            commits::ReleaseCount {
+                tag: "v0.2.0".to_string(),
+                count: count(31, true),
+            },
+            commits::ReleaseCount {
+                tag: "v0.1.0".to_string(),
+                count: count(18, false),
+            },
+        ],
+    };
+
+    Sections {
+        merged: Some(merged),
+        queue: Some(queue),
+        prs: Some(prs),
+        commits: Some(commits),
+    }
+}
+
 /// The status glyphs and `STATE` values currently on screen, for the legend.
 fn legend(s: &Sections) -> (Vec<status::Status>, bool, Vec<String>) {
     let mut statuses: Vec<status::Status> = Vec::new();
@@ -313,6 +469,25 @@ pub fn run() -> Result<()> {
     // but rendering is plain under `--once` (single-shot/scriptable output).
     let interactive = std::io::stdout().is_terminal();
     let styled = interactive && !cli.once;
+
+    // `--demo`: render synthetic data once and exit (no auth/repo/network), so
+    // the dashboard can be screenshotted. Styled on a TTY, plain when piped.
+    if cli.demo {
+        let repo = Repo {
+            owner: "caarlos0".to_string(),
+            name: "prowl".to_string(),
+        };
+        let sections = demo_sections();
+        let changes = Changes {
+            status_changed: std::collections::HashSet::from([127]),
+            newly_merged: std::collections::HashSet::from([119]),
+        };
+        let next = timefmt::next_hms(cli.interval.dur);
+        let body = render_body(&sections, &cli, &repo, "caarlos0", &changes, interactive)
+            + &trailing(Some(true), Some(&next), interactive);
+        repaint(&body)?;
+        return Ok(());
+    }
 
     // Authenticate first (this may run the interactive device flow and print
     // prompts, so it must happen before we hide the cursor / clear the screen).

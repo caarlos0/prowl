@@ -55,6 +55,10 @@ pub struct Cli {
     /// Don't read or write the on-disk cache (always start from a fresh fetch).
     #[arg(long)]
     pub no_cache: bool,
+
+    /// Render a screen of synthetic demo data and exit (for screenshots).
+    #[arg(long, hide = true)]
+    pub demo: bool,
 }
 
 /// The dashboard sections, usable with `--only`.
