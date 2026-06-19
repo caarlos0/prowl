@@ -8,6 +8,7 @@ mod model;
 mod prs;
 mod queue;
 mod render;
+mod snapshot;
 mod status;
 mod timefmt;
 
@@ -15,6 +16,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::Cli;
 use gh::Repo;
+use snapshot::Snapshot;
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
@@ -33,6 +35,16 @@ struct Sections {
     merged: Option<Vec<merged::MergedRow>>,
     queue: Option<Vec<queue::QueueRow>>,
     prs: Option<Vec<prs::PrRow>>,
+}
+
+impl Sections {
+    fn snapshot(&self) -> Snapshot {
+        Snapshot::build(
+            self.merged.as_deref(),
+            self.queue.as_deref(),
+            self.prs.as_deref(),
+        )
+    }
 }
 
 fn fetch(cli: &Cli, repo: &Repo, me: &str) -> Result<Sections> {
@@ -56,21 +68,11 @@ fn fetch(cli: &Cli, repo: &Repo, me: &str) -> Result<Sections> {
     Ok(Sections { merged, queue, prs })
 }
 
-/// Render the whole frame: Recently Merged, then Merge Queue, then My PRs, then
-/// the status line. Empty sections collapse to a dim one-liner.
-fn render_frame(
-    s: &Sections,
-    cli: &Cli,
-    repo: &Repo,
-    me: &str,
-    change: Option<bool>,
-    styled: bool,
-    clear: bool,
-) -> String {
+/// Render the section bodies (no screen-clear, no status line): Recently
+/// Merged, then Merge Queue, then My PRs. Empty sections collapse to a dim
+/// one-liner with no header bar.
+fn render_body(s: &Sections, cli: &Cli, repo: &Repo, me: &str, styled: bool) -> String {
     let mut f = String::new();
-    if clear {
-        f.push_str(render::clear());
-    }
     let ascii = cli.ascii || !styled;
     let slug = repo.slug();
 
@@ -115,11 +117,63 @@ fn render_frame(
         }
         f.push('\n');
     }
-
-    f.push_str(&render::status_line(&timefmt::now_hms(), change, styled));
-    f.push('\n');
     f
 }
+
+/// The dim trailing status line plus a newline.
+fn trailing(change: Option<bool>, styled: bool) -> String {
+    let mut s = render::status_line(&timefmt::now_hms(), change, styled);
+    s.push('\n');
+    s
+}
+
+/// A dim trailing line reporting a transient error (last good data is kept).
+fn error_trailing(msg: &str, styled: bool) -> String {
+    let line = format!("updated {} \u{2014} error: {msg}", timefmt::now_hms());
+    let mut s = render::empty_line(&line, styled);
+    s.push('\n');
+    s
+}
+
+/// First line of an error, truncated, for the one-line error status.
+fn short_error(e: &anyhow::Error) -> String {
+    let full = format!("{e:#}");
+    let first = full.lines().next().unwrap_or_default();
+    if first.chars().count() > 120 {
+        format!("{}…", first.chars().take(119).collect::<String>())
+    } else {
+        first.to_string()
+    }
+}
+
+fn maybe_notify(cli: &Cli, repo: &Repo, now: &Snapshot, prev: Option<&Snapshot>) {
+    if !cli.notify {
+        return;
+    }
+    let body = match prev.map(|p| now.newly_merged(p)) {
+        Some(merged) if !merged.is_empty() => {
+            let list = merged
+                .iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("merged: {list}")
+        }
+        _ => "dashboard changed".to_string(),
+    };
+    notify_send(repo, &body);
+}
+
+#[cfg(feature = "notify")]
+fn notify_send(repo: &Repo, body: &str) {
+    let _ = notify_rust::Notification::new()
+        .summary(&format!("prowl: {}", repo.slug()))
+        .body(body)
+        .show();
+}
+
+#[cfg(not(feature = "notify"))]
+fn notify_send(_repo: &Repo, _body: &str) {}
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -131,11 +185,58 @@ fn run() -> Result<()> {
     };
     let me = gh::me()?;
 
-    // Single render for now (--once / piped). The interval watch loop with
-    // change detection and the bell is wired in the next commit.
-    let sections = fetch(&cli, &repo, &me)?;
-    let frame = render_frame(&sections, &cli, &repo, &me, None, styled, false);
-    print!("{frame}");
-    std::io::stdout().flush()?;
-    Ok(())
+    if cli.notify && !cfg!(feature = "notify") {
+        eprintln!(
+            "prowl: --notify ignored (rebuild with `--features notify` for desktop notifications)"
+        );
+    }
+
+    // Single render: --once, or whenever stdout is not a TTY.
+    if cli.once || !styled {
+        let sections = fetch(&cli, &repo, &me)?;
+        let frame = render_body(&sections, &cli, &repo, &me, styled) + &trailing(None, styled);
+        print!("{frame}");
+        std::io::stdout().flush()?;
+        return Ok(());
+    }
+
+    // Watch loop. Each tick clears the screen and re-renders; the bell rings
+    // exactly once per changed refresh. A failed fetch keeps the last good
+    // data, shows a dim error line, and does not ring the bell.
+    let mut prev: Option<Snapshot> = None;
+    let mut last_good: Option<Sections> = None;
+    loop {
+        match fetch(&cli, &repo, &me) {
+            Ok(sections) => {
+                let snap = sections.snapshot();
+                let changed = snapshot::should_ring(prev.as_ref(), &snap);
+                let change_display = prev.as_ref().map(|p| *p != snap);
+
+                let mut frame = String::from(render::clear());
+                frame.push_str(&render_body(&sections, &cli, &repo, &me, styled));
+                frame.push_str(&trailing(change_display, styled));
+                print!("{frame}");
+                std::io::stdout().flush()?;
+
+                if changed {
+                    if !cli.no_bell {
+                        render::ring_bell();
+                    }
+                    maybe_notify(&cli, &repo, &snap, prev.as_ref());
+                }
+                prev = Some(snap);
+                last_good = Some(sections);
+            }
+            Err(e) => {
+                let mut frame = String::from(render::clear());
+                if let Some(good) = &last_good {
+                    frame.push_str(&render_body(good, &cli, &repo, &me, styled));
+                }
+                frame.push_str(&error_trailing(&short_error(&e), styled));
+                print!("{frame}");
+                std::io::stdout().flush()?;
+            }
+        }
+        std::thread::sleep(cli.interval.dur);
+    }
 }
