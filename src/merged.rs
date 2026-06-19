@@ -49,15 +49,14 @@ pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Ta
         out.push(vec![
             render::change_marker(highlight.contains(&r.number), ascii),
             Cell::styled(glyph.to_string(), status::fg(MAUVE)),
-            Cell::styled(format!("#{}", r.number), status::fg(BLUE)),
+            Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
             Cell::styled(r.base.clone(), dim),
             Cell::styled(timefmt::age_of(r.merged_at.as_deref()), dim),
-            Cell::link(r.url.clone(), r.url.clone()),
         ]);
     }
     Table {
-        header: vec!["", "", "PR", "TITLE", "BASE", "MERGED", "URL"],
+        header: vec!["", "", "PR", "TITLE", "BASE", "MERGED"],
         rows: out,
     }
 }

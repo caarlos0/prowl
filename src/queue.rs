@@ -1,9 +1,12 @@
 //! Merge-queue view: rows, sorting, styling, and table building.
 
 use crate::model::QueueEntryNode;
-use crate::render::{Cell, Table};
+use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, YELLOW};
 use anstyle::Style;
+
+/// Queue author logins are truncated to this many display columns.
+const AUTHOR_WIDTH: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueRow {
@@ -39,10 +42,10 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
     rows
 }
 
-pub fn to_table(rows: &[QueueRow]) -> Table {
+pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let (pos, pr, author, title) = if r.mine {
+        let (pos, pr, author_style, title) = if r.mine {
             let hi = status::fg(YELLOW).bold();
             (hi, hi, hi, Style::new().bold())
         } else {
@@ -53,19 +56,19 @@ pub fn to_table(rows: &[QueueRow]) -> Table {
                 Style::new(),
             )
         };
+        let author = render::truncate(&r.author, AUTHOR_WIDTH, ascii);
         out.push(vec![
             Cell::plain(" "),
             Cell::styled(r.position.to_string(), pos),
-            Cell::styled(format!("#{}", r.number), pr),
-            Cell::styled(r.author.clone(), author),
+            Cell::link_styled(format!("#{}", r.number), r.url.clone(), pr),
             Cell::styled(r.title.clone(), title),
-            Cell::link(r.url.clone(), r.url.clone()),
+            Cell::styled(author, author_style),
         ]);
     }
     Table {
         // A leading (always-blank) marker column keeps the queue aligned with
         // the Open PRs and Merged PRs tables, which lead with the change marker.
-        header: vec!["", "#", "PR", "AUTHOR", "TITLE", "URL"],
+        header: vec!["", "#", "PR", "TITLE", "AUTHOR"],
         rows: out,
     }
 }

@@ -67,7 +67,7 @@ pub enum Section {
     Queue,
     Mine,
     Merged,
-    Shipped,
+    Shipments,
 }
 
 impl Cli {
@@ -86,8 +86,8 @@ impl Cli {
     pub fn show_merged(&self) -> bool {
         self.shows(Section::Merged)
     }
-    pub fn show_shipped(&self) -> bool {
-        self.shows(Section::Shipped)
+    pub fn show_shipments(&self) -> bool {
+        self.shows(Section::Shipments)
     }
 }
 

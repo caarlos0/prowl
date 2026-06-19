@@ -7,7 +7,7 @@ model, or workflow change.
 ## What prowl is
 
 A small terminal dashboard that watches a GitHub repo and re-renders on an
-interval: **Open PRs → Merge Queue → Merged PRs → Shipped commits**, with a reference
+interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, with a reference
 legend at the bottom. It rings the terminal bell when one of your PRs merges or
 an open PR's status changes, and flags the changed rows. It is a plain
 `std::thread::sleep` redraw loop — **not** a raw-mode/alt-screen TUI — so output
@@ -48,12 +48,17 @@ everything else is testable modules:
   `derive_status` (precedence), `fail_count`; and the `mergeStateStatus`
   helpers `state_style`, `state_label` (DIRTY → CONFLICTS), `state_glyph`,
   `state_meaning`.
-- `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8,
-  headers, reference legend, status line, loading screen, bell, clear.
+- `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8
+  (incl. `link_styled` for clickable PR numbers), `truncate` + `fit_titles`
+  (cap/align the shared `TITLE` column so every table lines up and the whole
+  view stays within `MAX_WIDTH` = 120 columns), headers, reference legend,
+  status line, loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
+  Each row's PR number is the OSC-8 link (no separate URL column); the queue
+  columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`).
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
-  never fatal. Rendered as the right-aligned "Shipped commits" section.
+  never fatal. Rendered as the right-aligned "My Shipments" section.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).

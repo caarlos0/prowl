@@ -4,7 +4,7 @@
 
 use crate::model::PrNode;
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, RED, Status, YELLOW};
+use crate::status::{self, BLUE, RED, Status};
 use anstyle::Style;
 use std::collections::HashSet;
 
@@ -61,9 +61,13 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
             None => Cell::styled("-".to_string(), Style::new().dimmed()),
         };
         let pr = if r.is_draft {
-            Cell::styled("draft".to_string(), Style::new().dimmed())
+            Cell::link_styled(
+                format!("#{}", r.number),
+                r.url.clone(),
+                Style::new().dimmed(),
+            )
         } else {
-            Cell::styled(format!("#{}", r.number), status::fg(BLUE))
+            Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE))
         };
         let state_raw = r.merge_state.clone().unwrap_or_else(|| "?".to_string());
         let state_text = if ascii {
@@ -72,15 +76,6 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
             status::state_glyph(&state_raw).to_string()
         };
         let state = Cell::styled(state_text, status::state_style(&state_raw));
-        let queue_text = match &r.queue {
-            Some((pos, state)) => format!("#{pos} {state}"),
-            None => "-".to_string(),
-        };
-        let queue_style = if queue_text.starts_with('#') {
-            status::fg(YELLOW).bold()
-        } else {
-            Style::new().dimmed()
-        };
         let (fail_text, fail_style) = if r.fail == 0 {
             ("-".to_string(), Style::new().dimmed())
         } else {
@@ -92,13 +87,11 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
             pr,
             Cell::plain(r.title.clone()),
             state,
-            Cell::styled(queue_text, queue_style),
             Cell::styled(fail_text, fail_style),
-            Cell::link(r.url.clone(), r.url.clone()),
         ]);
     }
     Table {
-        header: vec!["", "", "PR", "TITLE", "STATE", "QUEUE", "FAIL", "URL"],
+        header: vec!["", "", "PR", "TITLE", "STATE", "FAIL"],
         rows: out,
     }
 }

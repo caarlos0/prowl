@@ -6,7 +6,11 @@ use crate::status::{self, Rgb, Status};
 use anstyle::Style;
 use std::fmt::Write as _;
 use std::io::Write as _;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// The whole dashboard is kept within this many display columns; the flexible
+/// title column is truncated (with an ellipsis) to make every table fit.
+pub const MAX_WIDTH: usize = 120;
 
 /// One table cell: visible text plus how to style and (optionally) link it.
 #[derive(Clone, Debug)]
@@ -41,6 +45,16 @@ impl Cell {
             link: Some(url.into()),
         }
     }
+
+    /// An OSC-8 hyperlink carrying an explicit style (e.g. a colored, clickable
+    /// PR number). Underlined so it reads as a link even when colored.
+    pub fn link_styled(text: impl Into<String>, url: impl Into<String>, style: Style) -> Cell {
+        Cell {
+            text: text.into(),
+            style: style.underline(),
+            link: Some(url.into()),
+        }
+    }
 }
 
 /// A table is a fixed header plus styled rows.
@@ -51,6 +65,88 @@ pub struct Table {
 
 fn w(s: &str) -> usize {
     UnicodeWidthStr::width(s)
+}
+
+/// Truncate `s` to at most `max` display columns, marking the cut with an
+/// ellipsis (`\u{22ef}`, or `...` in ASCII mode). Returns `s` unchanged when it
+/// already fits.
+pub fn truncate(s: &str, max: usize, ascii: bool) -> String {
+    if w(s) <= max {
+        return s.to_string();
+    }
+    let ell = if ascii { "..." } else { "\u{22ef}" };
+    let budget = max.saturating_sub(w(ell));
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + cw > budget {
+            break;
+        }
+        out.push(ch);
+        width += cw;
+    }
+    out.push_str(ell);
+    out
+}
+
+/// The display width of every column of `table` except `skip`, plus the
+/// two-space separators — i.e. how wide a row is without its flexible column.
+fn fixed_width(table: &Table, skip: usize) -> usize {
+    let cols = table.header.len();
+    let mut total = 0;
+    for c in 0..cols {
+        if c == skip {
+            continue;
+        }
+        let mut cw = w(table.header[c]);
+        for row in &table.rows {
+            if let Some(cell) = row.get(c) {
+                cw = cw.max(w(&cell.text));
+            }
+        }
+        total += cw;
+    }
+    total + 2 * cols.saturating_sub(1)
+}
+
+/// Cap and align the `TITLE` column across several tables so they line up and
+/// the widest row of every table fits within `MAX_WIDTH`. The title column is
+/// truncated (with an ellipsis) and padded to one shared width.
+pub fn fit_titles(tables: &mut [&mut Table], ascii: bool) {
+    let mut natural = 0;
+    let mut fixed = 0;
+    let idxs: Vec<Option<usize>> = tables
+        .iter()
+        .map(|t| t.header.iter().position(|h| *h == "TITLE"))
+        .collect();
+    for (t, idx) in tables.iter().zip(&idxs) {
+        if let Some(ti) = idx {
+            let mut tw = w(t.header[*ti]);
+            for row in &t.rows {
+                if let Some(cell) = row.get(*ti) {
+                    tw = tw.max(w(&cell.text));
+                }
+            }
+            natural = natural.max(tw);
+            fixed = fixed.max(fixed_width(t, *ti));
+        }
+    }
+    let budget = MAX_WIDTH.saturating_sub(fixed);
+    let target = natural.min(budget);
+    for (t, idx) in tables.iter_mut().zip(&idxs) {
+        if let Some(ti) = idx {
+            for row in t.rows.iter_mut() {
+                if let Some(cell) = row.get_mut(*ti) {
+                    let mut text = truncate(&cell.text, target, ascii);
+                    for _ in 0..target.saturating_sub(w(&text)) {
+                        text.push(' ');
+                    }
+                    cell.text = text;
+                }
+            }
+        }
+    }
 }
 
 const OSC8_END: &str = "\x1b]8;;\x1b\\";
@@ -135,8 +231,8 @@ pub fn render_table(table: &Table, styled: bool) -> String {
 }
 
 /// A concise, non-figlet section header: a colored bold accent bar, the title,
-/// and an optional dim row count.
-pub fn header(title: &str, accent: Rgb, count: Option<usize>, styled: bool) -> String {
+/// and an optional dim count badge (already formatted, e.g. `6` or `47+`).
+pub fn header(title: &str, accent: Rgb, count: Option<&str>, styled: bool) -> String {
     if styled {
         let bar = status::fg(accent).bold();
         let dim = Style::new().dimmed();
@@ -193,9 +289,10 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// A dim reference legend explaining the status glyphs and `STATE` values that
+/// The reference legend explaining the status glyphs and `STATE` values that
 /// are currently on screen. `statuses` and `states` should already be
-/// deduplicated; only entries that appear are listed.
+/// deduplicated; only entries that appear are listed. The title reuses the
+/// shared section-header style; the explanations themselves are dim.
 pub fn reference(
     statuses: &[Status],
     has_none: bool,
@@ -206,12 +303,8 @@ pub fn reference(
     let dim = Style::new().dimmed();
     let mut out = String::new();
 
-    if styled {
-        let h = dim.bold();
-        let _ = writeln!(out, "{}Reference{}", h.render(), h.render_reset());
-    } else {
-        out.push_str("Reference\n");
-    }
+    out.push_str(&header("Reference", status::OVERLAY, None, styled));
+    out.push('\n');
 
     for s in status::ORDER {
         if !statuses.contains(&s) {
@@ -234,7 +327,7 @@ pub fn reference(
         }
     }
     if has_none {
-        let _ = writeln!(out, "  {}", empty_line("- no checks reported", styled));
+        let _ = writeln!(out, "  {}", empty_line("- no checks reported yet", styled));
     }
 
     // States in legend order, then any unknown extras.
@@ -386,18 +479,48 @@ mod tests {
     }
 
     #[test]
-    fn status_line_suffix_and_next() {
-        assert_eq!(
-            status_line("12:00:00", None, None, false),
-            "updated 12:00:00"
-        );
-        assert_eq!(
-            status_line("12:00:00", Some(true), None, false),
-            "updated 12:00:00 \u{2014} changed"
-        );
-        assert_eq!(
-            status_line("12:00:00", Some(false), Some("12:10:00"), false),
-            "updated 12:00:00 \u{2014} unchanged \u{00b7} next 12:10:00"
-        );
+    fn truncate_marks_cut_with_ellipsis() {
+        assert_eq!(truncate("short", 10, false), "short");
+        assert_eq!(truncate("hello world", 8, false), "hello w\u{22ef}");
+        assert_eq!(truncate("hello world", 8, true), "hello...");
+    }
+
+    #[test]
+    fn fit_titles_caps_long_title_to_max_width() {
+        let long = "x".repeat(200);
+        let mut table = Table {
+            header: vec!["", "PR", "TITLE", "BASE"],
+            rows: vec![vec![
+                Cell::plain(" "),
+                Cell::plain("#1"),
+                Cell::plain(long),
+                Cell::plain("main"),
+            ]],
+        };
+        fit_titles(&mut [&mut table], false);
+        let out = render_table(&table, false);
+        for line in out.lines() {
+            assert!(w(line) <= MAX_WIDTH, "line exceeds MAX_WIDTH: {}", w(line));
+        }
+        assert!(table.rows[0][2].text.ends_with('\u{22ef}'));
+    }
+
+    #[test]
+    fn fit_titles_aligns_title_column_across_tables() {
+        let mut a = Table {
+            header: vec!["PR", "TITLE", "BASE"],
+            rows: vec![vec![
+                Cell::plain("#1"),
+                Cell::plain("a short title"),
+                Cell::plain("main"),
+            ]],
+        };
+        let mut b = Table {
+            header: vec!["PR", "TITLE", "AUTHOR"],
+            rows: vec![vec![Cell::plain("#2"), Cell::plain("x"), Cell::plain("me")]],
+        };
+        fit_titles(&mut [&mut a, &mut b], false);
+        // Both title cells are padded/truncated to one shared display width.
+        assert_eq!(w(&a.rows[0][1].text), w(&b.rows[0][1].text));
     }
 }

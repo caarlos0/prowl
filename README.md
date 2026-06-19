@@ -13,14 +13,17 @@ It talks to the GitHub API directly. On first run it walks you through a
 one-time browser **device login** (or set `GITHUB_TOKEN`) — no `gh` CLI needed.
 
 ```
-▌ Open PRs  3
-   P  #6656  feat: goreleaser check --allow-deprecations  CLEAN      -  -  …/pull/6656
- ▸ !  #6475  feat: install scripts                        CONFLICTS  -  3  …/pull/6475
+▌ My open PRs  3
+   P  #6656  feat: goreleaser check --allow-deprecations  CLEAN      -
+ ▸ !  #6475  feat: install scripts                        CONFLICTS  3
 
-▌ Merged PRs  1
-   m  #6649  fix(mcp): clean subfolder path               main  1w   …/pull/6649
+▌ Merge Queue  1
+   1  #6656  feat: goreleaser check --allow-deprecations  caarlos0
 
-▌ Shipped commits
+▌ My merged PRs  1
+   m  #6649  fix(mcp): clean subfolder path               main  1w
+
+▌ My Shipments  32
   upcoming: 3
     v1.2.0: 8
     v1.1.0: 5
@@ -33,7 +36,8 @@ updated 11:21:16 — changed · next 11:26:16
 Status is a single Catppuccin-colored glyph. On a TTY, prowl uses Nerd Font
 icons (pass, fail, pending, conflicts, merged); with `--ascii` (or when piped)
 it falls back to `P` pass, `x` fail, `.` pending, `!` conflicts, `m` merged.
-URLs are clickable.
+Each PR number is a clickable link to the PR. Long titles are truncated (with a
+`⋯`) and the whole view is kept within 120 columns.
 
 ## Install
 

@@ -17,6 +17,7 @@ pub const BLUE: Rgb = (137, 180, 250); // #89b4fa
 pub const LAVENDER: Rgb = (180, 190, 254); // #b4befe
 pub const TEAL: Rgb = (148, 226, 213); // #94e2d5
 pub const PINK: Rgb = (245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
+pub const OVERLAY: Rgb = (147, 153, 178); // #9399b2 — muted accent (reference legend)
 
 /// CI/PR status. Glyphs/colors are fixed by the shared palette.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -83,25 +84,25 @@ pub fn glyph(s: Status, ascii: bool) -> char {
 /// One-line meaning of a status (for the reference legend).
 pub fn status_meaning(s: Status) -> &'static str {
     match s {
-        Status::Pass => "all checks that ran passed",
-        Status::Fail => "a check that ran failed",
-        Status::Pending => "checks still running",
-        Status::Merged => "merged",
-        Status::Conflicts => "merge conflict; needs a rebase",
+        Status::Pass => "all checks passed",
+        Status::Fail => "at least one check failed",
+        Status::Pending => "checks are still running",
+        Status::Merged => "merged into its base branch",
+        Status::Conflicts => "merge conflict — needs a rebase",
     }
 }
 
 /// One-line meaning of a `mergeStateStatus` value (for the reference legend).
 pub fn state_meaning(state: &str) -> &'static str {
     match state {
-        "CLEAN" => "mergeable; all required checks green",
-        "UNSTABLE" => "mergeable, but non-required checks are failing or pending",
-        "BLOCKED" => "blocked; required reviews or checks not satisfied",
-        "BEHIND" => "behind the base branch; needs an update",
-        "DIRTY" => "merge conflict",
-        "DRAFT" => "draft; not ready to merge",
-        "HAS_HOOKS" => "mergeable, with pre-receive hooks",
-        "UNKNOWN" => "mergeability not yet computed",
+        "CLEAN" => "ready to merge; all required checks pass",
+        "UNSTABLE" => "mergeable, but some non-required checks are red or pending",
+        "BLOCKED" => "blocked on required reviews or checks",
+        "BEHIND" => "out of date with the base branch — needs an update",
+        "DIRTY" => "has merge conflicts",
+        "DRAFT" => "draft; not ready for review or merge",
+        "HAS_HOOKS" => "mergeable; pre-receive hooks will run on merge",
+        "UNKNOWN" => "mergeability not computed yet",
         _ => "",
     }
 }

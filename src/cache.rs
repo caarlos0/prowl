@@ -9,13 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bump when the cached layout changes; older files are then ignored.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]
 pub(crate) struct Cached {
     version: u32,
-    pub(crate) me: String,
     pub(crate) saved_at: String,
     pub(crate) sections: Sections,
 }
@@ -24,7 +23,6 @@ pub(crate) struct Cached {
 #[derive(Serialize)]
 struct CacheRef<'a> {
     version: u32,
-    me: &'a str,
     saved_at: &'a str,
     sections: &'a Sections,
 }
@@ -52,7 +50,7 @@ pub(crate) fn load(repo: &Repo) -> Option<Cached> {
 }
 
 /// Write the current sections to the cache (best-effort; failures are ignored).
-pub(crate) fn save(repo: &Repo, me: &str, sections: &Sections) {
+pub(crate) fn save(repo: &Repo, sections: &Sections) {
     let Some(path) = cache_file(repo) else {
         return;
     };
@@ -62,7 +60,6 @@ pub(crate) fn save(repo: &Repo, me: &str, sections: &Sections) {
     let saved_at = timefmt::now_hms();
     let data = CacheRef {
         version: VERSION,
-        me,
         saved_at: &saved_at,
         sections,
     };

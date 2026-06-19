@@ -46,7 +46,7 @@ fn queue_null_and_empty_both_yield_no_rows() {
 fn queue_styled_render_uses_palette_and_links() {
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
     let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
-    let out = render::render_table(&queue::to_table(&rows), true);
+    let out = render::render_table(&queue::to_table(&rows, false), true);
 
     // Mine row is highlighted yellow (#f9e2af); others' PR cell is blue (#89b4fa).
     assert!(out.contains("38;2;249;226;175"), "expected mine yellow");

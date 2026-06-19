@@ -62,7 +62,7 @@ fn fetch(
     };
     // Best-effort: a failure here (no releases, empty repo, ...) degrades to an
     // "unavailable" line rather than taking down the whole dashboard.
-    let commits = if cli.show_shipped() {
+    let commits = if cli.show_shipments() {
         Some(
             commits::fetch(client, repo, me, default_branch)
                 .unwrap_or_else(|_| commits::CommitStats::unavailable()),
@@ -262,77 +262,91 @@ fn legend(s: &Sections) -> (Vec<status::Status>, bool, Vec<String>) {
     (statuses, has_none, states)
 }
 
-/// Render the section bodies (no screen-clear, no status line): Open PRs, then
-/// Merge Queue, then Merged PRs, then the reference legend. Empty sections
-/// collapse to a dim one-liner. Rows that changed since the previous refresh
-/// (per `changes`) are flagged with a leading marker.
-fn render_body(
-    s: &Sections,
-    cli: &Cli,
-    repo: &Repo,
-    me: &str,
-    changes: &Changes,
-    styled: bool,
-) -> String {
+/// Render the section bodies (no screen-clear, no status line): My open PRs,
+/// then Merge Queue, then My merged PRs, then the reference legend. Each PR
+/// section always shows its header (with a count); an empty section follows it
+/// with a dim placeholder one-liner. Rows that changed since the previous
+/// refresh (per `changes`) are flagged with a leading marker.
+fn render_body(s: &Sections, cli: &Cli, changes: &Changes, styled: bool) -> String {
     let mut f = String::new();
     let ascii = cli.ascii || !styled;
-    let slug = repo.slug();
+
+    // Build the section tables first, then cap and align their TITLE columns so
+    // the three tables line up and the whole view stays within MAX_WIDTH.
+    let mut prs_table = s
+        .prs
+        .as_ref()
+        .filter(|r| !r.is_empty())
+        .map(|rows| prs::to_table(rows, ascii, &changes.status_changed));
+    let mut queue_table = s
+        .queue
+        .as_ref()
+        .filter(|r| !r.is_empty())
+        .map(|rows| queue::to_table(rows, ascii));
+    let mut merged_table = s
+        .merged
+        .as_ref()
+        .filter(|r| !r.is_empty())
+        .map(|rows| merged::to_table(rows, ascii, &changes.newly_merged));
+    {
+        let mut tables: Vec<&mut render::Table> = [
+            prs_table.as_mut(),
+            queue_table.as_mut(),
+            merged_table.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        render::fit_titles(&mut tables, ascii);
+    }
 
     if let Some(rows) = &s.prs {
+        f.push_str(&render::header(
+            "My open PRs",
+            status::LAVENDER,
+            Some(&rows.len().to_string()),
+            styled,
+        ));
+        f.push('\n');
         if rows.is_empty() {
-            let msg = format!("No open PRs by {me} in {slug}.");
-            f.push_str(&render::empty_line(&msg, styled));
+            f.push_str(&render::empty_line("No open PRs.", styled));
             f.push('\n');
-        } else {
-            f.push_str(&render::header(
-                "Open PRs",
-                status::LAVENDER,
-                Some(rows.len()),
-                styled,
-            ));
-            f.push('\n');
-            let table = prs::to_table(rows, ascii, &changes.status_changed);
-            f.push_str(&render::render_table(&table, styled));
+        } else if let Some(table) = &prs_table {
+            f.push_str(&render::render_table(table, styled));
         }
         f.push('\n');
     }
 
     if let Some(rows) = &s.queue {
+        f.push_str(&render::header(
+            "Merge Queue",
+            status::BLUE,
+            Some(&rows.len().to_string()),
+            styled,
+        ));
+        f.push('\n');
         if rows.is_empty() {
-            let msg = format!("No merge queue (or it is empty) for {slug}.");
-            f.push_str(&render::empty_line(&msg, styled));
+            f.push_str(&render::empty_line("No merge queue.", styled));
             f.push('\n');
-        } else {
-            f.push_str(&render::header(
-                "Merge Queue",
-                status::BLUE,
-                Some(rows.len()),
-                styled,
-            ));
-            f.push('\n');
-            f.push_str(&render::render_table(&queue::to_table(rows), styled));
+        } else if let Some(table) = &queue_table {
+            f.push_str(&render::render_table(table, styled));
         }
         f.push('\n');
     }
 
     if let Some(rows) = &s.merged {
+        f.push_str(&render::header(
+            "My merged PRs",
+            status::MAUVE,
+            Some(&rows.len().to_string()),
+            styled,
+        ));
+        f.push('\n');
         if rows.is_empty() {
-            let msg = format!(
-                "No PRs merged by {me} in {slug} in the last {}.",
-                cli.merged_window.raw
-            );
-            f.push_str(&render::empty_line(&msg, styled));
+            f.push_str(&render::empty_line("No recent merged PRs.", styled));
             f.push('\n');
-        } else {
-            f.push_str(&render::header(
-                "Merged PRs",
-                status::MAUVE,
-                Some(rows.len()),
-                styled,
-            ));
-            f.push('\n');
-            let table = merged::to_table(rows, ascii, &changes.newly_merged);
-            f.push_str(&render::render_table(&table, styled));
+        } else if let Some(table) = &merged_table {
+            f.push_str(&render::render_table(table, styled));
         }
         f.push('\n');
     }
@@ -376,7 +390,7 @@ fn refreshing_trailing(styled: bool) -> String {
     s
 }
 
-/// Render the "Shipped commits" section: my commit counts for the next
+/// Render the "My Shipments" section: my commit counts for the next
 /// (unreleased) version and the last few stable releases, with the labels
 /// right-aligned so the colons and counts line up.
 fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
@@ -385,15 +399,24 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
         f.push('\n');
         return;
     }
+    let count = |c: &commits::Count| format!("{}{}", c.mine, if c.capped { "+" } else { "" });
+
+    // Total commits by me across everything shown (upcoming + the releases); a
+    // `+` if any bucket hit the compare API's window and is a lower bound.
+    let mut total = stats.upcoming.as_ref().map_or(0, |c| c.mine);
+    let mut capped = stats.upcoming.as_ref().is_some_and(|c| c.capped);
+    for r in &stats.releases {
+        total += r.count.mine;
+        capped |= r.count.capped;
+    }
+    let total = format!("{total}{}", if capped { "+" } else { "" });
     f.push_str(&render::header(
-        "Shipped commits",
+        "My Shipments",
         status::TEAL,
-        None,
+        Some(&total),
         styled,
     ));
     f.push('\n');
-
-    let count = |c: &commits::Count| format!("{}{}", c.mine, if c.capped { "+" } else { "" });
 
     // (label, count) rows: the upcoming release first, then the shipped ones.
     let mut rows: Vec<(String, String)> = Vec::with_capacity(stats.releases.len() + 1);
@@ -411,11 +434,8 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
     let width = rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
     for (label, value) in &rows {
         let pad = " ".repeat(width - label.width());
-        f.push_str(&render::empty_line(
-            &format!("  {pad}{label}: {value}"),
-            styled,
-        ));
-        f.push('\n');
+        // Plain (not dim): the shipment counts are real data, not a placeholder.
+        f.push_str(&format!("  {pad}{label}: {value}\n"));
     }
 }
 
@@ -473,17 +493,13 @@ pub fn run() -> Result<()> {
     // `--demo`: render synthetic data once and exit (no auth/repo/network), so
     // the dashboard can be screenshotted. Styled on a TTY, plain when piped.
     if cli.demo {
-        let repo = Repo {
-            owner: "caarlos0".to_string(),
-            name: "prowl".to_string(),
-        };
         let sections = demo_sections();
         let changes = Changes {
             status_changed: std::collections::HashSet::from([127]),
             newly_merged: std::collections::HashSet::from([119]),
         };
         let next = timefmt::next_hms(cli.interval.dur);
-        let body = render_body(&sections, &cli, &repo, "caarlos0", &changes, interactive)
+        let body = render_body(&sections, &cli, &changes, interactive)
             + &trailing(Some(true), Some(&next), interactive);
         repaint(&body)?;
         return Ok(());
@@ -529,9 +545,8 @@ pub fn run() -> Result<()> {
         });
         match (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
             Some(c) => {
-                let body =
-                    render_body(&c.sections, &cli, &repo, &c.me, &Changes::default(), styled)
-                        + &cached_trailing(&c.saved_at, styled);
+                let body = render_body(&c.sections, &cli, &Changes::default(), styled)
+                    + &cached_trailing(&c.saved_at, styled);
                 repaint(&body)?;
                 prev = Some(Tracker::build(
                     c.sections.prs.as_deref(),
@@ -560,9 +575,9 @@ pub fn run() -> Result<()> {
     if cli.once || !styled {
         let sections = fetch(&cli, &client, &repo, &me, &default_branch)?;
         if !cli.no_cache {
-            cache::save(&repo, &me, &sections);
+            cache::save(&repo, &sections);
         }
-        let frame = render_body(&sections, &cli, &repo, &me, &Changes::default(), styled)
+        let frame = render_body(&sections, &cli, &Changes::default(), styled)
             + &trailing(None, None, styled);
         print!("{frame}");
         std::io::stdout().flush()?;
@@ -584,7 +599,7 @@ pub fn run() -> Result<()> {
                 let change_display = prev.as_ref().map(|_| bell);
                 let next = timefmt::next_hms(cli.interval.dur);
 
-                let body = render_body(&sections, &cli, &repo, &me, &changes, styled)
+                let body = render_body(&sections, &cli, &changes, styled)
                     + &trailing(change_display, Some(&next), styled);
                 repaint(&body)?;
 
@@ -593,7 +608,7 @@ pub fn run() -> Result<()> {
                 }
                 armed = true;
                 if !cli.no_cache {
-                    cache::save(&repo, &me, &sections);
+                    cache::save(&repo, &sections);
                 }
                 prev = Some(tracker);
                 last_good = Some(sections);
@@ -602,14 +617,7 @@ pub fn run() -> Result<()> {
                 let next = timefmt::next_hms(cli.interval.dur);
                 let mut body = String::new();
                 if let Some(good) = &last_good {
-                    body.push_str(&render_body(
-                        good,
-                        &cli,
-                        &repo,
-                        &me,
-                        &Changes::default(),
-                        styled,
-                    ));
+                    body.push_str(&render_body(good, &cli, &Changes::default(), styled));
                 }
                 body.push_str(&error_trailing(&short_error(&e), Some(&next), styled));
                 repaint(&body)?;
@@ -622,9 +630,40 @@ pub fn run() -> Result<()> {
         if term::wait_or_refresh(cli.interval.dur)
             && let Some(good) = &last_good
         {
-            let body = render_body(good, &cli, &repo, &me, &Changes::default(), styled)
-                + &refreshing_trailing(styled);
+            let body =
+                render_body(good, &cli, &Changes::default(), styled) + &refreshing_trailing(styled);
             repaint(&body)?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_sections_still_show_their_headers_then_a_placeholder() {
+        let cli = Cli::parse_from(["prowl"]);
+        let sections = Sections {
+            prs: Some(vec![]),
+            queue: Some(vec![]),
+            merged: Some(vec![]),
+            commits: None,
+        };
+        let body = render_body(&sections, &cli, &Changes::default(), false);
+
+        // Each section header is present even though it has no rows...
+        assert!(body.contains("My open PRs (0)"));
+        assert!(body.contains("Merge Queue (0)"));
+        assert!(body.contains("My merged PRs (0)"));
+        // ...and the placeholder follows the header on the next line.
+        let after = |title: &str, msg: &str| {
+            let h = body.find(title).expect("header present");
+            let p = body.find(msg).expect("placeholder present");
+            assert!(p > h, "placeholder for {title} should follow its header");
+        };
+        after("My open PRs (0)", "No open PRs.");
+        after("Merge Queue (0)", "No merge queue.");
+        after("My merged PRs (0)", "No recent merged PRs.");
     }
 }
