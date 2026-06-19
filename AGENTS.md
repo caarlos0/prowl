@@ -7,7 +7,7 @@ model, or workflow change.
 ## What prowl is
 
 A small terminal dashboard that watches a GitHub repo and re-renders on an
-interval: **Open PRs → Merge Queue → Merged PRs → Commits**, with a reference
+interval: **Open PRs → Merge Queue → Merged PRs → Shipped**, with a reference
 legend at the bottom. It rings the terminal bell when one of your PRs merges or
 an open PR's status changes, and flags the changed rows. It is a plain
 `std::thread::sleep` redraw loop — **not** a raw-mode/alt-screen TUI — so output
@@ -49,8 +49,9 @@ everything else is testable modules:
 - `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8,
   headers, reference legend, status line, loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
-- `commits.rs` — "commits by me" counts for the previous/next stable release
-  (GitHub releases + compare REST APIs); best-effort, never fatal.
+- `commits.rs` — "commits by me" counts for the next (unreleased) version and
+  the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
+  never fatal. Rendered as the right-aligned "Shipped" section.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).

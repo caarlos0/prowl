@@ -25,6 +25,7 @@ use clap::Parser;
 use cli::Cli;
 use github::{Client, Repo};
 use std::io::{IsTerminal, Write};
+use unicode_width::UnicodeWidthStr;
 
 /// A fetched snapshot of every enabled section (`None` = section disabled).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -61,7 +62,7 @@ fn fetch(
     };
     // Best-effort: a failure here (no releases, empty repo, ...) degrades to an
     // "unavailable" line rather than taking down the whole dashboard.
-    let commits = if cli.show_commits() {
+    let commits = if cli.show_shipped() {
         Some(
             commits::fetch(client, repo, me, default_branch)
                 .unwrap_or_else(|_| commits::CommitStats::unavailable()),
@@ -219,32 +220,42 @@ fn refreshing_trailing(styled: bool) -> String {
     s
 }
 
-/// Render the "Commits" section: my commit counts for the previous and next
-/// stable release.
+/// Render the "Shipped" section: my commit counts for the next (unreleased)
+/// version and the last few stable releases, with the labels right-aligned so
+/// the colons and counts line up.
 fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
     if !stats.available {
         f.push_str(&render::empty_line("Commit stats unavailable.", styled));
         f.push('\n');
         return;
     }
-    f.push_str(&render::header("Commits", status::TEAL, None, styled));
+    f.push_str(&render::header("Shipped", status::TEAL, None, styled));
     f.push('\n');
 
     let count = |c: &commits::Count| format!("{}{}", c.mine, if c.capped { "+" } else { "" });
 
-    let prev = match (&stats.previous_tag, &stats.previous) {
-        (Some(tag), Some(c)) => format!("  previous {tag}: {} by you", count(c)),
-        _ => "  previous: no stable release yet".to_string(),
-    };
-    f.push_str(&render::empty_line(&prev, styled));
-    f.push('\n');
+    // (label, count) rows: the upcoming release first, then the shipped ones.
+    let mut rows: Vec<(String, String)> = Vec::with_capacity(stats.releases.len() + 1);
+    rows.push((
+        "upcoming".to_string(),
+        stats
+            .upcoming
+            .as_ref()
+            .map_or_else(|| "\u{2014}".to_string(), &count),
+    ));
+    for r in &stats.releases {
+        rows.push((r.tag.clone(), count(&r.count)));
+    }
 
-    let next = match &stats.next {
-        Some(c) => format!("  next: {} by you", count(c)),
-        None => "  next: \u{2014}".to_string(),
-    };
-    f.push_str(&render::empty_line(&next, styled));
-    f.push('\n');
+    let width = rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
+    for (label, value) in &rows {
+        let pad = " ".repeat(width - label.width());
+        f.push_str(&render::empty_line(
+            &format!("  {pad}{label}: {value}"),
+            styled,
+        ));
+        f.push('\n');
+    }
 }
 
 /// A dim trailing line reporting a transient error (last good data is kept).

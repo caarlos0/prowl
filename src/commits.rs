@@ -1,5 +1,6 @@
-//! "Commits by me" counts for the previous and next stable release of the
-//! watched repo, via the GitHub releases + compare REST APIs.
+//! "Commits by me" counts for the next (unreleased) version and the last few
+//! stable releases of the watched repo, via the GitHub releases + compare REST
+//! APIs.
 
 use crate::github::{Client, Repo};
 use anyhow::Result;
@@ -10,12 +11,17 @@ pub struct CommitStats {
     /// False when the stats could not be computed (kept best-effort so a
     /// failure here never takes down the rest of the dashboard).
     pub available: bool,
-    /// The most recent stable release tag, if any.
-    pub previous_tag: Option<String>,
-    /// My commits that shipped in the previous stable release.
-    pub previous: Option<Count>,
-    /// My commits since the previous stable release (the next release).
-    pub next: Option<Count>,
+    /// My commits heading into the next, still-unreleased version.
+    pub upcoming: Option<Count>,
+    /// The most recent stable releases (newest first) with my commit counts.
+    pub releases: Vec<ReleaseCount>,
+}
+
+/// My commit count for a single shipped release.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReleaseCount {
+    pub tag: String,
+    pub count: Count,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -30,12 +36,14 @@ impl CommitStats {
     pub fn unavailable() -> CommitStats {
         CommitStats {
             available: false,
-            previous_tag: None,
-            previous: None,
-            next: None,
+            upcoming: None,
+            releases: Vec::new(),
         }
     }
 }
+
+/// How many recent stable releases to show commit counts for.
+const RELEASES: usize = 4;
 
 #[derive(Deserialize)]
 struct Release {
@@ -121,33 +129,36 @@ fn reachable_mine(
     Ok(Count { mine, capped: true })
 }
 
-/// Compute the commit stats for `repo`.
+/// Compute the commit stats for `repo`: my commits in the next (unreleased)
+/// version, plus my commits in each of the last [`RELEASES`] stable releases.
 pub fn fetch(client: &Client, repo: &Repo, me: &str, default_branch: &str) -> Result<CommitStats> {
     let tags = stable_tags(client, repo)?;
-    let latest = tags.first();
-    let prev = tags.get(1);
 
-    let (previous_tag, previous) = match (prev, latest) {
-        (Some(p), Some(l)) => (Some(l.clone()), Some(compare_mine(client, repo, me, p, l)?)),
-        // First release: count everything up to it.
-        (None, Some(l)) => (
-            Some(l.clone()),
-            Some(reachable_mine(client, repo, me, l, 5)?),
-        ),
-        _ => (None, None),
-    };
-
-    let next = match latest {
-        Some(l) => Some(compare_mine(client, repo, me, l, default_branch)?),
-        // No releases yet: everything on the default branch is the next release.
+    // The next release is everything since the latest tag (or the whole default
+    // branch when there are no releases yet).
+    let upcoming = match tags.first() {
+        Some(latest) => Some(compare_mine(client, repo, me, latest, default_branch)?),
         None => Some(reachable_mine(client, repo, me, default_branch, 5)?),
     };
 
+    // Each shipped release is the range between it and the release before it;
+    // the oldest tag we know of has no predecessor, so count everything up to it.
+    let mut releases = Vec::with_capacity(tags.len().min(RELEASES));
+    for (i, tag) in tags.iter().enumerate().take(RELEASES) {
+        let count = match tags.get(i + 1) {
+            Some(base) => compare_mine(client, repo, me, base, tag)?,
+            None => reachable_mine(client, repo, me, tag, 5)?,
+        };
+        releases.push(ReleaseCount {
+            tag: tag.clone(),
+            count,
+        });
+    }
+
     Ok(CommitStats {
         available: true,
-        previous_tag,
-        previous,
-        next,
+        upcoming,
+        releases,
     })
 }
 

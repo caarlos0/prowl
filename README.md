@@ -1,10 +1,11 @@
 # prowl
 
 A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
-**merge queue**, and your **recently merged PRs**. It refreshes on an interval
-and **rings the terminal bell** the moment one of your PRs merges or an open
-PR's CI/merge status changes — and flags whatever changed. On startup it paints
-instantly from a local cache, then refreshes in the background.
+**merge queue**, your **recently merged PRs**, and the **commits you've
+shipped** per release. It refreshes on an interval and **rings the terminal
+bell** the moment one of your PRs merges or an open PR's CI/merge status
+changes — and flags whatever changed. On startup it paints instantly from a
+local cache, then refreshes in the background.
 
 It talks to the GitHub API directly. On first run it walks you through a
 one-time browser **device login** (or set `GITHUB_TOKEN`) — no `gh` CLI needed.
@@ -17,9 +18,12 @@ one-time browser **device login** (or set `GITHUB_TOKEN`) — no `gh` CLI needed
 ▌ Merged PRs  1
    m  #6649  fix(mcp): clean subfolder path               main  1w   …/pull/6649
 
-▌ Commits
-  previous v1.2.0: 8 by you
-  next: 3 by you
+▌ Shipped
+  upcoming: 3
+    v1.2.0: 8
+    v1.1.0: 5
+    v1.0.0: 12
+    v0.9.0: 4
 
 updated 11:21:16 — changed · next 11:26:16
 ```

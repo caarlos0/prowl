@@ -32,7 +32,7 @@ pub struct Cli {
     #[arg(long)]
     pub ascii: bool,
 
-    /// Sections to show, comma-separated. Default: all three.
+    /// Sections to show, comma-separated. Default: all sections.
     #[arg(long, value_enum, value_delimiter = ',', value_name = "SECTION")]
     pub only: Option<Vec<Section>>,
 
@@ -63,7 +63,7 @@ pub enum Section {
     Queue,
     Mine,
     Merged,
-    Commits,
+    Shipped,
 }
 
 impl Cli {
@@ -82,8 +82,8 @@ impl Cli {
     pub fn show_merged(&self) -> bool {
         self.shows(Section::Merged)
     }
-    pub fn show_commits(&self) -> bool {
-        self.shows(Section::Commits)
+    pub fn show_shipped(&self) -> bool {
+        self.shows(Section::Shipped)
     }
 }
 
