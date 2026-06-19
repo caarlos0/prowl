@@ -275,6 +275,18 @@ pub fn clear() -> &'static str {
     "\x1b[2J\x1b[H"
 }
 
+/// The dim placeholder shown during the very first fetch, before any data has
+/// been rendered.
+pub fn loading(styled: bool) -> String {
+    let msg = "Loading...";
+    if styled {
+        let dim = Style::new().dimmed();
+        format!("{}{msg}{}", dim.render(), dim.render_reset())
+    } else {
+        msg.to_string()
+    }
+}
+
 /// Ring the terminal bell once.
 pub fn ring_bell() {
     print!("\x07");
@@ -348,6 +360,14 @@ mod tests {
         let out = render_table(&table, false);
         assert!(!out.contains('\x1b'));
         assert!(out.contains("https://x/1"));
+    }
+
+    #[test]
+    fn loading_is_plain_or_dim() {
+        assert_eq!(loading(false), "Loading...");
+        let styled = loading(true);
+        assert!(styled.contains("Loading..."));
+        assert!(styled.contains("\x1b[2m"));
     }
 
     #[test]

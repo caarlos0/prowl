@@ -216,6 +216,15 @@ fn notify_send(_repo: &Repo, _body: &str) {}
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let styled = std::io::stdout().is_terminal();
+    let watch = styled && !cli.once;
+
+    // Paint a loading screen up front: resolving the repo/user and the first
+    // fetch are several `gh` calls, and we don't want to stare at a blank or
+    // stale screen until the first frame is ready.
+    if watch {
+        println!("{}{}", render::clear(), render::loading(styled));
+        std::io::stdout().flush()?;
+    }
 
     let repo = match &cli.repo {
         Some(slug) => Repo::parse(slug)?,
