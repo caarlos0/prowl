@@ -2,7 +2,7 @@
 //! section headers, the dim status line, and the bell. Every escape is gated on
 //! a `styled` flag, so piped / non-TTY output is plain text.
 
-use crate::status::{self, Rgb};
+use crate::status::{self, Rgb, Status};
 use anstyle::Style;
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -159,20 +159,115 @@ pub fn empty_line(msg: &str, styled: bool) -> String {
     }
 }
 
-/// The dim trailing status line: `updated HH:MM:SS — changed|unchanged`.
-pub fn status_line(hms: &str, change: Option<bool>, styled: bool) -> String {
+/// The dim trailing status line: `updated HH:MM:SS — changed · next HH:MM:SS`.
+pub fn status_line(hms: &str, change: Option<bool>, next: Option<&str>, styled: bool) -> String {
     let suffix = match change {
         Some(true) => " \u{2014} changed",
         Some(false) => " \u{2014} unchanged",
         None => "",
     };
-    let msg = format!("updated {hms}{suffix}");
+    let next_part = match next {
+        Some(n) => format!(" \u{00b7} next {n}"),
+        None => String::new(),
+    };
+    let msg = format!("updated {hms}{suffix}{next_part}");
     if styled {
         let dim = Style::new().dimmed();
         format!("{}{msg}{}", dim.render(), dim.render_reset())
     } else {
         msg
     }
+}
+
+/// A leading cell marking a row that changed since the previous refresh.
+pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
+    if highlighted {
+        let m = if ascii { ">" } else { "\u{25b8}" };
+        Cell::styled(m, status::fg(status::PINK).bold())
+    } else {
+        Cell::plain(" ")
+    }
+}
+
+/// A dim reference legend explaining the status glyphs and `STATE` values that
+/// are currently on screen. `statuses` and `states` should already be
+/// deduplicated; only entries that appear are listed.
+pub fn reference(
+    statuses: &[Status],
+    has_none: bool,
+    states: &[String],
+    ascii: bool,
+    styled: bool,
+) -> String {
+    let dim = Style::new().dimmed();
+    let mut out = String::new();
+
+    if styled {
+        let h = dim.bold();
+        let _ = writeln!(out, "{}Reference{}", h.render(), h.render_reset());
+    } else {
+        out.push_str("Reference\n");
+    }
+
+    for s in status::ORDER {
+        if !statuses.contains(&s) {
+            continue;
+        }
+        let ch = status::glyph(s, ascii);
+        let name = status::status_name(s);
+        let meaning = status::status_meaning(s);
+        if styled {
+            let g = status::fg(status::status_style(s).1);
+            let _ = writeln!(
+                out,
+                "  {}{ch}{} {}{name} \u{2014} {meaning}{}",
+                g.render(),
+                g.render_reset(),
+                dim.render(),
+                dim.render_reset()
+            );
+        } else {
+            let _ = writeln!(out, "  {ch} {name} \u{2014} {meaning}");
+        }
+    }
+    if has_none {
+        let line = "- none \u{2014} no checks reported";
+        let _ = writeln!(out, "  {}", empty_line(line, styled));
+    }
+
+    // States in legend order, then any unknown extras.
+    let mut ordered: Vec<&str> = status::STATE_ORDER
+        .iter()
+        .copied()
+        .filter(|k| states.iter().any(|s| s == k))
+        .collect();
+    for s in states {
+        if !ordered.contains(&s.as_str()) {
+            ordered.push(s);
+        }
+    }
+    for st in ordered {
+        let meaning = status::state_meaning(st);
+        let tail = if meaning.is_empty() {
+            String::new()
+        } else {
+            format!(" \u{2014} {meaning}")
+        };
+        if styled {
+            let c = status::state_style(st);
+            let _ = writeln!(
+                out,
+                "  {}{st}{}{}{tail}{}",
+                c.render(),
+                c.render_reset(),
+                dim.render(),
+                dim.render_reset()
+            );
+        } else {
+            let _ = writeln!(out, "  {st}{tail}");
+        }
+    }
+    out
 }
 
 /// Clear the screen and home the cursor.
@@ -256,15 +351,18 @@ mod tests {
     }
 
     #[test]
-    fn status_line_suffix() {
-        assert_eq!(status_line("12:00:00", None, false), "updated 12:00:00");
+    fn status_line_suffix_and_next() {
         assert_eq!(
-            status_line("12:00:00", Some(true), false),
+            status_line("12:00:00", None, None, false),
+            "updated 12:00:00"
+        );
+        assert_eq!(
+            status_line("12:00:00", Some(true), None, false),
             "updated 12:00:00 \u{2014} changed"
         );
         assert_eq!(
-            status_line("12:00:00", Some(false), false),
-            "updated 12:00:00 \u{2014} unchanged"
+            status_line("12:00:00", Some(false), Some("12:10:00"), false),
+            "updated 12:00:00 \u{2014} unchanged \u{00b7} next 12:10:00"
         );
     }
 }

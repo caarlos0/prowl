@@ -5,6 +5,7 @@
 use prowl::model::{MergedData, MineData, QueueData};
 use prowl::status::Status;
 use prowl::{gh, merged, prs, queue, render};
+use std::collections::HashSet;
 
 fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
     gh::parse_graphql(json.as_bytes()).expect("fixture should parse")
@@ -63,11 +64,13 @@ fn mine_parses_sorts_and_derives_status_and_fail() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
 
-    // Sorted by number descending.
+    // Sorted by last update time (most recent first).
     assert_eq!(
         rows.iter().map(|r| r.number).collect::<Vec<_>>(),
         vec![6656, 6475, 5323]
     );
+    let upd: Vec<&Option<String>> = rows.iter().map(|r| &r.updated_at).collect();
+    assert!(upd.windows(2).all(|w| w[0] >= w[1]), "updatedAt descending");
     // #6656 is mergeable; its only non-success suite is a zero-run phantom, so
     // it is green (pass) with no failures — not pending.
     assert_eq!(rows[0].status, Some(Status::Pass));
@@ -85,9 +88,20 @@ fn mine_parses_sorts_and_derives_status_and_fail() {
 fn mine_ascii_status_letters() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes);
-    let table = prs::to_table(&rows, true); // ascii = true
-    let st: Vec<&str> = table.rows.iter().map(|r| r[0].text.as_str()).collect();
+    let table = prs::to_table(&rows, true, &HashSet::new()); // ascii, no highlights
+    // Column 0 is the change marker; column 1 is the status glyph.
+    let st: Vec<&str> = table.rows.iter().map(|r| r[1].text.as_str()).collect();
     assert_eq!(st, vec!["P", "!", "!"]); // pass, conflicts, conflicts
+}
+
+#[test]
+fn mine_changed_rows_get_a_marker() {
+    let data: MineData = parse(include_str!("fixtures/mine.json"));
+    let rows = prs::build_rows(data.search.nodes);
+    let highlight = HashSet::from([6475]);
+    let table = prs::to_table(&rows, true, &highlight);
+    let marks: Vec<&str> = table.rows.iter().map(|r| r[0].text.as_str()).collect();
+    assert_eq!(marks, vec![" ", ">", " "]); // only #6475 is flagged
 }
 
 #[test]
@@ -106,11 +120,11 @@ fn merged_parses_sorts_desc_and_caps() {
     let rows = merged::build_rows(data.search.nodes, 4);
 
     assert_eq!(rows.len(), 4); // capped at the limit
-    // Most recent merge first.
+    // Most recently updated first.
     assert_eq!(rows[0].number, 6649);
     assert_eq!(rows[0].base, "main");
-    // Strictly descending merge timestamps.
-    let ts: Vec<&Option<String>> = rows.iter().map(|r| &r.merged_at).collect();
+    // Strictly descending update timestamps.
+    let ts: Vec<&Option<String>> = rows.iter().map(|r| &r.updated_at).collect();
     assert!(ts.windows(2).all(|w| w[0] >= w[1]));
 }
 

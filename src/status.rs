@@ -15,6 +15,7 @@ pub const MAUVE: Rgb = (203, 166, 247); // #cba6f7
 pub const PEACH: Rgb = (250, 179, 135); // #fab387
 pub const BLUE: Rgb = (137, 180, 250); // #89b4fa
 pub const LAVENDER: Rgb = (180, 190, 254); // #b4befe
+pub const PINK: Rgb = (245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
 
 /// CI/PR status. Glyphs/colors are fixed by the shared palette.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -25,6 +26,27 @@ pub enum Status {
     Pending,
     Pass,
 }
+
+/// All statuses in legend order.
+pub const ORDER: [Status; 5] = [
+    Status::Pass,
+    Status::Fail,
+    Status::Pending,
+    Status::Conflicts,
+    Status::Merged,
+];
+
+/// `mergeStateStatus` values in legend order.
+pub const STATE_ORDER: [&str; 8] = [
+    "CLEAN",
+    "UNSTABLE",
+    "BLOCKED",
+    "BEHIND",
+    "DIRTY",
+    "DRAFT",
+    "HAS_HOOKS",
+    "UNKNOWN",
+];
 
 /// Glyph + truecolor for a status — the single lookup both views share.
 pub fn status_style(s: Status) -> (char, Rgb) {
@@ -54,6 +76,53 @@ pub fn glyph(s: Status, ascii: bool) -> char {
         status_ascii(s)
     } else {
         status_style(s).0
+    }
+}
+
+/// Short name of a status (for the reference legend).
+pub fn status_name(s: Status) -> &'static str {
+    match s {
+        Status::Pass => "pass",
+        Status::Fail => "fail",
+        Status::Pending => "pending",
+        Status::Merged => "merged",
+        Status::Conflicts => "conflicts",
+    }
+}
+
+/// One-line meaning of a status (for the reference legend).
+pub fn status_meaning(s: Status) -> &'static str {
+    match s {
+        Status::Pass => "all checks that ran passed",
+        Status::Fail => "a check that ran failed",
+        Status::Pending => "checks still running",
+        Status::Merged => "merged",
+        Status::Conflicts => "merge conflict; needs a rebase",
+    }
+}
+
+/// One-line meaning of a `mergeStateStatus` value (for the reference legend).
+pub fn state_meaning(state: &str) -> &'static str {
+    match state {
+        "CLEAN" => "mergeable; all required checks green",
+        "UNSTABLE" => "mergeable, but non-required checks are failing or pending",
+        "BLOCKED" => "blocked; required reviews or checks not satisfied",
+        "BEHIND" => "behind the base branch; needs an update",
+        "DIRTY" => "merge conflict",
+        "DRAFT" => "draft; not ready to merge",
+        "HAS_HOOKS" => "mergeable, with pre-receive hooks",
+        "UNKNOWN" => "mergeability not yet computed",
+        _ => "",
+    }
+}
+
+/// Truecolor style for a `mergeStateStatus` value, using the shared palette.
+pub fn state_style(state: &str) -> Style {
+    match state {
+        "CLEAN" | "HAS_HOOKS" => fg(GREEN),
+        "UNSTABLE" | "BLOCKED" | "BEHIND" => fg(YELLOW),
+        "DIRTY" | "DRAFT" => fg(RED),
+        _ => Style::new().dimmed(),
     }
 }
 
@@ -236,5 +305,14 @@ mod tests {
         // Only phantom suites -> no real CI -> none.
         let s = vec![suite(Some("FAILURE"), 0), suite(None, 0)];
         assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), None);
+    }
+
+    #[test]
+    fn state_styles_match_palette() {
+        assert_eq!(state_style("CLEAN"), fg(GREEN));
+        assert_eq!(state_style("UNSTABLE"), fg(YELLOW));
+        assert_eq!(state_style("BLOCKED"), fg(YELLOW));
+        assert_eq!(state_style("DIRTY"), fg(RED));
+        assert_eq!(state_style("WHATEVER"), Style::new().dimmed());
     }
 }

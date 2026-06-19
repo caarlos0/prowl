@@ -3,9 +3,10 @@
 //! Catppuccin palette.
 
 use crate::model::PrNode;
-use crate::render::{Cell, Table};
-use crate::status::{self, BLUE, GREEN, RED, Status, YELLOW};
+use crate::render::{self, Cell, Table};
+use crate::status::{self, BLUE, RED, Status, YELLOW};
 use anstyle::Style;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrRow {
@@ -17,9 +18,10 @@ pub struct PrRow {
     pub queue: Option<(i64, String)>,
     pub fail: usize,
     pub url: String,
+    pub updated_at: Option<String>,
 }
 
-/// Build rows sorted by PR number descending.
+/// Build rows sorted by last update time (most recent first).
 pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
     let mut rows: Vec<PrRow> = nodes
         .into_iter()
@@ -35,26 +37,22 @@ pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
                 fail,
                 title: pr.title,
                 url: pr.url,
+                updated_at: pr.updated_at,
             }
         })
         .collect();
-    rows.sort_by_key(|r| std::cmp::Reverse(r.number));
+    rows.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.number.cmp(&a.number))
+    });
     rows
 }
 
-/// Style for a `mergeStateStatus` value, using the shared palette.
-pub fn state_style(state: &str) -> Style {
-    match state {
-        "CLEAN" | "HAS_HOOKS" => status::fg(GREEN),
-        "BLOCKED" | "BEHIND" => status::fg(YELLOW),
-        "DIRTY" | "DRAFT" => status::fg(RED),
-        _ => Style::new().dimmed(),
-    }
-}
-
-pub fn to_table(rows: &[PrRow], ascii: bool) -> Table {
+pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
+        let mark = render::change_marker(highlight.contains(&r.number), ascii);
         let st = match r.status {
             Some(s) => Cell::styled(status::glyph(s, ascii).to_string(), status::fg(status::status_style(s).1)),
             None => Cell::styled("-".to_string(), Style::new().dimmed()),
@@ -65,7 +63,7 @@ pub fn to_table(rows: &[PrRow], ascii: bool) -> Table {
             Cell::styled(format!("#{}", r.number), status::fg(BLUE))
         };
         let state_text = r.merge_state.clone().unwrap_or_else(|| "?".to_string());
-        let state = Cell::styled(state_text.clone(), state_style(&state_text));
+        let state = Cell::styled(state_text.clone(), status::state_style(&state_text));
         let queue_text = match &r.queue {
             Some((pos, state)) => format!("#{pos} {state}"),
             None => "-".to_string(),
@@ -81,6 +79,7 @@ pub fn to_table(rows: &[PrRow], ascii: bool) -> Table {
             (r.fail.to_string(), status::fg(RED).bold())
         };
         out.push(vec![
+            mark,
             st,
             pr,
             Cell::plain(r.title.clone()),
@@ -91,7 +90,7 @@ pub fn to_table(rows: &[PrRow], ascii: bool) -> Table {
         ]);
     }
     Table {
-        header: vec!["ST", "PR", "TITLE", "STATE", "QUEUE", "FAIL", "URL"],
+        header: vec!["", "", "PR", "TITLE", "STATE", "QUEUE", "FAIL", "URL"],
         rows: out,
     }
 }
@@ -110,6 +109,7 @@ mod tests {
             mergeable: Some(mergeable.to_string()),
             merge_state_status: Some(state.to_string()),
             is_draft: false,
+            updated_at: None,
             merge_queue_entry: None,
             commits: Commits {
                 nodes: vec![CommitNode {
@@ -130,17 +130,20 @@ mod tests {
     }
 
     #[test]
-    fn sorts_by_number_desc_and_derives_status_and_fail() {
-        let rows = build_rows(vec![
-            pr(10, "MERGEABLE", "BLOCKED", &[Some("SUCCESS")]),
-            pr(42, "CONFLICTING", "DIRTY", &[Some("FAILURE"), Some("FAILURE")]),
-        ]);
-        assert_eq!(rows[0].number, 42);
-        assert_eq!(rows[0].status, Some(Status::Conflicts));
-        assert_eq!(rows[0].fail, 2);
-        assert_eq!(rows[1].number, 10);
-        assert_eq!(rows[1].status, Some(Status::Pass));
-        assert_eq!(rows[1].fail, 0);
+    fn sorts_by_updated_at_then_derives_status_and_fail() {
+        let mut a = pr(10, "MERGEABLE", "BLOCKED", &[Some("SUCCESS")]);
+        a.updated_at = Some("2026-06-19T10:00:00Z".to_string());
+        let mut b = pr(42, "CONFLICTING", "DIRTY", &[Some("FAILURE"), Some("FAILURE")]);
+        b.updated_at = Some("2026-06-19T09:00:00Z".to_string());
+        // #10 was updated more recently than #42, so it sorts first despite the
+        // lower number.
+        let rows = build_rows(vec![a, b]);
+        assert_eq!(rows[0].number, 10);
+        assert_eq!(rows[0].status, Some(Status::Pass));
+        assert_eq!(rows[0].fail, 0);
+        assert_eq!(rows[1].number, 42);
+        assert_eq!(rows[1].status, Some(Status::Conflicts));
+        assert_eq!(rows[1].fail, 2);
     }
 
     #[test]
@@ -152,13 +155,5 @@ mod tests {
         });
         let rows = build_rows(vec![p]);
         assert_eq!(rows[0].queue, Some((3, "QUEUED".to_string())));
-    }
-
-    #[test]
-    fn state_styles_match_palette() {
-        assert_eq!(state_style("CLEAN"), status::fg(GREEN));
-        assert_eq!(state_style("BLOCKED"), status::fg(YELLOW));
-        assert_eq!(state_style("DIRTY"), status::fg(RED));
-        assert_eq!(state_style("WHATEVER"), Style::new().dimmed());
     }
 }

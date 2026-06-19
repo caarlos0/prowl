@@ -44,6 +44,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 20, value_name = "N")]
     pub merged_limit: usize,
 
+    /// Hide the reference legend that explains the status glyphs and STATE values.
+    #[arg(long)]
+    pub no_reference: bool,
+
     /// Also send a desktop notification on change (requires the `notify` build feature).
     #[arg(long)]
     pub notify: bool,

@@ -90,7 +90,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
   search(type: ISSUE, first: 50, query: $q) {
     nodes {
       ... on PullRequest {
-        number title url state mergeable mergeStateStatus isDraft
+        number title url state mergeable mergeStateStatus isDraft updatedAt
         mergeQueueEntry { position state }
         commits(last: 1) { nodes { commit { checkSuites(first: 50) { nodes { conclusion checkRuns(first: 1) { totalCount } } } } } }
       }
@@ -119,6 +119,8 @@ pub struct PrNode {
     pub merge_state_status: Option<String>,
     #[serde(rename = "isDraft")]
     pub is_draft: bool,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: Option<String>,
     #[serde(rename = "mergeQueueEntry")]
     pub merge_queue_entry: Option<QueueEntry>,
     pub commits: Commits,
@@ -201,6 +203,8 @@ pub struct MergedNode {
     pub url: String,
     #[serde(rename = "mergedAt")]
     pub merged_at: Option<String>,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: Option<String>,
     #[serde(rename = "baseRefName")]
     pub base_ref_name: Option<String>,
 }
@@ -213,7 +217,7 @@ pub fn merged_query(limit: usize) -> String {
   search(type: ISSUE, first: {first}, query: $q) {{
     nodes {{
       ... on PullRequest {{
-        number title url mergedAt baseRefName
+        number title url mergedAt updatedAt baseRefName
       }}
     }}
   }}

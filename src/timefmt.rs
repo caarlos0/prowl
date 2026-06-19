@@ -4,6 +4,7 @@
 
 use crate::cli::Dur;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
+use std::time::Duration;
 
 /// `YYYY-MM-DD` date `window` ago (UTC), for `merged:>=<since>`.
 pub fn since_date(window: &Dur) -> String {
@@ -14,6 +15,12 @@ pub fn since_date(window: &Dur) -> String {
 /// Local wall-clock `HH:MM:SS`, for the status line.
 pub fn now_hms() -> String {
     Local::now().format("%H:%M:%S").to_string()
+}
+
+/// Local `HH:MM:SS` of the next refresh, `after` from now.
+pub fn next_hms(after: Duration) -> String {
+    let delta = ChronoDuration::from_std(after).unwrap_or_else(|_| ChronoDuration::zero());
+    (Local::now() + delta).format("%H:%M:%S").to_string()
 }
 
 /// Parse an RFC 3339 timestamp (e.g. GitHub's `mergedAt`) to UTC.
