@@ -74,8 +74,22 @@ everything else is testable modules:
 ```sh
 cargo build                                  # must be warning-free
 cargo clippy --all-targets -- -D warnings    # must be clean
+cargo fmt --all --check                      # must be formatted
 cargo test                                   # offline, fixture-based
 ```
+
+CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test on push and PRs.
+
+## Releases
+
+Tag `vX.Y.Z` → `.github/workflows/release.yml` runs **GoReleaser Pro**
+(`.goreleaser.yaml`). The config `includes:` shared snippets from
+[`caarlos0/goreleaserfiles`](https://github.com/caarlos0/goreleaserfiles)
+(changelog/release, notarization, packaging) and publishes: archives, nfpm/nix/
+homebrew-cask packages, the npm package `@caarlos0/prowl`, SBOMs, and a
+cosign-signed checksum. `snapshot.yml` builds a snapshot on pushes/same-repo PRs.
+Required secrets: `GORELEASER_KEY`, `GH_PAT` (repo scope, for tap/nur pushes),
+`NPM_TOKEN`; `MACOS_*` enable optional macOS notarization.
 
 Tests are offline: JSON fixtures under `tests/fixtures/` (real captures + a
 crafted queue) drive parsing → rows → render in `tests/parsing.rs`, plus

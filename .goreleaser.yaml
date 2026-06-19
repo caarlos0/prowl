@@ -1,0 +1,90 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema-pro.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+version: 2
+pro: true
+
+project_name: prowl
+
+# Shared config from https://github.com/caarlos0/goreleaserfiles:
+# changelog/release/snapshot/announce, macOS notarization, and the
+# packages (nfpm, nix, homebrew cask). They read the variables below.
+includes:
+  - from_url:
+      url: https://raw.githubusercontent.com/caarlos0/goreleaserfiles/main/release.yml
+  - from_url:
+      url: https://raw.githubusercontent.com/caarlos0/goreleaserfiles/main/notary.yml
+  - from_url:
+      url: https://raw.githubusercontent.com/caarlos0/goreleaserfiles/main/package.yml
+
+variables:
+  description: "Watch a repo's open PRs, merge queue, and recently merged PRs from your terminal."
+  homepage: "https://github.com/caarlos0/prowl"
+  repository: "https://github.com/caarlos0/prowl"
+
+before:
+  hooks:
+    - rustup default stable
+    - cargo install --locked cargo-zigbuild
+    - cargo fetch --locked
+
+builds:
+  - builder: rust
+    flags:
+      - --release
+    targets:
+      - x86_64-unknown-linux-gnu
+      - x86_64-apple-darwin
+      - x86_64-pc-windows-gnu
+      - aarch64-unknown-linux-gnu
+      - aarch64-apple-darwin
+
+universal_binaries:
+  - replace: true
+
+archives:
+  - formats: [tar.gz]
+    # makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+source:
+  enabled: true
+
+sboms:
+  - artifacts: archive
+
+# Keyless cosign signature of the checksums file.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.bundle"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+# Publish to npm (scoped — the bare `prowl` name is taken).
+npms:
+  - name: "@caarlos0/prowl"
+    description: "Watch a repo's open PRs, merge queue, and recently merged PRs from your terminal."
+    homepage: https://github.com/caarlos0/prowl
+    repository: https://github.com/caarlos0/prowl
+    bugs: https://github.com/caarlos0/prowl/issues
+    license: MIT
+    author: "Carlos Alexandro Becker <carlos@becker.software>"
+    access: public
+    keywords:
+      - github
+      - pull-requests
+      - merge-queue
+      - cli
+      - dashboard
