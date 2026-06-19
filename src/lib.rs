@@ -6,6 +6,7 @@
 
 pub mod changes;
 pub mod cli;
+pub mod commits;
 pub mod gh;
 pub mod merged;
 pub mod model;
@@ -27,9 +28,10 @@ struct Sections {
     merged: Option<Vec<merged::MergedRow>>,
     queue: Option<Vec<queue::QueueRow>>,
     prs: Option<Vec<prs::PrRow>>,
+    commits: Option<commits::CommitStats>,
 }
 
-fn fetch(cli: &Cli, repo: &Repo, me: &str) -> Result<Sections> {
+fn fetch(cli: &Cli, repo: &Repo, me: &str, default_branch: &str) -> Result<Sections> {
     let merged = if cli.show_merged() {
         let since = timefmt::since_date(&cli.merged_window);
         let nodes = model::fetch_merged(repo, me, &since, cli.merged_limit)?;
@@ -47,7 +49,22 @@ fn fetch(cli: &Cli, repo: &Repo, me: &str) -> Result<Sections> {
     } else {
         None
     };
-    Ok(Sections { merged, queue, prs })
+    // Best-effort: a failure here (no releases, empty repo, ...) degrades to an
+    // "unavailable" line rather than taking down the whole dashboard.
+    let commits = if cli.show_commits() {
+        Some(
+            commits::fetch(repo, me, default_branch)
+                .unwrap_or_else(|_| commits::CommitStats::unavailable()),
+        )
+    } else {
+        None
+    };
+    Ok(Sections {
+        merged,
+        queue,
+        prs,
+        commits,
+    })
 }
 
 /// The status glyphs and `STATE` values currently on screen, for the legend.
@@ -103,7 +120,7 @@ fn render_body(
             f.push_str(&render::header(
                 "Open PRs",
                 status::LAVENDER,
-                rows.len(),
+                Some(rows.len()),
                 styled,
             ));
             f.push('\n');
@@ -122,7 +139,7 @@ fn render_body(
             f.push_str(&render::header(
                 "Merge Queue",
                 status::BLUE,
-                rows.len(),
+                Some(rows.len()),
                 styled,
             ));
             f.push('\n');
@@ -143,13 +160,18 @@ fn render_body(
             f.push_str(&render::header(
                 "Merged PRs",
                 status::MAUVE,
-                rows.len(),
+                Some(rows.len()),
                 styled,
             ));
             f.push('\n');
             let table = merged::to_table(rows, ascii, &changes.newly_merged);
             f.push_str(&render::render_table(&table, styled));
         }
+        f.push('\n');
+    }
+
+    if let Some(stats) = &s.commits {
+        render_commits(&mut f, stats, styled);
         f.push('\n');
     }
 
@@ -170,6 +192,34 @@ fn trailing(change: Option<bool>, next: Option<&str>, styled: bool) -> String {
     let mut s = render::status_line(&timefmt::now_hms(), change, next, styled);
     s.push('\n');
     s
+}
+
+/// Render the "Commits" section: my commit counts for the previous and next
+/// stable release.
+fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
+    if !stats.available {
+        f.push_str(&render::empty_line("Commit stats unavailable.", styled));
+        f.push('\n');
+        return;
+    }
+    f.push_str(&render::header("Commits", status::TEAL, None, styled));
+    f.push('\n');
+
+    let count = |c: &commits::Count| format!("{}{}", c.mine, if c.capped { "+" } else { "" });
+
+    let prev = match (&stats.previous_tag, &stats.previous) {
+        (Some(tag), Some(c)) => format!("  previous {tag}: {} by you", count(c)),
+        _ => "  previous: no stable release yet".to_string(),
+    };
+    f.push_str(&render::empty_line(&prev, styled));
+    f.push('\n');
+
+    let next = match &stats.next {
+        Some(c) => format!("  next: {} by you", count(c)),
+        None => "  next: \u{2014}".to_string(),
+    };
+    f.push_str(&render::empty_line(&next, styled));
+    f.push('\n');
 }
 
 /// A dim trailing line reporting a transient error (last good data is kept).
@@ -217,10 +267,13 @@ pub fn run() -> Result<()> {
         None => gh::detect_repo()?,
     };
     let me = gh::me()?;
+    // The default branch is the head of the "next release" commit range.
+    // Resolved once; falls back to `main` if it can't be determined.
+    let default_branch = gh::default_branch(&repo).unwrap_or_else(|_| "main".to_string());
 
     // Single render: --once, or whenever stdout is not a TTY.
     if cli.once || !styled {
-        let sections = fetch(&cli, &repo, &me)?;
+        let sections = fetch(&cli, &repo, &me, &default_branch)?;
         let frame = render_body(&sections, &cli, &repo, &me, &Changes::default(), styled)
             + &trailing(None, None, styled);
         print!("{frame}");
@@ -235,7 +288,7 @@ pub fn run() -> Result<()> {
     let mut prev: Option<Tracker> = None;
     let mut last_good: Option<Sections> = None;
     loop {
-        match fetch(&cli, &repo, &me) {
+        match fetch(&cli, &repo, &me, &default_branch) {
             Ok(sections) => {
                 let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
                 let changes = prev.as_ref().map(|p| tracker.diff(p)).unwrap_or_default();

@@ -15,6 +15,7 @@ pub const MAUVE: Rgb = (203, 166, 247); // #cba6f7
 pub const PEACH: Rgb = (250, 179, 135); // #fab387
 pub const BLUE: Rgb = (137, 180, 250); // #89b4fa
 pub const LAVENDER: Rgb = (180, 190, 254); // #b4befe
+pub const TEAL: Rgb = (148, 226, 213); // #94e2d5
 pub const PINK: Rgb = (245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
 
 /// CI/PR status. Glyphs/colors are fixed by the shared palette.

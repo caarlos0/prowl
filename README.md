@@ -16,6 +16,10 @@ existing GitHub auth — no tokens, no config.
 ▌ Merged PRs  1
    m  #6649  fix(mcp): clean subfolder path               main  1w   …/pull/6649
 
+▌ Commits
+  previous v1.2.0: 8 by you
+  next: 3 by you
+
 updated 11:21:16 — changed · next 11:26:16
 ```
 

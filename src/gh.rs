@@ -77,6 +77,20 @@ pub fn me() -> Result<String> {
     Ok(login)
 }
 
+/// The repository's default branch (e.g. `main`).
+pub fn default_branch(repo: &Repo) -> Result<String> {
+    let branch = run_str(&[
+        "api",
+        &format!("repos/{}/{}", repo.owner, repo.name),
+        "--jq",
+        ".default_branch",
+    ])?;
+    if branch.is_empty() {
+        bail!("could not determine the default branch for {}", repo.slug());
+    }
+    Ok(branch)
+}
+
 /// Detect the current repository.
 ///
 /// `gh repo view` misbehaves inside worktrees (cli/cli#1837), so when it fails

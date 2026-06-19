@@ -135,21 +135,25 @@ pub fn render_table(table: &Table, styled: bool) -> String {
 }
 
 /// A concise, non-figlet section header: a colored bold accent bar, the title,
-/// and a dim row count.
-pub fn header(title: &str, accent: Rgb, count: usize, styled: bool) -> String {
+/// and an optional dim row count.
+pub fn header(title: &str, accent: Rgb, count: Option<usize>, styled: bool) -> String {
     if styled {
         let bar = status::fg(accent).bold();
         let dim = Style::new().dimmed();
+        let count_part = match count {
+            Some(c) => format!("  {}{}{}", dim.render(), c, dim.render_reset()),
+            None => String::new(),
+        };
         format!(
-            "{}\u{258c} {title}{}  {}{}{}",
+            "{}\u{258c} {title}{}{count_part}",
             bar.render(),
             bar.render_reset(),
-            dim.render(),
-            count,
-            dim.render_reset()
         )
     } else {
-        format!("{title} ({count})")
+        match count {
+            Some(c) => format!("{title} ({c})"),
+            None => title.to_string(),
+        }
     }
 }
 

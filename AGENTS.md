@@ -7,9 +7,9 @@ model, or workflow change.
 ## What prowl is
 
 A small terminal dashboard that watches a GitHub repo and re-renders on an
-interval: **Open PRs → Merge Queue → Merged PRs**, with a reference legend at
-the bottom. It rings the terminal bell when one of your PRs merges or an open
-PR's status changes, and flags the changed rows. It is a plain
+interval: **Open PRs → Merge Queue → Merged PRs → Commits**, with a reference
+legend at the bottom. It rings the terminal bell when one of your PRs merges or
+an open PR's status changes, and flags the changed rows. It is a plain
 `std::thread::sleep` redraw loop — **not** a raw-mode/alt-screen TUI — so output
 stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 
@@ -44,6 +44,8 @@ everything else is testable modules:
 - `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8,
   headers, reference legend, status line, loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
+- `commits.rs` — "commits by me" counts for the previous/next stable release
+  (GitHub releases + compare REST APIs); best-effort, never fatal.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
