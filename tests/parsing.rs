@@ -1,4 +1,4 @@
-//! Offline, fixture-based tests: real (and a crafted) `gh api graphql`
+//! Offline, fixture-based tests: real (and a crafted) GitHub GraphQL API
 //! responses are parsed through the same path the binary uses, then turned into
 //! rows and rendered. No network access.
 
