@@ -23,3 +23,9 @@ ureq = { version = "3.3.0", default-features = false, features = ["json", "rustl
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# On Linux the default keyring backend is the in-process `mock`, which doesn't
+# persist across runs. Enable a real persistent backend there; macOS/Windows
+# feature sets are unchanged.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "^3", default-features = false, features = ["linux-native-sync-persistent"] }
