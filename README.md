@@ -5,8 +5,8 @@ A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
 and **rings the terminal bell** the moment one of your PRs merges or an open
 PR's CI/merge status changes — and flags whatever changed.
 
-It shells out to the [`gh`](https://cli.github.com) CLI, so it just uses your
-existing GitHub auth — no tokens, no config.
+It talks to the GitHub API directly. On first run it walks you through a
+one-time browser **device login** (or set `GITHUB_TOKEN`) — no `gh` CLI needed.
 
 ```
 ▌ Open PRs  3
@@ -33,8 +33,16 @@ your terminal has no Nerd Font.
 cargo install --path .
 ```
 
-Requires the [`gh`](https://cli.github.com) CLI on your `PATH`, authenticated
-(`gh auth login`).
+## Login
+
+On first use, prowl runs a one-time GitHub device login and caches the token in
+your OS keyring (a `chmod 600` file on Linux/headless). You can also trigger it
+explicitly, or skip it entirely with an env var:
+
+```sh
+prowl --login                 # authorize once in the browser
+GITHUB_TOKEN=… prowl --once    # or just bring your own token
+```
 
 ## Usage
 

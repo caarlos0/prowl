@@ -47,6 +47,10 @@ pub struct Cli {
     /// Hide the reference legend that explains the status glyphs and STATE values.
     #[arg(long)]
     pub no_reference: bool,
+
+    /// Authenticate with GitHub (device flow) and exit.
+    #[arg(long)]
+    pub login: bool,
 }
 
 /// The dashboard sections, usable with `--only`.

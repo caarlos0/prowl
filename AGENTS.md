@@ -15,10 +15,14 @@ stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 
 ## Golden rules
 
-- **Transport is the `gh` CLI only.** No HTTP client, no tokens. Shell out to
-  `gh` and parse stdout as JSON with typed serde structs (`gh.rs`). GraphQL goes
-  through `gh api graphql -f <vars> -f query=<Q>`; parse the full `{"data":...}`
-  envelope yourself (no `-q`/`--jq`).
+- **Transport is the native GitHub API over HTTP** (`ureq` + rustls), not the
+  `gh` CLI. `github::Client` sends a Bearer token with a User-Agent +
+  `X-GitHub-Api-Version`. GraphQL is a `POST /graphql` with `{query, variables}`;
+  parse the full `{"data":...}` envelope (`github::parse_graphql`, surfacing
+  GraphQL `errors`). REST is `GET /<path>`.
+- **Auth** lives in `auth.rs`: token resolution is `PROWL_TOKEN` → `GITHUB_TOKEN`
+  → OS keyring / chmod-600 file → OAuth **device flow** (interactive). The OAuth
+  App client id is public and embedded. `--login` forces the device flow.
 - **Don't add a TUI framework** (ratatui, etc.): it cannot emit OSC-8 hyperlinks
   and does not degrade to plain text when piped. Both are required.
 - **Styling:** `anstyle` for SGR incl. 24-bit truecolor; OSC-8 links, the bell,
@@ -33,9 +37,10 @@ stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 everything else is testable modules:
 
 - `cli.rs` — clap derive CLI, `Section` enum, duration parser (`s/m/h/d/w`).
-- `gh.rs` — `gh` subprocess wrapper, `me()`, `detect_repo()` (with the
-  `gh repo set-default --view` fallback for worktrees), `graphql()`,
+- `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
+  `default_branch()`, `detect_repo()` (parses the git `origin` remote),
   `parse_graphql()`.
+- `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the three queries; query strings.
 - `status.rs` — **the** palette: `Status`, `status_style`, glyphs/ASCII,
   `derive_status` (precedence), `fail_count`; and the `mergeStateStatus`
@@ -59,10 +64,10 @@ everything else is testable modules:
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
   not ring). The first refresh is silent. Changed rows get a `▸` marker.
-- **Resilience:** a failed `gh` call keeps the last good data, shows a dim error
+- **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
 
-## The three queries (see `model.rs`)
+## The three GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
 - Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
@@ -70,6 +75,7 @@ everything else is testable modules:
   checkRuns { totalCount } }`, `updatedAt`.
 - Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with `mergedAt`,
   `updatedAt`, `baseRefName`.
+- Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
 
 ## Build / test / lint
 

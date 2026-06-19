@@ -1,10 +1,9 @@
 //! "Commits by me" counts for the previous and next stable release of the
 //! watched repo, via the GitHub releases + compare REST APIs.
 
-use crate::gh::{self, Repo};
+use crate::github::{Client, Repo};
 use anyhow::Result;
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitStats {
@@ -61,15 +60,10 @@ struct Author {
     login: String,
 }
 
-fn api<T: DeserializeOwned>(path: &str) -> Result<T> {
-    let bytes = gh::run(&["api", path])?;
-    Ok(serde_json::from_slice(&bytes)?)
-}
-
 /// Stable (non-draft, non-prerelease) release tags, most recent first.
-fn stable_tags(repo: &Repo) -> Result<Vec<String>> {
+fn stable_tags(client: &Client, repo: &Repo) -> Result<Vec<String>> {
     let path = format!("repos/{}/{}/releases?per_page=50", repo.owner, repo.name);
-    let releases: Vec<Release> = api(&path)?;
+    let releases: Vec<Release> = client.get(&path)?;
     Ok(releases
         .into_iter()
         .filter(|r| !r.draft && !r.prerelease)
@@ -91,24 +85,30 @@ fn count_mine(commits: &[CommitNode], total: usize, me: &str) -> Count {
 }
 
 /// My commits in `base..head` via the compare API.
-fn compare_mine(repo: &Repo, me: &str, base: &str, head: &str) -> Result<Count> {
+fn compare_mine(client: &Client, repo: &Repo, me: &str, base: &str, head: &str) -> Result<Count> {
     let path = format!(
         "repos/{}/{}/compare/{}...{}",
         repo.owner, repo.name, base, head
     );
-    let cmp: Comparison = api(&path)?;
+    let cmp: Comparison = client.get(&path)?;
     Ok(count_mine(&cmp.commits, cmp.total_commits, me))
 }
 
 /// My commits reachable from `reff` (paginated, server-side author filter).
-fn reachable_mine(repo: &Repo, me: &str, reff: &str, max_pages: usize) -> Result<Count> {
+fn reachable_mine(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    reff: &str,
+    max_pages: usize,
+) -> Result<Count> {
     let mut mine = 0usize;
     for page in 1..=max_pages {
         let path = format!(
             "repos/{}/{}/commits?sha={}&author={}&per_page=100&page={}",
             repo.owner, repo.name, reff, me, page
         );
-        let nodes: Vec<CommitNode> = api(&path)?;
+        let nodes: Vec<CommitNode> = client.get(&path)?;
         let n = nodes.len();
         mine += n;
         if n < 100 {
@@ -122,22 +122,25 @@ fn reachable_mine(repo: &Repo, me: &str, reff: &str, max_pages: usize) -> Result
 }
 
 /// Compute the commit stats for `repo`.
-pub fn fetch(repo: &Repo, me: &str, default_branch: &str) -> Result<CommitStats> {
-    let tags = stable_tags(repo)?;
+pub fn fetch(client: &Client, repo: &Repo, me: &str, default_branch: &str) -> Result<CommitStats> {
+    let tags = stable_tags(client, repo)?;
     let latest = tags.first();
     let prev = tags.get(1);
 
     let (previous_tag, previous) = match (prev, latest) {
-        (Some(p), Some(l)) => (Some(l.clone()), Some(compare_mine(repo, me, p, l)?)),
+        (Some(p), Some(l)) => (Some(l.clone()), Some(compare_mine(client, repo, me, p, l)?)),
         // First release: count everything up to it.
-        (None, Some(l)) => (Some(l.clone()), Some(reachable_mine(repo, me, l, 5)?)),
+        (None, Some(l)) => (
+            Some(l.clone()),
+            Some(reachable_mine(client, repo, me, l, 5)?),
+        ),
         _ => (None, None),
     };
 
     let next = match latest {
-        Some(l) => Some(compare_mine(repo, me, l, default_branch)?),
+        Some(l) => Some(compare_mine(client, repo, me, l, default_branch)?),
         // No releases yet: everything on the default branch is the next release.
-        None => Some(reachable_mine(repo, me, default_branch, 5)?),
+        None => Some(reachable_mine(client, repo, me, default_branch, 5)?),
     };
 
     Ok(CommitStats {

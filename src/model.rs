@@ -2,7 +2,7 @@
 //! helpers that run them. Queries are sent verbatim (the merged query's page
 //! size is the only thing we interpolate, so `--merged-limit` is honored).
 
-use crate::gh::{self, Repo};
+use crate::github::{Client, Repo};
 use anyhow::Result;
 use serde::Deserialize;
 
@@ -74,10 +74,10 @@ pub fn queue_nodes(data: QueueData) -> Vec<QueueEntryNode> {
 }
 
 /// Fetch merge-queue entries. A null queue or empty queue both yield `[]`.
-pub fn fetch_queue(repo: &Repo) -> Result<Vec<QueueEntryNode>> {
-    let data: QueueData = gh::graphql(
-        &[("owner", repo.owner.as_str()), ("name", repo.name.as_str())],
+pub fn fetch_queue(client: &Client, repo: &Repo) -> Result<Vec<QueueEntryNode>> {
+    let data: QueueData = client.graphql(
         QUEUE_QUERY,
+        serde_json::json!({ "owner": repo.owner, "name": repo.name }),
     )?;
     Ok(queue_nodes(data))
 }
@@ -176,9 +176,9 @@ pub fn mine_search(repo: &Repo, me: &str) -> String {
     )
 }
 
-pub fn fetch_my_prs(repo: &Repo, me: &str) -> Result<Vec<PrNode>> {
+pub fn fetch_my_prs(client: &Client, repo: &Repo, me: &str) -> Result<Vec<PrNode>> {
     let q = mine_search(repo, me);
-    let data: MineData = gh::graphql(&[("q", q.as_str())], MINE_QUERY)?;
+    let data: MineData = client.graphql(MINE_QUERY, serde_json::json!({ "q": q }))?;
     Ok(data.search.nodes)
 }
 
@@ -232,8 +232,14 @@ pub fn merged_search(repo: &Repo, me: &str, since: &str) -> String {
     )
 }
 
-pub fn fetch_merged(repo: &Repo, me: &str, since: &str, limit: usize) -> Result<Vec<MergedNode>> {
+pub fn fetch_merged(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    since: &str,
+    limit: usize,
+) -> Result<Vec<MergedNode>> {
     let q = merged_search(repo, me, since);
-    let data: MergedData = gh::graphql(&[("q", q.as_str())], &merged_query(limit))?;
+    let data: MergedData = client.graphql(&merged_query(limit), serde_json::json!({ "q": q }))?;
     Ok(data.search.nodes)
 }

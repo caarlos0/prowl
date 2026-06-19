@@ -4,10 +4,11 @@
 //! thin binary so the parsing/rendering/change-detection logic can be exercised
 //! by offline, fixture-based tests under `tests/`.
 
+pub mod auth;
 pub mod changes;
 pub mod cli;
 pub mod commits;
-pub mod gh;
+pub mod github;
 pub mod merged;
 pub mod model;
 pub mod prs;
@@ -16,11 +17,11 @@ pub mod render;
 pub mod status;
 pub mod timefmt;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use changes::{Changes, Tracker};
 use clap::Parser;
 use cli::Cli;
-use gh::Repo;
+use github::{Client, Repo};
 use std::io::{IsTerminal, Write};
 
 /// A fetched snapshot of every enabled section (`None` = section disabled).
@@ -31,21 +32,27 @@ struct Sections {
     commits: Option<commits::CommitStats>,
 }
 
-fn fetch(cli: &Cli, repo: &Repo, me: &str, default_branch: &str) -> Result<Sections> {
+fn fetch(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    default_branch: &str,
+) -> Result<Sections> {
     let merged = if cli.show_merged() {
         let since = timefmt::since_date(&cli.merged_window);
-        let nodes = model::fetch_merged(repo, me, &since, cli.merged_limit)?;
+        let nodes = model::fetch_merged(client, repo, me, &since, cli.merged_limit)?;
         Some(merged::build_rows(nodes, cli.merged_limit))
     } else {
         None
     };
     let queue = if cli.show_queue() {
-        Some(queue::build_rows(model::fetch_queue(repo)?, me))
+        Some(queue::build_rows(model::fetch_queue(client, repo)?, me))
     } else {
         None
     };
     let prs = if cli.show_mine() {
-        Some(prs::build_rows(model::fetch_my_prs(repo, me)?))
+        Some(prs::build_rows(model::fetch_my_prs(client, repo, me)?))
     } else {
         None
     };
@@ -53,7 +60,7 @@ fn fetch(cli: &Cli, repo: &Repo, me: &str, default_branch: &str) -> Result<Secti
     // "unavailable" line rather than taking down the whole dashboard.
     let commits = if cli.show_commits() {
         Some(
-            commits::fetch(repo, me, default_branch)
+            commits::fetch(client, repo, me, default_branch)
                 .unwrap_or_else(|_| commits::CommitStats::unavailable()),
         )
     } else {
@@ -259,10 +266,22 @@ impl Drop for CursorGuard {
     }
 }
 
-/// Entry point: parse the CLI, resolve repo + user, then render once or watch.
+/// Entry point: authenticate, resolve repo + user, then render once or watch.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let styled = std::io::stdout().is_terminal();
+
+    // Authenticate first (this may run the interactive device flow and print
+    // prompts, so it must happen before we hide the cursor / clear the screen).
+    let token = auth::token(cli.login, styled)?;
+    let client = Client::new(token);
+
+    if cli.login {
+        let who = client.me().context("verifying the token")?;
+        eprintln!("prowl: authenticated as {who}.");
+        return Ok(());
+    }
+
     let watch = styled && !cli.once;
 
     // In watch mode, hide the cursor for the whole session (starting with the
@@ -271,7 +290,7 @@ pub fn run() -> Result<()> {
     // handles SIGINT (which would otherwise skip the guard).
     //
     // Paint a loading screen up front, too: resolving the repo/user and the
-    // first fetch are several `gh` calls, and we don't want to stare at a blank
+    // first fetch are several API calls, and we don't want to stare at a blank
     // or stale screen until the first frame is ready.
     let _cursor = if watch {
         print!("{}", render::HIDE_CURSOR);
@@ -289,16 +308,18 @@ pub fn run() -> Result<()> {
 
     let repo = match &cli.repo {
         Some(slug) => Repo::parse(slug)?,
-        None => gh::detect_repo()?,
+        None => github::detect_repo()?,
     };
-    let me = gh::me()?;
+    let me = client.me()?;
     // The default branch is the head of the "next release" commit range.
     // Resolved once; falls back to `main` if it can't be determined.
-    let default_branch = gh::default_branch(&repo).unwrap_or_else(|_| "main".to_string());
+    let default_branch = client
+        .default_branch(&repo)
+        .unwrap_or_else(|_| "main".to_string());
 
     // Single render: --once, or whenever stdout is not a TTY.
     if cli.once || !styled {
-        let sections = fetch(&cli, &repo, &me, &default_branch)?;
+        let sections = fetch(&cli, &client, &repo, &me, &default_branch)?;
         let frame = render_body(&sections, &cli, &repo, &me, &Changes::default(), styled)
             + &trailing(None, None, styled);
         print!("{frame}");
@@ -313,7 +334,7 @@ pub fn run() -> Result<()> {
     let mut prev: Option<Tracker> = None;
     let mut last_good: Option<Sections> = None;
     loop {
-        match fetch(&cli, &repo, &me, &default_branch) {
+        match fetch(&cli, &client, &repo, &me, &default_branch) {
             Ok(sections) => {
                 let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
                 let changes = prev.as_ref().map(|p| tracker.diff(p)).unwrap_or_default();

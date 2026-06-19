@@ -4,11 +4,11 @@
 
 use prowl::model::{MergedData, MineData, QueueData};
 use prowl::status::Status;
-use prowl::{gh, merged, prs, queue, render};
+use prowl::{github, merged, prs, queue, render};
 use std::collections::HashSet;
 
 fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
-    gh::parse_graphql(json.as_bytes()).expect("fixture should parse")
+    github::parse_graphql(json.as_bytes()).expect("fixture should parse")
 }
 
 // ---------------------------------------------------------------------------
