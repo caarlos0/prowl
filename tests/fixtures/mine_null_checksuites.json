@@ -1,0 +1,34 @@
+{
+  "data": {
+    "search": {
+      "nodes": [
+        {
+          "number": 123,
+          "title": "fix: tolerate inaccessible check suites",
+          "url": "https://github.com/octo/repo/pull/123",
+          "state": "OPEN",
+          "mergeable": "MERGEABLE",
+          "mergeStateStatus": "CLEAN",
+          "isDraft": false,
+          "updatedAt": "2026-06-19T12:00:00Z",
+          "mergeQueueEntry": null,
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "checkSuites": null
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "errors": [
+    {
+      "type": "FORBIDDEN",
+      "message": "Resource not accessible by integration"
+    }
+  ]
+}
