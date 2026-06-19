@@ -20,7 +20,7 @@ one-time browser **device login** (or set `GITHUB_TOKEN`) — no `gh` CLI needed
 ▌ Merged PRs  1
    m  #6649  fix(mcp): clean subfolder path               main  1w   …/pull/6649
 
-▌ Shipped
+▌ Shipped commits
   upcoming: 3
     v1.2.0: 8
     v1.1.0: 5

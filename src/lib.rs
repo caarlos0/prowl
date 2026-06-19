@@ -220,16 +220,21 @@ fn refreshing_trailing(styled: bool) -> String {
     s
 }
 
-/// Render the "Shipped" section: my commit counts for the next (unreleased)
-/// version and the last few stable releases, with the labels right-aligned so
-/// the colons and counts line up.
+/// Render the "Shipped commits" section: my commit counts for the next
+/// (unreleased) version and the last few stable releases, with the labels
+/// right-aligned so the colons and counts line up.
 fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
     if !stats.available {
         f.push_str(&render::empty_line("Commit stats unavailable.", styled));
         f.push('\n');
         return;
     }
-    f.push_str(&render::header("Shipped", status::TEAL, None, styled));
+    f.push_str(&render::header(
+        "Shipped commits",
+        status::TEAL,
+        None,
+        styled,
+    ));
     f.push('\n');
 
     let count = |c: &commits::Count| format!("{}{}", c.mine, if c.capped { "+" } else { "" });
