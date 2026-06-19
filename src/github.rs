@@ -81,16 +81,29 @@ struct GqlError {
 
 /// Parse a GraphQL `{"data": ...}` envelope. GitHub returns partial `data`
 /// alongside an `errors` array when some nested field is inaccessible (those
-/// fields deserialize as `None`), so prefer the data when present and only
-/// surface an error when there is no data at all.
+/// fields deserialize as `None`), so prefer the data when it parses.
+///
+/// Parse into `Value` first, never straight into `T`: a partial response can
+/// null a required (non-`Option`) field while `data` is present, which would
+/// fail a direct `from_slice::<Envelope<T>>` and mask the real GitHub error
+/// with a generic parse error. When typing the data fails, surface the GraphQL
+/// `errors` message if there is one.
 /// Split out so tests can exercise it against captured fixtures offline.
 pub fn parse_graphql<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    let env: Envelope<T> = serde_json::from_slice(bytes).context("failed to parse GraphQL JSON")?;
+    let env: Envelope<serde_json::Value> =
+        serde_json::from_slice(bytes).context("failed to parse GraphQL JSON")?;
+    let first_error = || env.errors.as_ref().and_then(|e| e.first());
     if let Some(data) = env.data {
-        return Ok(data);
+        return match serde_json::from_value(data) {
+            Ok(typed) => Ok(typed),
+            Err(err) => match first_error() {
+                Some(gql) => bail!("GraphQL error: {}", gql.message),
+                None => Err(err).context("failed to parse GraphQL data"),
+            },
+        };
     }
-    if let Some(first) = env.errors.as_ref().and_then(|e| e.first()) {
-        bail!("GraphQL error: {}", first.message);
+    if let Some(gql) = first_error() {
+        bail!("GraphQL error: {}", gql.message);
     }
     bail!("GraphQL response had no data")
 }

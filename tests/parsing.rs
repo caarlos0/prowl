@@ -125,6 +125,22 @@ fn mine_tolerates_null_check_runs_and_partial_errors() {
     assert_eq!(rows[0].fail, 0);
 }
 
+#[test]
+fn mine_partial_null_surfaces_graphql_error() {
+    // `data` is present but a required (non-Option) field — `checkSuites` — is
+    // null, so typing the data fails. With an `errors` array attached, the real
+    // GitHub message must surface instead of a generic JSON parse error.
+    let err = github::parse_graphql::<MineData>(
+        include_str!("fixtures/mine_null_checksuites.json").as_bytes(),
+    )
+    .expect_err("a null non-Option field should fail to type");
+    assert!(
+        err.to_string()
+            .contains("Resource not accessible by integration"),
+        "expected the GraphQL error to surface, got: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Recently merged
 // ---------------------------------------------------------------------------
