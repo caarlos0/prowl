@@ -30,9 +30,10 @@ one-time browser **device login** (or set `GITHUB_TOKEN`) — no `gh` CLI needed
 updated 11:21:16 — changed · next 11:26:16
 ```
 
-Status is a single Catppuccin-colored Nerd Font glyph (`P` pass, `x` fail,
-`.` pending, `!` conflicts, `m` merged); URLs are clickable. Pass `--ascii` if
-your terminal has no Nerd Font.
+Status is a single Catppuccin-colored glyph. On a TTY, prowl uses Nerd Font
+icons (pass, fail, pending, conflicts, merged); with `--ascii` (or when piped)
+it falls back to `P` pass, `x` fail, `.` pending, `!` conflicts, `m` merged.
+URLs are clickable.
 
 ## Install
 

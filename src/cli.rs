@@ -17,7 +17,7 @@ pub struct Cli {
     pub repo: Option<String>,
 
     /// Refresh interval, e.g. 30s, 10m, 2h.
-    #[arg(long, default_value = "5m", value_name = "DUR")]
+    #[arg(long, default_value = "5m", value_name = "DUR", value_parser = parse_interval)]
     pub interval: Dur,
 
     /// Render once and exit (no watch loop, no bell).
@@ -105,6 +105,16 @@ impl FromStr for Dur {
     }
 }
 
+/// Parse a `--interval` value, rejecting zero so the watch loop can't busy-spin
+/// its fetches back-to-back.
+fn parse_interval(s: &str) -> Result<Dur, String> {
+    let dur = Dur::from_str(s)?;
+    if dur.dur.is_zero() {
+        return Err("interval must be greater than zero, e.g. 30s".to_string());
+    }
+    Ok(dur)
+}
+
 /// Parse a compact duration such as `30s`, `10m`, `2h`, `7d`, or `2w`.
 /// A bare number is interpreted as seconds.
 pub fn parse_duration(s: &str) -> Result<Duration> {
@@ -121,14 +131,17 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     let n: u64 = num
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid duration `{s}`"))?;
-    let secs = match unit {
-        "" | "s" | "sec" | "secs" => n,
-        "m" | "min" | "mins" => n * 60,
-        "h" | "hr" | "hrs" => n * 3600,
-        "d" | "day" | "days" => n * 86_400,
-        "w" | "wk" | "wks" => n * 604_800,
+    let factor: u64 = match unit {
+        "" | "s" | "sec" | "secs" => 1,
+        "m" | "min" | "mins" => 60,
+        "h" | "hr" | "hrs" => 3600,
+        "d" | "day" | "days" => 86_400,
+        "w" | "wk" | "wks" => 604_800,
         other => bail!("invalid duration unit `{other}` (use s/m/h/d/w)"),
     };
+    let secs = n
+        .checked_mul(factor)
+        .ok_or_else(|| anyhow::anyhow!("duration too large"))?;
     Ok(Duration::from_secs(secs))
 }
 
@@ -154,5 +167,21 @@ mod tests {
         for bad in ["", "abc", "10x", "m"] {
             assert!(parse_duration(bad).is_err(), "expected `{bad}` to fail");
         }
+    }
+
+    #[test]
+    fn rejects_overflow() {
+        assert!(parse_duration("99999999999999w").is_err());
+    }
+
+    #[test]
+    fn rejects_zero_interval() {
+        for zero in ["0", "0s", "0m"] {
+            assert!(
+                parse_interval(zero).is_err(),
+                "expected interval `{zero}` to be rejected"
+            );
+        }
+        assert!(parse_interval("30s").is_ok());
     }
 }
