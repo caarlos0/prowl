@@ -79,17 +79,6 @@ pub fn glyph(s: Status, ascii: bool) -> char {
     }
 }
 
-/// Short name of a status (for the reference legend).
-pub fn status_name(s: Status) -> &'static str {
-    match s {
-        Status::Pass => "pass",
-        Status::Fail => "fail",
-        Status::Pending => "pending",
-        Status::Merged => "merged",
-        Status::Conflicts => "conflicts",
-    }
-}
-
 /// One-line meaning of a status (for the reference legend).
 pub fn status_meaning(s: Status) -> &'static str {
     match s {

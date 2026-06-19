@@ -214,25 +214,23 @@ pub fn reference(
             continue;
         }
         let ch = status::glyph(s, ascii);
-        let name = status::status_name(s);
         let meaning = status::status_meaning(s);
         if styled {
             let g = status::fg(status::status_style(s).1);
             let _ = writeln!(
                 out,
-                "  {}{ch}{} {}{name} \u{2014} {meaning}{}",
+                "  {}{ch}{} {}{meaning}{}",
                 g.render(),
                 g.render_reset(),
                 dim.render(),
                 dim.render_reset()
             );
         } else {
-            let _ = writeln!(out, "  {ch} {name} \u{2014} {meaning}");
+            let _ = writeln!(out, "  {ch} {meaning}");
         }
     }
     if has_none {
-        let line = "- none \u{2014} no checks reported";
-        let _ = writeln!(out, "  {}", empty_line(line, styled));
+        let _ = writeln!(out, "  {}", empty_line("- no checks reported", styled));
     }
 
     // States in legend order, then any unknown extras.
