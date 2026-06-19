@@ -47,10 +47,6 @@ pub struct Cli {
     /// Hide the reference legend that explains the status glyphs and STATE values.
     #[arg(long)]
     pub no_reference: bool,
-
-    /// Also send a desktop notification on change (requires the `notify` build feature).
-    #[arg(long)]
-    pub notify: bool,
 }
 
 /// The dashboard sections, usable with `--only`.

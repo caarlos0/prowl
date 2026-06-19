@@ -181,37 +181,6 @@ fn short_error(e: &anyhow::Error) -> String {
     }
 }
 
-fn maybe_notify(cli: &Cli, repo: &Repo, changes: &Changes) {
-    if !cli.notify {
-        return;
-    }
-    let body = if !changes.newly_merged.is_empty() {
-        let mut nums: Vec<i64> = changes.newly_merged.iter().copied().collect();
-        nums.sort_unstable();
-        let list = nums
-            .iter()
-            .map(|n| format!("#{n}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("merged: {list}")
-    } else {
-        let n = changes.status_changed.len();
-        format!("{n} PR status change{}", if n == 1 { "" } else { "s" })
-    };
-    notify_send(repo, &body);
-}
-
-#[cfg(feature = "notify")]
-fn notify_send(repo: &Repo, body: &str) {
-    let _ = notify_rust::Notification::new()
-        .summary(&format!("prowl: {}", repo.slug()))
-        .body(body)
-        .show();
-}
-
-#[cfg(not(feature = "notify"))]
-fn notify_send(_repo: &Repo, _body: &str) {}
-
 /// Entry point: parse the CLI, resolve repo + user, then render once or watch.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -231,12 +200,6 @@ pub fn run() -> Result<()> {
         None => gh::detect_repo()?,
     };
     let me = gh::me()?;
-
-    if cli.notify && !cfg!(feature = "notify") {
-        eprintln!(
-            "prowl: --notify ignored (rebuild with `--features notify` for desktop notifications)"
-        );
-    }
 
     // Single render: --once, or whenever stdout is not a TTY.
     if cli.once || !styled {
@@ -271,9 +234,6 @@ pub fn run() -> Result<()> {
 
                 if bell && !cli.no_bell {
                     render::ring_bell();
-                }
-                if bell {
-                    maybe_notify(&cli, &repo, &changes);
                 }
                 prev = Some(tracker);
                 last_good = Some(sections);

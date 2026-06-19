@@ -66,18 +66,12 @@ cargo install --path .
 cargo build --release   # -> target/release/prowl
 ```
 
-Desktop notifications (`--notify`) are behind an optional feature:
-
-```sh
-cargo install --path . --features notify
-```
-
 ## Usage
 
 ```
 prowl [--repo <owner/name>] [--interval <dur>] [--once] [--no-bell] [--ascii]
       [--only queue,mine,merged] [--merged-window <dur>] [--merged-limit <n>]
-      [--no-reference] [--notify]
+      [--no-reference]
 ```
 
 | Flag | Default | Description |
@@ -91,7 +85,6 @@ prowl [--repo <owner/name>] [--interval <dur>] [--once] [--no-bell] [--ascii]
 | `--merged-window <dur>` | `2d` | How far back "recently merged" reaches (`7d`, `48h`, `2w`). |
 | `--merged-limit <n>` | `20` | Max recently-merged PRs to list. |
 | `--no-reference` | | Hide the reference legend at the bottom. |
-| `--notify` | | Also send a desktop notification (needs the `notify` feature). |
 
 Durations accept `s`, `m`, `h`, `d`, `w` (a bare number is seconds).
 
@@ -136,8 +129,7 @@ across refreshes. After the first render, the bell rings **once** when either:
 
 Re-sorting, new comments, or a brand-new PR opening do **not** ring. The rows
 responsible for a bell are flagged with a `▸` marker on that refresh, and the
-status line shows `changed` plus the next refresh time. `--notify` additionally
-raises a desktop notification.
+status line shows `changed` plus the next refresh time.
 
 ## The `gh` queries
 
