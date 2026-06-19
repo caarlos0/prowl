@@ -103,8 +103,11 @@ set as a tmux window icon. Per PR, the **first** matching state wins:
 | pass | `\uF058` | `#a6e3a1` | ≥1 check suite, none of the above | `P` |
 | none | `-` | dim | no check suites | `-` |
 
-The `FAIL` column still shows the raw count of failing check suites (red when
-> 0, dim `-` otherwise).
+The `FAIL` column shows how many check suites actually ran **and** failed (red
+when > 0, dim `-` otherwise). Suites with zero check runs — phantom app
+subscriptions or workflows that never started, which GitHub's own status rollup
+ignores — never count toward the glyph or the `FAIL` total, so a `CLEAN`,
+mergeable PR stays green.
 
 ## Change detection / bell
 
@@ -150,7 +153,7 @@ query($q: String!) {
       ... on PullRequest {
         number title url state mergeable mergeStateStatus isDraft
         mergeQueueEntry { position state }
-        commits(last: 1) { nodes { commit { checkSuites(first: 50) { nodes { conclusion } } } } }
+        commits(last: 1) { nodes { commit { checkSuites(first: 50) { nodes { conclusion checkRuns(first: 1) { totalCount } } } } } }
       }
     }
   }

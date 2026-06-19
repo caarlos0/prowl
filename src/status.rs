@@ -65,10 +65,17 @@ pub fn fg(rgb: Rgb) -> Style {
 /// Check-suite conclusions that count as a failure.
 pub const FAIL_CONCLUSIONS: [&str; 3] = ["FAILURE", "STARTUP_FAILURE", "CANCELLED"];
 
-/// Count the check suites that concluded in a failing state.
+/// Whether a check suite actually ran (produced ≥1 check run). Zero-run suites
+/// are phantom subscriptions GitHub ignores, so we do too.
+fn ran(s: &CheckSuite) -> bool {
+    s.check_runs.total_count > 0
+}
+
+/// Count the check suites that ran and concluded in a failing state.
 pub fn fail_count(suites: &[CheckSuite]) -> usize {
     suites
         .iter()
+        .filter(|s| ran(s))
         .filter(|s| {
             s.conclusion
                 .as_deref()
@@ -78,7 +85,9 @@ pub fn fail_count(suites: &[CheckSuite]) -> usize {
 }
 
 /// Derive a PR's status with the precedence
-/// `merged > conflicts > fail > pending > pass > none`.
+/// `merged > conflicts > fail > pending > pass > none`. Only check suites that
+/// actually ran are considered, so empty/phantom suites never turn a green PR
+/// red (or yellow).
 pub fn derive_status(
     state: Option<&str>,
     mergeable: Option<&str>,
@@ -93,10 +102,10 @@ pub fn derive_status(
     if fail_count(suites) > 0 {
         return Some(Status::Fail);
     }
-    if suites.iter().any(|s| s.conclusion.is_none()) {
+    if suites.iter().filter(|s| ran(s)).any(|s| s.conclusion.is_none()) {
         return Some(Status::Pending);
     }
-    if !suites.is_empty() {
+    if suites.iter().any(ran) {
         return Some(Status::Pass);
     }
     None
@@ -119,14 +128,24 @@ pub fn pr_status(pr: &PrNode) -> Option<Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::CheckRuns;
 
     fn suites(concls: &[Option<&str>]) -> Vec<CheckSuite> {
         concls
             .iter()
             .map(|c| CheckSuite {
                 conclusion: c.map(str::to_string),
+                check_runs: CheckRuns { total_count: 1 },
             })
             .collect()
+    }
+
+    /// A check suite with an explicit run count (0 = phantom).
+    fn suite(conclusion: Option<&str>, runs: u64) -> CheckSuite {
+        CheckSuite {
+            conclusion: conclusion.map(str::to_string),
+            check_runs: CheckRuns { total_count: runs },
+        }
     }
 
     #[test]
@@ -187,5 +206,35 @@ mod tests {
             Some("NEUTRAL"),
         ]);
         assert_eq!(fail_count(&s), 3);
+    }
+
+    #[test]
+    fn phantom_zero_run_suites_are_ignored() {
+        // A CLEAN, mergeable PR (github/copilot-agent-runtime#10703) whose only
+        // "failures" are zero-run notify-pending-deployment suites, plus a pile
+        // of never-running QUEUED app subscriptions, is green — not red/yellow.
+        let s = vec![
+            suite(Some("SUCCESS"), 22),
+            suite(Some("SUCCESS"), 35),
+            suite(Some("FAILURE"), 0), // phantom: notify-pending-deployment.yml
+            suite(Some("FAILURE"), 0),
+            suite(None, 0), // phantom: QUEUED app that never ran
+            suite(None, 0),
+        ];
+        assert_eq!(fail_count(&s), 0);
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Pass)
+        );
+        // A real failing run (runs > 0) still counts.
+        let s = vec![suite(Some("SUCCESS"), 3), suite(Some("FAILURE"), 1)];
+        assert_eq!(fail_count(&s), 1);
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Fail)
+        );
+        // Only phantom suites -> no real CI -> none.
+        let s = vec![suite(Some("FAILURE"), 0), suite(None, 0)];
+        assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), None);
     }
 }

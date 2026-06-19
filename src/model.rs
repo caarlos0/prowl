@@ -92,7 +92,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
       ... on PullRequest {
         number title url state mergeable mergeStateStatus isDraft
         mergeQueueEntry { position state }
-        commits(last: 1) { nodes { commit { checkSuites(first: 50) { nodes { conclusion } } } } }
+        commits(last: 1) { nodes { commit { checkSuites(first: 50) { nodes { conclusion checkRuns(first: 1) { totalCount } } } } } }
       }
     }
   }
@@ -154,6 +154,17 @@ pub struct CheckSuites {
 #[derive(Debug, Deserialize)]
 pub struct CheckSuite {
     pub conclusion: Option<String>,
+    #[serde(rename = "checkRuns")]
+    pub check_runs: CheckRuns,
+}
+
+/// How many check runs a suite produced. Suites with zero runs are phantom
+/// subscriptions (apps that registered but never ran, or workflows that failed
+/// to start) — GitHub's own status rollup ignores them, and so do we.
+#[derive(Debug, Deserialize)]
+pub struct CheckRuns {
+    #[serde(rename = "totalCount")]
+    pub total_count: u64,
 }
 
 pub fn mine_search(repo: &Repo, me: &str) -> String {

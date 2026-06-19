@@ -18,40 +18,76 @@
                   "checkSuites": {
                     "nodes": [
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": null
+                        "conclusion": null,
+                        "checkRuns": {
+                          "totalCount": 0
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 2
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 2
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 6
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 3
+                        }
                       }
                     ]
                   }
@@ -76,43 +112,82 @@
                   "checkSuites": {
                     "nodes": [
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": null
+                        "conclusion": null,
+                        "checkRuns": {
+                          "totalCount": 0
+                        }
                       },
                       {
-                        "conclusion": "FAILURE"
+                        "conclusion": "FAILURE",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "FAILURE"
+                        "conclusion": "FAILURE",
+                        "checkRuns": {
+                          "totalCount": 2
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 2
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "FAILURE"
+                        "conclusion": "FAILURE",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 1
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 6
+                        }
                       },
                       {
-                        "conclusion": "SUCCESS"
+                        "conclusion": "SUCCESS",
+                        "checkRuns": {
+                          "totalCount": 3
+                        }
                       }
                     ]
                   }

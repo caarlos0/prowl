@@ -68,11 +68,12 @@ fn mine_parses_sorts_and_derives_status_and_fail() {
         rows.iter().map(|r| r.number).collect::<Vec<_>>(),
         vec![6656, 6475, 5323]
     );
-    // #6656 is mergeable+blocked with an in-flight check -> pending, no failures.
-    assert_eq!(rows[0].status, Some(Status::Pending));
+    // #6656 is mergeable; its only non-success suite is a zero-run phantom, so
+    // it is green (pass) with no failures — not pending.
+    assert_eq!(rows[0].status, Some(Status::Pass));
     assert_eq!(rows[0].fail, 0);
     // #6475 conflicts (which beats its failing checks), but the FAIL count is
-    // still the real number of failing suites.
+    // still the real number of failing suites that actually ran.
     assert_eq!(rows[1].status, Some(Status::Conflicts));
     assert_eq!(rows[1].fail, 3);
     // #5323 conflicts with no check suites -> no fails.
@@ -86,7 +87,7 @@ fn mine_ascii_status_letters() {
     let rows = prs::build_rows(data.search.nodes);
     let table = prs::to_table(&rows, true); // ascii = true
     let st: Vec<&str> = table.rows.iter().map(|r| r[0].text.as_str()).collect();
-    assert_eq!(st, vec![".", "!", "!"]); // pending, conflicts, conflicts
+    assert_eq!(st, vec!["P", "!", "!"]); // pass, conflicts, conflicts
 }
 
 #[test]
