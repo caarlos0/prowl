@@ -300,6 +300,12 @@ impl Drop for CursorGuard {
     }
 }
 
+/// Clear the screen and paint `body`, flushing stdout.
+fn repaint(body: &str) -> std::io::Result<()> {
+    print!("{}{body}", render::clear());
+    std::io::stdout().flush()
+}
+
 /// Entry point: authenticate, resolve repo + user, then render once or watch.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -348,18 +354,10 @@ pub fn run() -> Result<()> {
         });
         match (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
             Some(c) => {
-                let mut frame = String::from(render::clear());
-                frame.push_str(&render_body(
-                    &c.sections,
-                    &cli,
-                    &repo,
-                    &c.me,
-                    &Changes::default(),
-                    styled,
-                ));
-                frame.push_str(&cached_trailing(&c.saved_at, styled));
-                print!("{frame}");
-                std::io::stdout().flush()?;
+                let body =
+                    render_body(&c.sections, &cli, &repo, &c.me, &Changes::default(), styled)
+                        + &cached_trailing(&c.saved_at, styled);
+                repaint(&body)?;
                 prev = Some(Tracker::build(
                     c.sections.prs.as_deref(),
                     c.sections.merged.as_deref(),
@@ -411,11 +409,9 @@ pub fn run() -> Result<()> {
                 let change_display = prev.as_ref().map(|_| bell);
                 let next = timefmt::next_hms(cli.interval.dur);
 
-                let mut frame = String::from(render::clear());
-                frame.push_str(&render_body(&sections, &cli, &repo, &me, &changes, styled));
-                frame.push_str(&trailing(change_display, Some(&next), styled));
-                print!("{frame}");
-                std::io::stdout().flush()?;
+                let body = render_body(&sections, &cli, &repo, &me, &changes, styled)
+                    + &trailing(change_display, Some(&next), styled);
+                repaint(&body)?;
 
                 if armed && bell && !cli.no_bell {
                     render::ring_bell();
@@ -429,9 +425,9 @@ pub fn run() -> Result<()> {
             }
             Err(e) => {
                 let next = timefmt::next_hms(cli.interval.dur);
-                let mut frame = String::from(render::clear());
+                let mut body = String::new();
                 if let Some(good) = &last_good {
-                    frame.push_str(&render_body(
+                    body.push_str(&render_body(
                         good,
                         &cli,
                         &repo,
@@ -440,9 +436,8 @@ pub fn run() -> Result<()> {
                         styled,
                     ));
                 }
-                frame.push_str(&error_trailing(&short_error(&e), Some(&next), styled));
-                print!("{frame}");
-                std::io::stdout().flush()?;
+                body.push_str(&error_trailing(&short_error(&e), Some(&next), styled));
+                repaint(&body)?;
             }
         }
         // Wait for the interval, but let the user force a refresh now with `r`
@@ -452,18 +447,9 @@ pub fn run() -> Result<()> {
         if term::wait_or_refresh(cli.interval.dur)
             && let Some(good) = &last_good
         {
-            let mut frame = String::from(render::clear());
-            frame.push_str(&render_body(
-                good,
-                &cli,
-                &repo,
-                &me,
-                &Changes::default(),
-                styled,
-            ));
-            frame.push_str(&refreshing_trailing(styled));
-            print!("{frame}");
-            std::io::stdout().flush()?;
+            let body = render_body(good, &cli, &repo, &me, &Changes::default(), styled)
+                + &refreshing_trailing(styled);
+            repaint(&body)?;
         }
     }
 }

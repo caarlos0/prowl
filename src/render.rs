@@ -157,7 +157,8 @@ pub fn header(title: &str, accent: Rgb, count: Option<usize>, styled: bool) -> S
     }
 }
 
-/// A collapsed, dim one-liner standing in for an empty section (no header bar).
+/// A dim one-liner: an empty-section placeholder, or other plain dim status
+/// text (the status line, the loading screen). Plain when not styled.
 pub fn empty_line(msg: &str, styled: bool) -> String {
     if styled {
         let dim = Style::new().dimmed();
@@ -179,12 +180,7 @@ pub fn status_line(hms: &str, change: Option<bool>, next: Option<&str>, styled: 
         None => String::new(),
     };
     let msg = format!("updated {hms}{suffix}{next_part}");
-    if styled {
-        let dim = Style::new().dimmed();
-        format!("{}{msg}{}", dim.render(), dim.render_reset())
-    } else {
-        msg
-    }
+    empty_line(&msg, styled)
 }
 
 /// A leading cell marking a row that changed since the previous refresh.
@@ -303,13 +299,7 @@ pub const SHOW_CURSOR: &str = "\x1b[?25h";
 /// The dim placeholder shown during the very first fetch, before any data has
 /// been rendered.
 pub fn loading(styled: bool) -> String {
-    let msg = "Loading...";
-    if styled {
-        let dim = Style::new().dimmed();
-        format!("{}{msg}{}", dim.render(), dim.render_reset())
-    } else {
-        msg.to_string()
-    }
+    empty_line("Loading...", styled)
 }
 
 /// Ring the terminal bell once.
