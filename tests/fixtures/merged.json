@@ -1,0 +1,50 @@
+{
+  "data": {
+    "search": {
+      "nodes": [
+        {
+          "number": 6649,
+          "title": "fix(mcp): clean subfolder path",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6649",
+          "mergedAt": "2026-06-06T12:35:02Z",
+          "baseRefName": "main"
+        },
+        {
+          "number": 6639,
+          "title": "docs(casks): fix private-repo example broken by Homebrew 5.1.14",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6639",
+          "mergedAt": "2026-05-29T12:52:32Z",
+          "baseRefName": "main"
+        },
+        {
+          "number": 6634,
+          "title": "feat(dockers_v2): pre/post hooks",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6634",
+          "mergedAt": "2026-05-23T02:11:13Z",
+          "baseRefName": "main"
+        },
+        {
+          "number": 6631,
+          "title": "docs: better install page",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6631",
+          "mergedAt": "2026-05-19T12:25:21Z",
+          "baseRefName": "main"
+        },
+        {
+          "number": 6630,
+          "title": "fix: handle secondary rate limits on github",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6630",
+          "mergedAt": "2026-05-19T01:42:13Z",
+          "baseRefName": "main"
+        },
+        {
+          "number": 6627,
+          "title": "feat(nix): support meta.mainProgram",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6627",
+          "mergedAt": "2026-05-17T22:43:00Z",
+          "baseRefName": "main"
+        }
+      ]
+    }
+  }
+}

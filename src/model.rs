@@ -64,17 +64,22 @@ pub struct Login {
     pub login: String,
 }
 
+/// Extract the entry nodes from a parsed queue response. A null queue or an
+/// empty queue both yield `[]`.
+pub fn queue_nodes(data: QueueData) -> Vec<QueueEntryNode> {
+    data.repository
+        .and_then(|r| r.merge_queue)
+        .map(|q| q.entries.nodes)
+        .unwrap_or_default()
+}
+
 /// Fetch merge-queue entries. A null queue or empty queue both yield `[]`.
 pub fn fetch_queue(repo: &Repo) -> Result<Vec<QueueEntryNode>> {
     let data: QueueData = gh::graphql(
         &[("owner", repo.owner.as_str()), ("name", repo.name.as_str())],
         QUEUE_QUERY,
     )?;
-    Ok(data
-        .repository
-        .and_then(|r| r.merge_queue)
-        .map(|q| q.entries.nodes)
-        .unwrap_or_default())
+    Ok(queue_nodes(data))
 }
 
 // ----------------------------------------------------------------------------

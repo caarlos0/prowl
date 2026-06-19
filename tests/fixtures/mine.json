@@ -1,0 +1,148 @@
+{
+  "data": {
+    "search": {
+      "nodes": [
+        {
+          "number": 6656,
+          "title": "feat: goreleaser check --allow-deprecations",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6656",
+          "state": "OPEN",
+          "mergeable": "MERGEABLE",
+          "mergeStateStatus": "BLOCKED",
+          "isDraft": false,
+          "mergeQueueEntry": null,
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "checkSuites": {
+                    "nodes": [
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": null
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "number": 6475,
+          "title": "feat: install scripts",
+          "url": "https://github.com/goreleaser/goreleaser/pull/6475",
+          "state": "OPEN",
+          "mergeable": "CONFLICTING",
+          "mergeStateStatus": "DIRTY",
+          "isDraft": false,
+          "mergeQueueEntry": null,
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "checkSuites": {
+                    "nodes": [
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": null
+                      },
+                      {
+                        "conclusion": "FAILURE"
+                      },
+                      {
+                        "conclusion": "FAILURE"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "FAILURE"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      },
+                      {
+                        "conclusion": "SUCCESS"
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "number": 5323,
+          "title": "feat: make `.Artifacts` Os/Arch/etc template name be the same as in other places",
+          "url": "https://github.com/goreleaser/goreleaser/pull/5323",
+          "state": "OPEN",
+          "mergeable": "CONFLICTING",
+          "mergeStateStatus": "DIRTY",
+          "isDraft": false,
+          "mergeQueueEntry": null,
+          "commits": {
+            "nodes": [
+              {
+                "commit": {
+                  "checkSuites": {
+                    "nodes": []
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

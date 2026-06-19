@@ -1,0 +1,39 @@
+{
+  "data": {
+    "repository": {
+      "mergeQueue": {
+        "entries": {
+          "nodes": [
+            {
+              "position": 2,
+              "pullRequest": {
+                "number": 102,
+                "title": "feat: add the widget",
+                "url": "https://github.com/octo/repo/pull/102",
+                "author": { "login": "octocat" }
+              }
+            },
+            {
+              "position": 1,
+              "pullRequest": {
+                "number": 101,
+                "title": "fix: flaky integration test",
+                "url": "https://github.com/octo/repo/pull/101",
+                "author": { "login": "caarlos0" }
+              }
+            },
+            {
+              "position": 3,
+              "pullRequest": {
+                "number": 103,
+                "title": "chore: bump dependencies",
+                "url": "https://github.com/octo/repo/pull/103",
+                "author": null
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
