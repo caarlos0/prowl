@@ -296,6 +296,10 @@ pub fn clear() -> &'static str {
     "\x1b[2J\x1b[H"
 }
 
+/// Hide / show the terminal cursor.
+pub const HIDE_CURSOR: &str = "\x1b[?25l";
+pub const SHOW_CURSOR: &str = "\x1b[?25h";
+
 /// The dim placeholder shown during the very first fetch, before any data has
 /// been rendered.
 pub fn loading(styled: bool) -> String {

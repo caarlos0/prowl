@@ -248,19 +248,44 @@ fn short_error(e: &anyhow::Error) -> String {
     }
 }
 
+/// Restores the terminal cursor when dropped (normal return or a `?` error). A
+/// matching Ctrl-C handler covers SIGINT, which skips destructors.
+struct CursorGuard;
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        print!("{}", render::SHOW_CURSOR);
+        let _ = std::io::stdout().flush();
+    }
+}
+
 /// Entry point: parse the CLI, resolve repo + user, then render once or watch.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let styled = std::io::stdout().is_terminal();
     let watch = styled && !cli.once;
 
-    // Paint a loading screen up front: resolving the repo/user and the first
-    // fetch are several `gh` calls, and we don't want to stare at a blank or
-    // stale screen until the first frame is ready.
-    if watch {
+    // In watch mode, hide the cursor for the whole session (starting with the
+    // loading screen) and make sure it is restored on every exit path: the
+    // CursorGuard handles a normal/`?`-error return, and the Ctrl-C handler
+    // handles SIGINT (which would otherwise skip the guard).
+    //
+    // Paint a loading screen up front, too: resolving the repo/user and the
+    // first fetch are several `gh` calls, and we don't want to stare at a blank
+    // or stale screen until the first frame is ready.
+    let _cursor = if watch {
+        print!("{}", render::HIDE_CURSOR);
+        let _ = ctrlc::set_handler(|| {
+            print!("{}", render::SHOW_CURSOR);
+            let _ = std::io::stdout().flush();
+            std::process::exit(130);
+        });
         println!("{}{}", render::clear(), render::loading(styled));
         std::io::stdout().flush()?;
-    }
+        Some(CursorGuard)
+    } else {
+        None
+    };
 
     let repo = match &cli.repo {
         Some(slug) => Repo::parse(slug)?,
