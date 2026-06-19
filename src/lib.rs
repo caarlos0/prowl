@@ -100,7 +100,12 @@ fn render_body(
             f.push_str(&render::empty_line(&msg, styled));
             f.push('\n');
         } else {
-            f.push_str(&render::header("Open PRs", status::LAVENDER, rows.len(), styled));
+            f.push_str(&render::header(
+                "Open PRs",
+                status::LAVENDER,
+                rows.len(),
+                styled,
+            ));
             f.push('\n');
             let table = prs::to_table(rows, ascii, &changes.status_changed);
             f.push_str(&render::render_table(&table, styled));
@@ -114,7 +119,12 @@ fn render_body(
             f.push_str(&render::empty_line(&msg, styled));
             f.push('\n');
         } else {
-            f.push_str(&render::header("Merge Queue", status::BLUE, rows.len(), styled));
+            f.push_str(&render::header(
+                "Merge Queue",
+                status::BLUE,
+                rows.len(),
+                styled,
+            ));
             f.push('\n');
             f.push_str(&render::render_table(&queue::to_table(rows), styled));
         }
@@ -130,7 +140,12 @@ fn render_body(
             f.push_str(&render::empty_line(&msg, styled));
             f.push('\n');
         } else {
-            f.push_str(&render::header("Merged PRs", status::MAUVE, rows.len(), styled));
+            f.push_str(&render::header(
+                "Merged PRs",
+                status::MAUVE,
+                rows.len(),
+                styled,
+            ));
             f.push('\n');
             let table = merged::to_table(rows, ascii, &changes.newly_merged);
             f.push_str(&render::render_table(&table, styled));
@@ -141,7 +156,9 @@ fn render_body(
     if !cli.no_reference {
         let (statuses, has_none, states) = legend(s);
         if !statuses.is_empty() || has_none || !states.is_empty() {
-            f.push_str(&render::reference(&statuses, has_none, &states, ascii, styled));
+            f.push_str(&render::reference(
+                &statuses, has_none, &states, ascii, styled,
+            ));
             f.push('\n');
         }
     }
@@ -242,7 +259,14 @@ pub fn run() -> Result<()> {
                 let next = timefmt::next_hms(cli.interval.dur);
                 let mut frame = String::from(render::clear());
                 if let Some(good) = &last_good {
-                    frame.push_str(&render_body(good, &cli, &repo, &me, &Changes::default(), styled));
+                    frame.push_str(&render_body(
+                        good,
+                        &cli,
+                        &repo,
+                        &me,
+                        &Changes::default(),
+                        styled,
+                    ));
                 }
                 frame.push_str(&error_trailing(&short_error(&e), Some(&next), styled));
                 print!("{frame}");

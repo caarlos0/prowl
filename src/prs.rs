@@ -54,7 +54,10 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
     for r in rows {
         let mark = render::change_marker(highlight.contains(&r.number), ascii);
         let st = match r.status {
-            Some(s) => Cell::styled(status::glyph(s, ascii).to_string(), status::fg(status::status_style(s).1)),
+            Some(s) => Cell::styled(
+                status::glyph(s, ascii).to_string(),
+                status::fg(status::status_style(s).1),
+            ),
             None => Cell::styled("-".to_string(), Style::new().dimmed()),
         };
         let pr = if r.is_draft {
@@ -138,7 +141,12 @@ mod tests {
     fn sorts_by_updated_at_then_derives_status_and_fail() {
         let mut a = pr(10, "MERGEABLE", "BLOCKED", &[Some("SUCCESS")]);
         a.updated_at = Some("2026-06-19T10:00:00Z".to_string());
-        let mut b = pr(42, "CONFLICTING", "DIRTY", &[Some("FAILURE"), Some("FAILURE")]);
+        let mut b = pr(
+            42,
+            "CONFLICTING",
+            "DIRTY",
+            &[Some("FAILURE"), Some("FAILURE")],
+        );
         b.updated_at = Some("2026-06-19T09:00:00Z".to_string());
         // #10 was updated more recently than #42, so it sorts first despite the
         // lower number.

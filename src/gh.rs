@@ -48,12 +48,7 @@ pub fn run(args: &[&str]) -> Result<Vec<u8>> {
     if !out.status.success() {
         // A short label (e.g. "api graphql") rather than the full args, which
         // for GraphQL would dump the entire query.
-        let label = args
-            .iter()
-            .take(2)
-            .copied()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let label = args.iter().take(2).copied().collect::<Vec<_>>().join(" ");
         let stderr = String::from_utf8_lossy(&out.stderr);
         let detail = stderr.trim();
         if detail.is_empty() {
@@ -87,8 +82,14 @@ pub fn me() -> Result<String> {
 /// `gh repo view` misbehaves inside worktrees (cli/cli#1837), so when it fails
 /// we fall back to the configured default base repo.
 pub fn detect_repo() -> Result<Repo> {
-    if let Ok(slug) = run_str(&["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
-        && !slug.is_empty()
+    if let Ok(slug) = run_str(&[
+        "repo",
+        "view",
+        "--json",
+        "nameWithOwner",
+        "--jq",
+        ".nameWithOwner",
+    ]) && !slug.is_empty()
     {
         return Repo::parse(&slug);
     }

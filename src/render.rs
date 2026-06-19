@@ -102,7 +102,11 @@ pub fn render_table(table: &Table, styled: bool) -> String {
     }
 
     let mut out = String::new();
-    let header_style = if styled { Style::new().bold() } else { Style::new() };
+    let header_style = if styled {
+        Style::new().bold()
+    } else {
+        Style::new()
+    };
     for (i, h) in table.header.iter().enumerate() {
         let last = i + 1 == cols;
         push_cell(

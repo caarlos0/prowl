@@ -130,7 +130,10 @@ mod tests {
         assert_eq!(parse_duration("10m").unwrap(), Duration::from_secs(600));
         assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
         assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(604_800));
-        assert_eq!(parse_duration("2w").unwrap(), Duration::from_secs(1_209_600));
+        assert_eq!(
+            parse_duration("2w").unwrap(),
+            Duration::from_secs(1_209_600)
+        );
         assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45));
     }
 

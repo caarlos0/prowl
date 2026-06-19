@@ -96,8 +96,14 @@ mod tests {
 
     #[test]
     fn status_change_rings_and_is_pinpointed() {
-        let before = Tracker::build(Some(&[pr(1, Some(Status::Pending)), pr(2, Some(Status::Pass))]), None);
-        let after = Tracker::build(Some(&[pr(1, Some(Status::Pass)), pr(2, Some(Status::Pass))]), None);
+        let before = Tracker::build(
+            Some(&[pr(1, Some(Status::Pending)), pr(2, Some(Status::Pass))]),
+            None,
+        );
+        let after = Tracker::build(
+            Some(&[pr(1, Some(Status::Pass)), pr(2, Some(Status::Pass))]),
+            None,
+        );
         let c = after.diff(&before);
         assert!(c.any());
         assert_eq!(c.status_changed, HashSet::from([1]));
@@ -116,10 +122,17 @@ mod tests {
 
     #[test]
     fn reordering_and_new_prs_do_not_ring() {
-        let before = Tracker::build(Some(&[pr(1, Some(Status::Pass)), pr(2, Some(Status::Pass))]), None);
+        let before = Tracker::build(
+            Some(&[pr(1, Some(Status::Pass)), pr(2, Some(Status::Pass))]),
+            None,
+        );
         // Same two PRs, swapped order, plus a brand-new PR #3.
         let after = Tracker::build(
-            Some(&[pr(2, Some(Status::Pass)), pr(1, Some(Status::Pass)), pr(3, Some(Status::Fail))]),
+            Some(&[
+                pr(2, Some(Status::Pass)),
+                pr(1, Some(Status::Pass)),
+                pr(3, Some(Status::Fail)),
+            ]),
             None,
         );
         assert!(!after.diff(&before).any());

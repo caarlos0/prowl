@@ -184,7 +184,11 @@ pub fn derive_status(
     if fail_count(suites) > 0 {
         return Some(Status::Fail);
     }
-    if suites.iter().filter(|s| ran(s)).any(|s| s.conclusion.is_none()) {
+    if suites
+        .iter()
+        .filter(|s| ran(s))
+        .any(|s| s.conclusion.is_none())
+    {
         return Some(Status::Pending);
     }
     if suites.iter().any(ran) {
@@ -204,7 +208,11 @@ pub fn last_suites(pr: &PrNode) -> &[CheckSuite] {
 
 /// Derive a PR node's status from its fields.
 pub fn pr_status(pr: &PrNode) -> Option<Status> {
-    derive_status(pr.state.as_deref(), pr.mergeable.as_deref(), last_suites(pr))
+    derive_status(
+        pr.state.as_deref(),
+        pr.mergeable.as_deref(),
+        last_suites(pr),
+    )
 }
 
 #[cfg(test)]
@@ -236,7 +244,10 @@ mod tests {
         assert_eq!(status_style(Status::Fail), ('\u{F057}', (243, 139, 168)));
         assert_eq!(status_style(Status::Pending), ('\u{F111}', (249, 226, 175)));
         assert_eq!(status_style(Status::Merged), ('\u{E0A0}', (203, 166, 247)));
-        assert_eq!(status_style(Status::Conflicts), ('\u{F071}', (250, 179, 135)));
+        assert_eq!(
+            status_style(Status::Conflicts),
+            ('\u{F071}', (250, 179, 135))
+        );
     }
 
     #[test]
@@ -263,7 +274,10 @@ mod tests {
         );
         // fail beats pending.
         let s = suites(&[Some("FAILURE"), None]);
-        assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), Some(Status::Fail));
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Fail)
+        );
         // pending beats pass.
         let s = suites(&[Some("SUCCESS"), None]);
         assert_eq!(
@@ -272,7 +286,10 @@ mod tests {
         );
         // all concluded, no failures -> pass.
         let s = suites(&[Some("SUCCESS"), Some("NEUTRAL")]);
-        assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), Some(Status::Pass));
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Pass)
+        );
         // no check suites -> none.
         assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &[]), None);
     }
@@ -338,7 +355,9 @@ mod tests {
 
     #[test]
     fn state_glyphs_are_distinct_from_status_glyphs() {
-        let states = ["CLEAN", "UNSTABLE", "BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"];
+        let states = [
+            "CLEAN", "UNSTABLE", "BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN",
+        ];
         let status_glyphs: Vec<char> = ORDER.iter().map(|s| status_style(*s).0).collect();
         for st in states {
             let g = state_glyph(st);
