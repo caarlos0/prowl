@@ -53,4 +53,6 @@ prowl --repo owner/name   # watch a specific repo
 prowl --once              # render once and exit
 ```
 
+While watching, press `r` to refresh now and `Ctrl-C` to quit.
+
 Run `prowl --help` for all flags (interval, `--only`, merged window, etc.).

@@ -20,3 +20,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 unicode-width = "0.2.2"
 ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

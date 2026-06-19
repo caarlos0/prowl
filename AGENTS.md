@@ -54,6 +54,10 @@ everything else is testable modules:
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
+- `term.rs` — Unix terminal helper: while watching, quiet stdin (drop echo +
+  line buffering, keep `ISIG` so signal keys work) and turn the interval wait
+  into a poll, so `r` refreshes now while every other key is discarded; restored
+  on every exit path. A no-op on non-Unix.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 ## Key behaviors
@@ -72,6 +76,12 @@ everything else is testable modules:
   (status line `cached HH:MM:SS · refreshing…`), seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
   but stays silent (no startup bell). `--no-cache` skips both read and write.
+- **Terminal:** while watching, the cursor is hidden and stdin echo/line
+  buffering are turned off, so stray keystrokes neither garble the dashboard nor
+  spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
+  refresh now (shown with a dim `refreshing…` line). Both the cursor and terminal
+  mode are restored on normal/`?` returns (Drop guards) and on SIGINT (the
+  Ctrl-C handler).
 
 ## The three GraphQL queries + REST (see `model.rs` / `commits.rs`)
 

@@ -685,6 +685,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "keyring",
+ "libc",
  "serde",
  "serde_json",
  "unicode-width",

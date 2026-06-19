@@ -16,6 +16,7 @@ pub mod prs;
 pub mod queue;
 pub mod render;
 pub mod status;
+pub mod term;
 pub mod timefmt;
 
 use anyhow::{Context, Result};
@@ -211,6 +212,13 @@ fn cached_trailing(saved_at: &str, styled: bool) -> String {
     s
 }
 
+/// Trailing line shown the instant the user presses `r`, before the re-fetch.
+fn refreshing_trailing(styled: bool) -> String {
+    let mut s = render::empty_line("refreshing\u{2026}", styled);
+    s.push('\n');
+    s
+}
+
 /// Render the "Commits" section: my commit counts for the previous and next
 /// stable release.
 fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
@@ -304,13 +312,16 @@ pub fn run() -> Result<()> {
     let mut prev: Option<Tracker> = None;
     let mut last_good: Option<Sections> = None;
 
-    // In watch mode, hide the cursor for the whole session and restore it on
-    // every exit path (CursorGuard for normal/`?` returns, the Ctrl-C handler
-    // for SIGINT). Then paint instantly from the cache if we have it — otherwise
-    // a loading screen — while the first live fetch runs.
-    let _cursor = if watch {
+    // In watch mode, hide the cursor and quiet stdin (no echo / no line
+    // buffering, but signal keys still work) for the whole session, restoring
+    // both on every exit path: the guards for normal/`?` returns, the Ctrl-C
+    // handler for SIGINT. Then paint instantly from the cache if we have it —
+    // otherwise a loading screen — while the first live fetch runs.
+    let (_cursor, _input) = if watch {
         print!("{}", render::HIDE_CURSOR);
+        let input = term::quiet();
         let _ = ctrlc::set_handler(|| {
+            term::restore();
             print!("{}", render::SHOW_CURSOR);
             let _ = std::io::stdout().flush();
             std::process::exit(130);
@@ -340,9 +351,9 @@ pub fn run() -> Result<()> {
                 std::io::stdout().flush()?;
             }
         }
-        Some(CursorGuard)
+        (Some(CursorGuard), input)
     } else {
-        None
+        (None, None)
     };
 
     let me = client.me()?;
@@ -414,6 +425,25 @@ pub fn run() -> Result<()> {
                 std::io::stdout().flush()?;
             }
         }
-        std::thread::sleep(cli.interval.dur);
+        // Wait for the interval, but let the user force a refresh now with `r`
+        // (all other keys stay discarded). On a manual refresh, repaint the
+        // current data with a dim "refreshing…" line so the keypress feels
+        // instant while the next fetch runs.
+        if term::wait_or_refresh(cli.interval.dur)
+            && let Some(good) = &last_good
+        {
+            let mut frame = String::from(render::clear());
+            frame.push_str(&render_body(
+                good,
+                &cli,
+                &repo,
+                &me,
+                &Changes::default(),
+                styled,
+            ));
+            frame.push_str(&refreshing_trailing(styled));
+            print!("{frame}");
+            std::io::stdout().flush()?;
+        }
     }
 }
