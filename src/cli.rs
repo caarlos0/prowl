@@ -9,7 +9,7 @@ use std::time::Duration;
 #[command(
     name = "prowl",
     version,
-    about = "Watch a repo's recently merged PRs, merge queue, and your open PRs."
+    about = "A tiny terminal radar for your GitHub pull requests."
 )]
 pub struct Cli {
     /// Repository to watch, as owner/name. Auto-detected from the cwd if omitted.

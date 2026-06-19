@@ -2,7 +2,7 @@
 name = "prowl"
 version = "0.1.0"
 edition = "2024"
-description = "Watch a repo's merge queue and your open PRs as colored tables; refresh on an interval and ring the terminal bell when anything changes."
+description = "A tiny terminal radar for your GitHub pull requests."
 license = "MIT"
 
 [[bin]]

@@ -5,6 +5,15 @@ pro: true
 
 project_name: prowl
 
+variables:
+  description: "A tiny terminal radar for your GitHub pull requests."
+  homepage: "https://github.com/caarlos0/prowl"
+  repository: "https://github.com/caarlos0/prowl"
+
+metadata:
+  description: "{{ .description }}"
+  homepage: "{{ .homepage }}"
+
 # Shared config from https://github.com/caarlos0/goreleaserfiles:
 # changelog/release/snapshot/announce, macOS notarization, and the
 # packages (nfpm, nix, homebrew cask). They read the variables below.
@@ -15,11 +24,6 @@ includes:
       url: https://raw.githubusercontent.com/caarlos0/goreleaserfiles/main/notary.yml
   - from_url:
       url: https://raw.githubusercontent.com/caarlos0/goreleaserfiles/main/package.yml
-
-variables:
-  description: "Watch a repo's open PRs, merge queue, and recently merged PRs from your terminal."
-  homepage: "https://github.com/caarlos0/prowl"
-  repository: "https://github.com/caarlos0/prowl"
 
 before:
   hooks:
@@ -75,10 +79,8 @@ signs:
 # Publish to npm (scoped — the bare `prowl` name is taken).
 npms:
   - name: "@caarlos0/prowl"
-    description: "Watch a repo's open PRs, merge queue, and recently merged PRs from your terminal."
-    homepage: https://github.com/caarlos0/prowl
-    repository: https://github.com/caarlos0/prowl
-    bugs: https://github.com/caarlos0/prowl/issues
+    repository: "{{ .repository }}"
+    bugs: "{{ .repository }}/issues"
     license: MIT
     author: "Carlos Alexandro Becker <carlos@becker.software>"
     access: public
