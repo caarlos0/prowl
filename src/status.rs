@@ -148,6 +148,11 @@ pub fn fg(rgb: Rgb) -> Style {
 /// Check-suite conclusions that count as a failure.
 pub const FAIL_CONCLUSIONS: [&str; 3] = ["FAILURE", "STARTUP_FAILURE", "CANCELLED"];
 
+/// Terminal-failure conclusions that are genuine even with zero runs: the suite
+/// failed before producing any check run, so the phantom filter must not mask
+/// it. A zero-run `FAILURE`/`CANCELLED`, by contrast, is a phantom subscription.
+const TERMINAL_FAIL_CONCLUSIONS: [&str; 1] = ["STARTUP_FAILURE"];
+
 /// Whether a check suite actually ran (produced ≥1 check run). Zero-run suites
 /// are phantom subscriptions GitHub ignores, so we do too; a `null` run count
 /// (an inaccessible suite) is treated the same way.
@@ -155,15 +160,17 @@ fn ran(s: &CheckSuite) -> bool {
     s.check_runs.as_ref().is_some_and(|r| r.total_count > 0)
 }
 
-/// Count the check suites that ran and concluded in a failing state.
+/// Count the check suites that concluded in a failing state. A suite counts if
+/// it ran, or if it concluded in a terminal failure that legitimately produces
+/// no runs (e.g. a zero-run `STARTUP_FAILURE`), which the phantom filter must
+/// not mask.
 pub fn fail_count(suites: &[CheckSuite]) -> usize {
     suites
         .iter()
-        .filter(|s| ran(s))
         .filter(|s| {
-            s.conclusion
-                .as_deref()
-                .is_some_and(|c| FAIL_CONCLUSIONS.contains(&c))
+            s.conclusion.as_deref().is_some_and(|c| {
+                FAIL_CONCLUSIONS.contains(&c) && (ran(s) || TERMINAL_FAIL_CONCLUSIONS.contains(&c))
+            })
         })
         .count()
 }
@@ -337,6 +344,25 @@ mod tests {
         // Only phantom suites -> no real CI -> none.
         let s = vec![suite(Some("FAILURE"), 0), suite(None, 0)];
         assert_eq!(derive_status(Some("OPEN"), Some("MERGEABLE"), &s), None);
+    }
+
+    #[test]
+    fn zero_run_startup_failure_counts_as_failing() {
+        // A genuine terminal failure: the suite failed to start, so it produced
+        // zero runs. Unlike a zero-run FAILURE/CANCELLED phantom, it must not be
+        // masked by the phantom filter — a broken pipeline can't read green.
+        let s = vec![suite(Some("SUCCESS"), 4), suite(Some("STARTUP_FAILURE"), 0)];
+        assert_eq!(fail_count(&s), 1);
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Fail)
+        );
+        // A lone zero-run STARTUP_FAILURE is still a failure, not "none".
+        let s = vec![suite(Some("STARTUP_FAILURE"), 0)];
+        assert_eq!(
+            derive_status(Some("OPEN"), Some("MERGEABLE"), &s),
+            Some(Status::Fail)
+        );
     }
 
     #[test]
