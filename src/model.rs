@@ -173,7 +173,7 @@ pub struct CheckRuns {
 
 pub fn mine_search(repo: &Repo, me: &str) -> String {
     format!(
-        "repo:{}/{} is:pr is:open author:{} archived:false",
+        "repo:{}/{} is:pr is:open author:{} archived:false sort:updated-desc",
         repo.owner, repo.name, me
     )
 }
