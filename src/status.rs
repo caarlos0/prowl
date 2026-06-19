@@ -149,9 +149,10 @@ pub fn fg(rgb: Rgb) -> Style {
 pub const FAIL_CONCLUSIONS: [&str; 3] = ["FAILURE", "STARTUP_FAILURE", "CANCELLED"];
 
 /// Whether a check suite actually ran (produced ≥1 check run). Zero-run suites
-/// are phantom subscriptions GitHub ignores, so we do too.
+/// are phantom subscriptions GitHub ignores, so we do too; a `null` run count
+/// (an inaccessible suite) is treated the same way.
 fn ran(s: &CheckSuite) -> bool {
-    s.check_runs.total_count > 0
+    s.check_runs.as_ref().is_some_and(|r| r.total_count > 0)
 }
 
 /// Count the check suites that ran and concluded in a failing state.
@@ -226,7 +227,7 @@ mod tests {
             .iter()
             .map(|c| CheckSuite {
                 conclusion: c.map(str::to_string),
-                check_runs: CheckRuns { total_count: 1 },
+                check_runs: Some(CheckRuns { total_count: 1 }),
             })
             .collect()
     }
@@ -235,7 +236,7 @@ mod tests {
     fn suite(conclusion: Option<&str>, runs: u64) -> CheckSuite {
         CheckSuite {
             conclusion: conclusion.map(str::to_string),
-            check_runs: CheckRuns { total_count: runs },
+            check_runs: Some(CheckRuns { total_count: runs }),
         }
     }
 

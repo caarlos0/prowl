@@ -156,8 +156,10 @@ pub struct CheckSuites {
 #[derive(Debug, Deserialize)]
 pub struct CheckSuite {
     pub conclusion: Option<String>,
+    /// `null` when the viewer can't see a suite's runs (e.g. a third-party
+    /// app's checks); treated the same as a zero-run phantom suite.
     #[serde(rename = "checkRuns")]
-    pub check_runs: CheckRuns,
+    pub check_runs: Option<CheckRuns>,
 }
 
 /// How many check runs a suite produced. Suites with zero runs are phantom

@@ -79,17 +79,20 @@ struct GqlError {
     message: String,
 }
 
-/// Parse a GraphQL `{"data": ...}` envelope, surfacing any GraphQL errors.
+/// Parse a GraphQL `{"data": ...}` envelope. GitHub returns partial `data`
+/// alongside an `errors` array when some nested field is inaccessible (those
+/// fields deserialize as `None`), so prefer the data when present and only
+/// surface an error when there is no data at all.
 /// Split out so tests can exercise it against captured fixtures offline.
 pub fn parse_graphql<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     let env: Envelope<T> = serde_json::from_slice(bytes).context("failed to parse GraphQL JSON")?;
-    if let Some(errors) = &env.errors
-        && let Some(first) = errors.first()
-    {
+    if let Some(data) = env.data {
+        return Ok(data);
+    }
+    if let Some(first) = env.errors.as_ref().and_then(|e| e.first()) {
         bail!("GraphQL error: {}", first.message);
     }
-    env.data
-        .ok_or_else(|| anyhow!("GraphQL response had no data"))
+    bail!("GraphQL response had no data")
 }
 
 /// An authenticated GitHub API client.

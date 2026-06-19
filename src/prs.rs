@@ -127,7 +127,7 @@ mod tests {
                                 .iter()
                                 .map(|c| CheckSuite {
                                     conclusion: c.map(str::to_string),
-                                    check_runs: crate::model::CheckRuns { total_count: 1 },
+                                    check_runs: Some(crate::model::CheckRuns { total_count: 1 }),
                                 })
                                 .collect(),
                         },

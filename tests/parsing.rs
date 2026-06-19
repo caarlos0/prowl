@@ -110,6 +110,21 @@ fn mine_empty_yields_no_rows() {
     assert!(data.search.nodes.is_empty());
 }
 
+#[test]
+fn mine_tolerates_null_check_runs_and_partial_errors() {
+    // GitHub returns a null `checkRuns` for a suite the viewer can't see, and
+    // attaches a top-level `errors` array. The response must still parse (the
+    // suite deserializes as `None`) and that suite must be ignored as a phantom
+    // rather than failing the whole fetch.
+    let data: MineData = parse(include_str!("fixtures/mine_null_checkruns.json"));
+    let rows = prs::build_rows(data.search.nodes);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].number, 123);
+    // The accessible suite passed; the inaccessible (null) one is ignored.
+    assert_eq!(rows[0].status, Some(Status::Pass));
+    assert_eq!(rows[0].fail, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Recently merged
 // ---------------------------------------------------------------------------
