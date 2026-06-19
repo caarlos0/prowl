@@ -17,7 +17,7 @@ pub struct Cli {
     pub repo: Option<String>,
 
     /// Refresh interval, e.g. 30s, 10m, 2h.
-    #[arg(long, default_value = "10m", value_name = "DUR")]
+    #[arg(long, default_value = "5m", value_name = "DUR")]
     pub interval: Dur,
 
     /// Render once and exit (no watch loop, no bell).
@@ -37,7 +37,7 @@ pub struct Cli {
     pub only: Option<Vec<Section>>,
 
     /// How far back "recently merged" reaches, e.g. 7d, 48h, 2w.
-    #[arg(long, default_value = "7d", value_name = "DUR")]
+    #[arg(long, default_value = "2d", value_name = "DUR")]
     pub merged_window: Dur,
 
     /// Maximum number of recently-merged PRs to list.

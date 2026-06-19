@@ -31,7 +31,7 @@ Reference
   BLOCKED — blocked; required reviews or checks not satisfied
   DIRTY — merge conflict
 
-updated 10:15:05 — changed · next 10:25:05
+updated 10:15:05 — changed · next 10:20:05
 ```
 
 The above is the plain output you get when piping or with `--once`. In a real
@@ -83,12 +83,12 @@ prowl [--repo <owner/name>] [--interval <dur>] [--once] [--no-bell] [--ascii]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--repo <owner/name>` | auto-detect | Repository to watch. |
-| `--interval <dur>` | `10m` | Refresh cadence (`30s`, `10m`, `2h`, ...). |
+| `--interval <dur>` | `5m` | Refresh cadence (`30s`, `10m`, `2h`, ...). |
 | `--once` | | Render a single frame and exit (no loop, no bell). |
 | `--no-bell` | | Never ring the bell on changes. |
 | `--ascii` | | Use ASCII status letters instead of Nerd Font glyphs. |
 | `--only <list>` | all | Comma-separated subset of `queue,mine,merged`. |
-| `--merged-window <dur>` | `7d` | How far back "recently merged" reaches (`7d`, `48h`, `2w`). |
+| `--merged-window <dur>` | `2d` | How far back "recently merged" reaches (`7d`, `48h`, `2w`). |
 | `--merged-limit <n>` | `20` | Max recently-merged PRs to list. |
 | `--no-reference` | | Hide the reference legend at the bottom. |
 | `--notify` | | Also send a desktop notification (needs the `notify` feature). |
