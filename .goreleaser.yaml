@@ -12,6 +12,12 @@ variables:
   description: "A tiny terminal radar for your GitHub pull requests."
   homepage: "https://github.com/caarlos0/prowl"
   repository: "https://github.com/caarlos0/prowl"
+  license: MIT
+  maintainers:
+    - Carlos Alexandro Becker <carlos@becker.software>
+  commit_author:
+    name: caarlosb0t
+    email: bot@carlosbecker.com
 
 metadata:
   description: "A tiny terminal radar for your GitHub pull requests."
@@ -25,8 +31,6 @@ includes:
       url: https://raw.githubusercontent.com/caarlos0/goreleaserfiles/main/release.yml
   - from_url:
       url: https://raw.githubusercontent.com/caarlos0/goreleaserfiles/main/notary.yml
-  - from_url:
-      url: https://raw.githubusercontent.com/caarlos0/goreleaserfiles/main/package.yml
 
 before:
   hooks:
@@ -84,8 +88,6 @@ npms:
   - name: "@caarlos0/prowl"
     repository: "{{ .Metadata.Homepage }}"
     bugs: "{{ .Metadata.Homepage }}/issues"
-    license: MIT
-    author: "Carlos Alexandro Becker <carlos@becker.software>"
     access: public
     keywords:
       - github
@@ -93,3 +95,21 @@ npms:
       - merge-queue
       - cli
       - dashboard
+
+nix:
+  - repository:
+      owner: caarlos0
+      name: nur
+      token: "{{ .Env.GH_PAT }}"
+
+homebrew_casks:
+  - repository:
+      owner: caarlos0
+      name: homebrew-tap
+      token: "{{ .Env.GH_PAT }}"
+
+nfpms:
+  - formats:
+      - apk
+      - deb
+      - rpm
