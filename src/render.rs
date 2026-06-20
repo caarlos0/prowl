@@ -270,21 +270,6 @@ pub fn italic(msg: &str, styled: bool) -> String {
     }
 }
 
-/// The dim trailing status line: `updated HH:MM:SS — changed · next HH:MM:SS`.
-pub fn status_line(hms: &str, change: Option<bool>, next: Option<&str>, styled: bool) -> String {
-    let suffix = match change {
-        Some(true) => " \u{2014} changed",
-        Some(false) => " \u{2014} unchanged",
-        None => "",
-    };
-    let next_part = match next {
-        Some(n) => format!(" \u{00b7} next in {n}"),
-        None => String::new(),
-    };
-    let msg = format!("updated {hms}{suffix}{next_part}");
-    empty_line(&msg, styled)
-}
-
 /// A leading cell marking a row that changed since the previous refresh.
 pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     if highlighted {
@@ -363,11 +348,12 @@ pub fn help(ascii: bool, styled: bool) -> String {
     out
 }
 
-/// The watch-mode key hints shown at the very bottom: `r refresh   ? help`.
-/// Each key glyph is a bold muted accent, its label dim; plain when unstyled.
-pub fn footer(styled: bool) -> String {
+/// The watch-mode key hints shown at the very bottom, with the next-refresh
+/// countdown folded into the refresh hint: `r refresh (next in 5m) - ? help`.
+/// Each key glyph is a bold muted accent, its labels dim; plain when unstyled.
+pub fn footer(next: &str, styled: bool) -> String {
     if !styled {
-        return "r refresh   ? help".to_string();
+        return format!("r refresh (next in {next}) - ? help");
     }
     let key = status::fg(status::OVERLAY).bold();
     let dim = Style::new().dimmed();
@@ -380,7 +366,12 @@ pub fn footer(styled: bool) -> String {
             dim.render_reset(),
         )
     };
-    format!("{}   {}", hint("r", "refresh"), hint("?", "help"))
+    let sep = format!("{} - {}", dim.render(), dim.render_reset());
+    format!(
+        "{}{sep}{}",
+        hint("r", &format!("refresh (next in {next})")),
+        hint("?", "help")
+    )
 }
 
 /// Clear the screen and home the cursor.
@@ -410,10 +401,10 @@ mod tests {
 
     #[test]
     fn footer_is_plain_or_styled_key_hints() {
-        assert_eq!(footer(false), "r refresh   ? help");
-        let styled = footer(true);
+        assert_eq!(footer("5m", false), "r refresh (next in 5m) - ? help");
+        let styled = footer("5m", true);
         // Visible text is preserved...
-        assert!(styled.contains("refresh"));
+        assert!(styled.contains("refresh (next in 5m)"));
         assert!(styled.contains("help"));
         // ...with a bold key accent and a dim label.
         assert!(styled.contains("\x1b[1m"));

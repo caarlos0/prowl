@@ -356,44 +356,26 @@ fn help_block(cli: &Cli, show_help: bool, styled: bool) -> String {
     render::help(ascii, styled)
 }
 
-/// Compose the bottom of the frame in order: the dim status line, then (watch
-/// only) the `r refresh   ? help` footer, then the help legend last. `footer`
-/// and `help` may be empty to omit them; present pieces are blank-line
-/// separated. `status` ends with a newline; `footer` does not; `help` does.
+/// Compose the bottom of the frame in order: an optional status line (empty
+/// unless a refresh failed), then (watch only) the `r refresh (next in 5m) - ?
+/// help` footer, then the help legend last. Any part may be empty to omit it;
+/// present parts are separated by a single blank line. The render body already
+/// ends with a blank line, so the first part is not prefixed with one.
 fn bottom(status: &str, footer: &str, help: &str) -> String {
-    let mut out = String::from(status);
-    if !footer.is_empty() {
-        out.push('\n');
-        out.push_str(footer);
-        out.push('\n');
-    }
-    if !help.is_empty() {
-        out.push('\n');
-        out.push_str(help);
+    let mut out = String::new();
+    for part in [status, footer, help] {
+        if part.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(part);
+        if !part.ends_with('\n') {
+            out.push('\n');
+        }
     }
     out
-}
-
-/// The dim trailing status line plus a newline.
-fn trailing(change: Option<bool>, next: Option<&str>, styled: bool) -> String {
-    let mut s = render::status_line(&timefmt::now_hms(), change, next, styled);
-    s.push('\n');
-    s
-}
-
-/// Trailing line shown under the instant cached paint, before the first fetch.
-fn cached_trailing(saved_at: &str, styled: bool) -> String {
-    let msg = format!("cached {saved_at} \u{00b7} refreshing\u{2026}");
-    let mut s = render::empty_line(&msg, styled);
-    s.push('\n');
-    s
-}
-
-/// Trailing line shown the instant the user presses `r`, before the re-fetch.
-fn refreshing_trailing(styled: bool) -> String {
-    let mut s = render::empty_line("refreshing\u{2026}", styled);
-    s.push('\n');
-    s
 }
 
 /// Render the "My Shipments" section: my commit counts for the next
@@ -449,16 +431,8 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
 }
 
 /// A dim trailing line reporting a transient error (last good data is kept).
-fn error_trailing(msg: &str, next: Option<&str>, styled: bool) -> String {
-    let next_part = match next {
-        Some(n) => format!(" \u{00b7} next in {n}"),
-        None => String::new(),
-    };
-    let line = format!(
-        "updated {} \u{2014} error: {msg}{next_part}",
-        timefmt::now_hms()
-    );
-    let mut s = render::empty_line(&line, styled);
+fn error_trailing(msg: &str, styled: bool) -> String {
+    let mut s = render::empty_line(&format!("error: {msg}"), styled);
     s.push('\n');
     s
 }
@@ -510,8 +484,8 @@ pub fn run() -> Result<()> {
         let next = timefmt::eta(cli.interval.dur);
         let body = render_body(&sections, &cli, &changes, interactive)
             + &bottom(
-                &trailing(Some(true), Some(&next), interactive),
-                &render::footer(interactive),
+                "",
+                &render::footer(&next, interactive),
                 &help_block(&cli, !cli.no_help, interactive),
             );
         repaint(&body)?;
@@ -537,16 +511,19 @@ pub fn run() -> Result<()> {
     // `styled` already implies `!cli.once`, so watch mode is just `styled`.
     let watch = styled;
 
+    // The next-refresh ETA is constant (the poll interval), so the key-hint
+    // footer that carries it (`r refresh (next in 5m) - ? help`) is built once.
+    let footer = render::footer(&timefmt::eta(cli.interval.dur), styled);
+
     // Change-detection / last-good state, seeded from the cache below so the
     // first refresh can highlight what changed while prowl wasn't running.
     let mut prev: Option<Tracker> = None;
     let mut last_good: Option<Sections> = None;
     // The help legend starts hidden and is toggled live with `?`. `last_status`
-    // is the most recent trailing line, reused so a `?` toggle can repaint
-    // without inventing a new "updated" timestamp; the fetch arm always sets it
-    // before the wait loop can read it.
+    // is the most recent trailing line (empty unless a refresh failed), reused
+    // so a `?` toggle or `r` repaint keeps any error line on screen.
     let mut show_help = false;
-    let mut last_status: String;
+    let mut last_status = String::new();
 
     // In watch mode, hide the cursor and quiet stdin (no echo / no line
     // buffering, but signal keys still work) for the whole session, restoring
@@ -564,13 +541,8 @@ pub fn run() -> Result<()> {
         });
         match (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
             Some(c) => {
-                let status = cached_trailing(&c.saved_at, styled);
                 let body = render_body(&c.sections, &cli, &Changes::default(), styled)
-                    + &bottom(
-                        &status,
-                        &render::footer(styled),
-                        &help_block(&cli, show_help, styled),
-                    );
+                    + &bottom("", &footer, &help_block(&cli, show_help, styled));
                 repaint(&body)?;
                 prev = Some(Tracker::build(
                     c.sections.prs.as_deref(),
@@ -602,11 +574,7 @@ pub fn run() -> Result<()> {
             cache::save(&repo, &sections);
         }
         let frame = render_body(&sections, &cli, &Changes::default(), styled)
-            + &bottom(
-                &trailing(None, None, styled),
-                "",
-                &help_block(&cli, !cli.no_help, styled),
-            );
+            + &bottom("", "", &help_block(&cli, !cli.no_help, styled));
         print!("{frame}");
         std::io::stdout().flush()?;
         return Ok(());
@@ -630,11 +598,7 @@ pub fn run() -> Result<()> {
                     show_help = !show_help;
                     if let Some(good) = &last_good {
                         let body = render_body(good, &cli, &Changes::default(), styled)
-                            + &bottom(
-                                &refreshing_trailing(styled),
-                                &render::footer(styled),
-                                &help_block(&cli, show_help, styled),
-                            );
+                            + &bottom(&last_status, &footer, &help_block(&cli, show_help, styled));
                         let _ = repaint(&body);
                     }
                 }
@@ -646,18 +610,11 @@ pub fn run() -> Result<()> {
                 let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
                 let changes = prev.as_ref().map(|p| tracker.diff(p)).unwrap_or_default();
                 let bell = changes.any();
-                let change_display = prev.as_ref().map(|_| bell);
-                let next = timefmt::eta(cli.interval.dur);
 
-                let status = trailing(change_display, Some(&next), styled);
+                last_status = String::new();
                 let body = render_body(&sections, &cli, &changes, styled)
-                    + &bottom(
-                        &status,
-                        &render::footer(styled),
-                        &help_block(&cli, show_help, styled),
-                    );
+                    + &bottom("", &footer, &help_block(&cli, show_help, styled));
                 repaint(&body)?;
-                last_status = status;
 
                 if armed && bell && !cli.no_bell {
                     render::ring_bell();
@@ -670,8 +627,7 @@ pub fn run() -> Result<()> {
                 last_good = Some(sections);
             }
             Err(e) => {
-                let next = timefmt::eta(cli.interval.dur);
-                let status = error_trailing(&short_error(&e), Some(&next), styled);
+                last_status = error_trailing(&short_error(&e), styled);
                 let (main, help) = match &last_good {
                     Some(good) => (
                         render_body(good, &cli, &Changes::default(), styled),
@@ -679,41 +635,22 @@ pub fn run() -> Result<()> {
                     ),
                     None => (String::new(), String::new()),
                 };
-                let body = main + &bottom(&status, &render::footer(styled), &help);
+                let body = main + &bottom(&last_status, &footer, &help);
                 repaint(&body)?;
-                last_status = status;
             }
         }
-        // Wait for the interval, but let the user act now: `r` forces a refresh,
-        // `?` toggles the help legend; all other keys are discarded. A manual
-        // refresh repaints with a dim "refreshing…" line so the keypress feels
-        // instant, then breaks out to fetch. A `?` toggle repaints in place
-        // (reusing the last status line) and keeps waiting for the interval.
+        // Wait for the interval, but let the user act now: `r` forces a refresh
+        // (the worker thread then re-fetches with `?` still live), `?` toggles
+        // the help legend in place; all other keys are discarded.
         let deadline = std::time::Instant::now() + cli.interval.dur;
         loop {
             match term::wait(deadline) {
-                term::Wait::Tick => break,
-                term::Wait::Refresh => {
-                    if let Some(good) = &last_good {
-                        let body = render_body(good, &cli, &Changes::default(), styled)
-                            + &bottom(
-                                &refreshing_trailing(styled),
-                                &render::footer(styled),
-                                &help_block(&cli, show_help, styled),
-                            );
-                        repaint(&body)?;
-                    }
-                    break;
-                }
+                term::Wait::Tick | term::Wait::Refresh => break,
                 term::Wait::ToggleHelp => {
                     show_help = !show_help;
                     if let Some(good) = &last_good {
                         let body = render_body(good, &cli, &Changes::default(), styled)
-                            + &bottom(
-                                &last_status,
-                                &render::footer(styled),
-                                &help_block(&cli, show_help, styled),
-                            );
+                            + &bottom(&last_status, &footer, &help_block(&cli, show_help, styled));
                         repaint(&body)?;
                     }
                 }

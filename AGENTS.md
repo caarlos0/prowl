@@ -7,9 +7,10 @@ model, or workflow change.
 ## What prowl is
 
 A small terminal dashboard that watches a GitHub repo and re-renders on an
-interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, then the
-status line, a `r refresh   ? help` footer, and an optional help legend last at
-the bottom. It rings the terminal bell when one of your PRs merges or
+interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, then a
+`r refresh (next in 5m) - ? help` footer (which also shows the time until the
+next refresh) and an optional help legend last at the bottom. It rings the
+terminal bell when one of your PRs merges or
 an open PR's status changes, and flags the changed rows. It is a plain
 `std::thread::sleep` redraw loop — **not** a raw-mode/alt-screen TUI — so output
 stays pipe-friendly and URLs can be OSC-8 hyperlinks.
@@ -52,8 +53,9 @@ everything else is testable modules:
 - `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8
   (incl. `link_styled` for clickable PR numbers), `truncate` + `fit_titles`
   (cap/align the shared `TITLE` column so every table lines up and the whole
-  view stays within `MAX_WIDTH` = 120 columns), headers, status line, key-hint
-  footer, help legend (a full static reference of every status glyph + `STATE`
+  view stays within `MAX_WIDTH` = 120 columns), headers, the key-hint footer
+  (`footer`, carrying the relative next-refresh ETA), help legend (a full static
+  reference of every status glyph + `STATE`
   value, last at the very bottom), loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
@@ -82,20 +84,22 @@ everything else is testable modules:
   not ring). The first refresh is silent. Changed rows get a `▸` marker.
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
-- **Cache:** on a watch start, prowl paints the cached `Sections` immediately
-  (status line `cached HH:MM:SS · refreshing…`), seeds change-detection from it
+- **Cache:** on a watch start, prowl paints the cached `Sections` immediately,
+  seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
   but stays silent (no startup bell). `--no-cache` skips both read and write.
 - **Terminal:** while watching, the cursor is hidden and stdin echo/line
   buffering are turned off, so stray keystrokes neither garble the dashboard nor
   spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
-  refresh now (shown with a dim `refreshing…` line); `?` toggles the help legend
+  refresh now; `?` toggles the help legend
   (a full static reference of every status glyph + `STATE` value, hidden by
   default, rendered last at the very bottom; `--no-help` only affects
-  one-shot/piped output). A dim footer (`r refresh   ? help`) sits just above the
-  legend and advertises both keys. The blocking fetch runs on a worker thread
-  (`std::thread::scope`) while the main thread keeps polling input, so `?` stays
-  responsive even mid-refresh. Both the cursor and terminal mode are
+  one-shot/piped output). The only persistent bottom line is the footer
+  (`r refresh (next in 5m) - ? help`), which carries the next-refresh ETA; a
+  failed refresh adds a dim `error: …` line above it. The blocking fetch runs on
+  a worker thread (`std::thread::scope`) while the main thread keeps polling
+  input, so `?` stays responsive even mid-refresh. Both the cursor and terminal
+  mode are
   restored on every normal or early (`?`-operator) return (Drop guards) and on
   SIGINT (the Ctrl-C handler).
 

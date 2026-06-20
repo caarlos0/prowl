@@ -47,7 +47,8 @@ prowl --once              # render once and exit
 ```
 
 While watching, press `r` to refresh now, `?` to toggle the help legend, and
-`Ctrl-C` to quit. A footer at the bottom (`r refresh   ? help`) shows the keys.
+`Ctrl-C` to quit. A footer at the bottom (`r refresh (next in 5m) - ? help`)
+shows the keys and the time until the next refresh.
 The legend is a full reference of every status glyph and `STATE` value.
 
 Run `prowl --help` for all flags (interval, `--only`, merged window, etc.).

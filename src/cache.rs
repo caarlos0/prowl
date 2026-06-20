@@ -15,7 +15,6 @@ const VERSION: u32 = 2;
 #[derive(Deserialize)]
 pub(crate) struct Cached {
     version: u32,
-    pub(crate) saved_at: String,
     pub(crate) sections: Sections,
 }
 
