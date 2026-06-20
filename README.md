@@ -2,7 +2,8 @@
 
 > A tiny terminal radar for your GitHub pull requests.
 
-<img width="1916" height="1794" alt="CleanShot 2026-06-19 at 22 06 23" src="https://github.com/user-attachments/assets/d9a7967c-1650-45a4-91f9-32bac3b373d1" />
+<img width="1788" height="1662" alt="CleanShot 2026-06-20 at 00 25 09" src="https://github.com/user-attachments/assets/72f0fa20-93f3-44fd-ac24-966cfac55c36" />
+
 
 
 A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
