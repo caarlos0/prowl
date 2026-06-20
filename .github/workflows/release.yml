@@ -35,8 +35,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
-          # npm publish (scoped @caarlos0/prowl).
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # Optional macOS notarization (skipped when unset).
           MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
           MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
