@@ -93,7 +93,9 @@ everything else is testable modules:
   (a full static reference of every status glyph + `STATE` value, hidden by
   default, rendered last at the very bottom; `--no-help` only affects
   one-shot/piped output). A dim footer (`r refresh   ? help`) sits just above the
-  legend and advertises both keys. Both the cursor and terminal mode are
+  legend and advertises both keys. The blocking fetch runs on a worker thread
+  (`std::thread::scope`) while the main thread keeps polling input, so `?` stays
+  responsive even mid-refresh. Both the cursor and terminal mode are
   restored on every normal or early (`?`-operator) return (Drop guards) and on
   SIGINT (the Ctrl-C handler).
 

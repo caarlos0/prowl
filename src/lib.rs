@@ -619,7 +619,29 @@ pub fn run() -> Result<()> {
     // refresh after a cached start from ringing (it still highlights changes).
     let mut armed = false;
     loop {
-        match fetch(&cli, &client, &repo, &me, &default_branch) {
+        // Run the blocking fetch on a worker thread and poll input while it
+        // runs, so `?` still toggles the help legend mid-refresh. Ticks and `r`
+        // are ignored here — a refresh is already in flight.
+        let result = std::thread::scope(|scope| {
+            let handle = scope.spawn(|| fetch(&cli, &client, &repo, &me, &default_branch));
+            while !handle.is_finished() {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(60);
+                if let term::Wait::ToggleHelp = term::wait(deadline) {
+                    show_help = !show_help;
+                    if let Some(good) = &last_good {
+                        let body = render_body(good, &cli, &Changes::default(), styled)
+                            + &bottom(
+                                &refreshing_trailing(styled),
+                                &render::footer(styled),
+                                &help_block(&cli, show_help, styled),
+                            );
+                        let _ = repaint(&body);
+                    }
+                }
+            }
+            handle.join().expect("fetch thread panicked")
+        });
+        match result {
             Ok(sections) => {
                 let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
                 let changes = prev.as_ref().map(|p| tracker.diff(p)).unwrap_or_default();
