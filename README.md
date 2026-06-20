@@ -2,6 +2,9 @@
 
 > A tiny terminal radar for your GitHub pull requests.
 
+<img width="1916" height="1794" alt="CleanShot 2026-06-19 at 22 06 23" src="https://github.com/user-attachments/assets/d9a7967c-1650-45a4-91f9-32bac3b373d1" />
+
+
 A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
 **merge queue**, your **recently merged PRs**, and the **commits you've
 shipped** per release. It refreshes on an interval and **rings the terminal
@@ -10,28 +13,7 @@ changes — and flags whatever changed. On startup it paints instantly from a
 local cache, then refreshes in the background.
 
 It talks to the GitHub API directly. On first run it walks you through a
-one-time browser **device login** (or set `GITHUB_TOKEN`) — no `gh` CLI needed.
-
-```
-▌ My open PRs  3
-   P  #6656  feat: goreleaser check --allow-deprecations  CLEAN      -
- ▸ !  #6475  feat: install scripts                        CONFLICTS  3
-
-▌ Merge Queue  1
-   1  #6656  feat: goreleaser check --allow-deprecations  caarlos0
-
-▌ My merged PRs  1
-   m  #6649  fix(mcp): clean subfolder path               main  1w
-
-▌ My Shipments  32
-  upcoming: 3
-    v1.2.0: 8
-    v1.1.0: 5
-    v1.0.0: 12
-    v0.9.0: 4
-
-updated 11:21:16 — changed · next 11:26:16
-```
+one-time browser **device login** (or set `GITHUB_TOKEN`).
 
 Status is a single Catppuccin-colored glyph. On a TTY, prowl uses Nerd Font
 icons (pass, fail, pending, conflicts, merged); with `--ascii` (or when piped)
