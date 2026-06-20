@@ -12,16 +12,16 @@ variables:
   description: "A tiny terminal radar for your GitHub pull requests."
   homepage: "https://github.com/caarlos0/prowl"
   repository: "https://github.com/caarlos0/prowl"
+
+metadata:
+  description: "A tiny terminal radar for your GitHub pull requests."
+  homepage: "https://github.com/caarlos0/prowl"
   license: MIT
   maintainers:
     - Carlos Alexandro Becker <carlos@becker.software>
   commit_author:
     name: caarlosb0t
     email: bot@carlosbecker.com
-
-metadata:
-  description: "A tiny terminal radar for your GitHub pull requests."
-  homepage: "https://github.com/caarlos0/prowl"
 
 # Shared config from https://github.com/caarlos0/goreleaserfiles:
 # changelog/release/snapshot/announce, macOS notarization, and the
