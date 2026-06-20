@@ -260,6 +260,16 @@ pub fn empty_line(msg: &str, styled: bool) -> String {
     }
 }
 
+/// Wrap `msg` in italics when styled; plain text otherwise.
+pub fn italic(msg: &str, styled: bool) -> String {
+    if styled {
+        let italic = Style::new().italic();
+        format!("{}{msg}{}", italic.render(), italic.render_reset())
+    } else {
+        msg.to_string()
+    }
+}
+
 /// The dim trailing status line: `updated HH:MM:SS — changed · next HH:MM:SS`.
 pub fn status_line(hms: &str, change: Option<bool>, next: Option<&str>, styled: bool) -> String {
     let suffix = match change {

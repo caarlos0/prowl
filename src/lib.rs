@@ -446,9 +446,11 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
     }
 
     let width = rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
-    for (label, value) in &rows {
+    for (i, (label, value)) in rows.iter().enumerate() {
         let pad = " ".repeat(width - label.width());
-        // Plain (not dim): the shipment counts are real data, not a placeholder.
+        // The first row is the upcoming (unreleased) version; set it apart in
+        // italics. Plain (not dim): the counts are real data, not placeholders.
+        let label = render::italic(label, styled && i == 0);
         f.push_str(&format!("  {pad}{label}: {value}\n"));
     }
 }
