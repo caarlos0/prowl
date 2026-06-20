@@ -49,8 +49,9 @@ builds:
       - aarch64-unknown-linux-gnu
       - aarch64-apple-darwin
 
-universal_binaries:
-  - replace: true
+# TODO: uncomment when goreleaser fixed
+# universal_binaries:
+#   - replace: true
 
 archives:
   - formats: [tar.gz]
