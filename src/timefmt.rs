@@ -1,6 +1,6 @@
 //! Small time helpers built on `chrono`: the `since` date for the merged
-//! search, compact relative ages for merge times, and the local wall clock for
-//! the status line.
+//! search, compact relative ages for merge times, and the local wall clock used
+//! to stamp the on-disk cache.
 
 use crate::cli::Dur;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
@@ -12,7 +12,7 @@ pub fn since_date(window: &Dur) -> String {
     (Utc::now() - delta).format("%Y-%m-%d").to_string()
 }
 
-/// Local wall-clock `HH:MM:SS`, for the status line.
+/// Local wall-clock `HH:MM:SS`, used to stamp the on-disk cache.
 pub fn now_hms() -> String {
     Local::now().format("%H:%M:%S").to_string()
 }

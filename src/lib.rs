@@ -262,12 +262,12 @@ fn section(
     f.push('\n');
 }
 
-/// Render the section bodies (no screen-clear, no status line): My open PRs,
+/// Render the section bodies (no screen-clear, no footer): My open PRs,
 /// then Merge Queue, then My merged PRs, then My Shipments. Each PR section
 /// always shows its header (with a count); an empty section follows it with a
 /// dim placeholder one-liner. Rows that changed since the previous refresh (per
-/// `changes`) are flagged with a leading marker. The help legend is rendered
-/// separately (below the status line) by `help_block`.
+/// `changes`) are flagged with a leading marker. The footer and help legend are
+/// rendered separately (below the body) by `bottom`.
 fn render_body(s: &Sections, cli: &Cli, changes: &Changes, styled: bool) -> String {
     let mut f = String::new();
     let ascii = cli.ascii || !styled;
@@ -356,7 +356,7 @@ fn help_block(cli: &Cli, show_help: bool, styled: bool) -> String {
     render::help(ascii, styled)
 }
 
-/// Compose the bottom of the frame in order: an optional status line (empty
+/// Compose the bottom of the frame in order: an optional error line (empty
 /// unless a refresh failed), then (watch only) the `r refresh (next in 5m) - ?
 /// help` footer, then the help legend last. Any part may be empty to omit it;
 /// present parts are separated by a single blank line. The render body already
@@ -520,8 +520,8 @@ pub fn run() -> Result<()> {
     let mut prev: Option<Tracker> = None;
     let mut last_good: Option<Sections> = None;
     // The help legend starts hidden and is toggled live with `?`. `last_status`
-    // is the most recent trailing line (empty unless a refresh failed), reused
-    // so a `?` toggle or `r` repaint keeps any error line on screen.
+    // is the most recent error line (empty unless a refresh failed), reused so a
+    // `?` toggle keeps that error on screen.
     let mut show_help = false;
     let mut last_status = String::new();
 

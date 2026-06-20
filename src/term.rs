@@ -159,8 +159,8 @@ mod imp {
 
     /// Wait up to `deadline` for the next scheduled refresh, returning early on
     /// a recognized keypress: `r`/`R` to refresh now, `?` to toggle the help
-    /// (help) legend. Every other keystroke is discarded. Falls back to a
-    /// plain sleep when stdin isn't a quieted terminal.
+    /// legend. Every other keystroke is discarded. Falls back to a plain sleep
+    /// when stdin isn't a quieted terminal.
     pub fn wait(deadline: Instant) -> Wait {
         let Some((fd, _)) = *SAVED.lock().unwrap() else {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
@@ -199,16 +199,17 @@ mod imp {
             }
             let bytes = &buf[..n as usize];
             // `r` (refresh) takes precedence over `?` (help toggle) if both were
-            // typed in the same burst. Collapse key-repeat into a single action.
-            if bytes.iter().any(|&b| b == b'r' || b == b'R') {
-                while unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
-                return Wait::Refresh;
-            }
-            if bytes.contains(&b'?') {
-                while unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
-                return Wait::ToggleHelp;
-            }
-            // Other keys are discarded; keep waiting until `deadline`.
+            // typed in the same burst; other keys keep us waiting.
+            let action = if bytes.iter().any(|&b| b == b'r' || b == b'R') {
+                Wait::Refresh
+            } else if bytes.contains(&b'?') {
+                Wait::ToggleHelp
+            } else {
+                continue;
+            };
+            // Collapse key-repeat into a single action.
+            while unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+            return action;
         }
     }
 }

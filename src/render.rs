@@ -1,6 +1,6 @@
 //! Terminal rendering: styled, aligned tables with OSC-8 hyperlinks, concise
-//! section headers, the dim status line, and the bell. Every escape is gated on
-//! a `styled` flag, so piped / non-TTY output is plain text.
+//! section headers, the dim key-hint footer, and the bell. Every escape is
+//! gated on a `styled` flag, so piped / non-TTY output is plain text.
 
 use crate::status::{self, Rgb};
 use anstyle::Style;
@@ -249,8 +249,8 @@ pub fn header(title: &str, accent: Rgb, count: Option<&str>, styled: bool) -> St
     }
 }
 
-/// A dim one-liner: an empty-section placeholder, or other plain dim status
-/// text (the status line, the loading screen). Plain when not styled.
+/// A dim one-liner: an empty-section placeholder, or other plain dim text (the
+/// error line, the loading screen). Plain when not styled.
 pub fn empty_line(msg: &str, styled: bool) -> String {
     if styled {
         let dim = Style::new().dimmed();
