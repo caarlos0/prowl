@@ -4,8 +4,6 @@
 
 <img width="1788" height="1662" alt="CleanShot 2026-06-20 at 00 25 09" src="https://github.com/user-attachments/assets/72f0fa20-93f3-44fd-ac24-966cfac55c36" />
 
-
-
 A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
 **merge queue**, your **recently merged PRs**, and the **commits you've
 shipped** per release. It refreshes on an interval and **rings the terminal
@@ -25,7 +23,10 @@ Each PR number is a clickable link to the PR. Long titles are truncated (with a
 ## Install
 
 ```sh
-cargo install --path .
+brew install --cask caarlos0/tap/prowl    # homebrew
+npm install -g @caarlos0/prowl            # npm
+npx @caarlos0/prowl                       # run without installing
+cargo install --path .                    # from source
 ```
 
 ## Login
