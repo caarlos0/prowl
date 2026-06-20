@@ -44,9 +44,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 20, value_name = "N")]
     pub merged_limit: usize,
 
-    /// Hide the reference legend that explains the status glyphs and STATE values.
+    /// Hide the help legend in one-shot/piped output (in the watch view it
+    /// starts hidden and is toggled with `?`).
     #[arg(long)]
-    pub no_reference: bool,
+    pub no_help: bool,
 
     /// Authenticate with GitHub (device flow) and exit.
     #[arg(long)]

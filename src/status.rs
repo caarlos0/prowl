@@ -17,7 +17,7 @@ pub const BLUE: Rgb = (137, 180, 250); // #89b4fa
 pub const LAVENDER: Rgb = (180, 190, 254); // #b4befe
 pub const TEAL: Rgb = (148, 226, 213); // #94e2d5
 pub const PINK: Rgb = (245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
-pub const OVERLAY: Rgb = (147, 153, 178); // #9399b2 — muted accent (reference legend)
+pub const OVERLAY: Rgb = (147, 153, 178); // #9399b2 — muted accent (help legend)
 
 /// CI/PR status. Glyphs/colors are fixed by the shared palette.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,7 +81,7 @@ pub fn glyph(s: Status, ascii: bool) -> char {
     }
 }
 
-/// One-line meaning of a status (for the reference legend).
+/// One-line meaning of a status (for the help legend).
 pub fn status_meaning(s: Status) -> &'static str {
     match s {
         Status::Pass => "all checks passed",
@@ -92,7 +92,7 @@ pub fn status_meaning(s: Status) -> &'static str {
     }
 }
 
-/// One-line meaning of a `mergeStateStatus` value (for the reference legend).
+/// One-line meaning of a `mergeStateStatus` value (for the help legend).
 pub fn state_meaning(state: &str) -> &'static str {
     match state {
         "CLEAN" => "ready to merge; all required checks pass",

@@ -2,7 +2,7 @@
 //! section headers, the dim status line, and the bell. Every escape is gated on
 //! a `styled` flag, so piped / non-TTY output is plain text.
 
-use crate::status::{self, Rgb, Status};
+use crate::status::{self, Rgb};
 use anstyle::Style;
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -278,7 +278,7 @@ pub fn status_line(hms: &str, change: Option<bool>, next: Option<&str>, styled: 
         None => "",
     };
     let next_part = match next {
-        Some(n) => format!(" \u{00b7} next {n}"),
+        Some(n) => format!(" \u{00b7} next in {n}"),
         None => String::new(),
     };
     let msg = format!("updated {hms}{suffix}{next_part}");
@@ -295,27 +295,17 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// The reference legend explaining the status glyphs and `STATE` values that
-/// are currently on screen. `statuses` and `states` should already be
-/// deduplicated; only entries that appear are listed. The title reuses the
+/// The help legend: a complete reference of every status glyph and every
+/// `mergeStateStatus` value (not just those on screen). The title reuses the
 /// shared section-header style; the explanations themselves are dim.
-pub fn reference(
-    statuses: &[Status],
-    has_none: bool,
-    states: &[String],
-    ascii: bool,
-    styled: bool,
-) -> String {
+pub fn help(ascii: bool, styled: bool) -> String {
     let dim = Style::new().dimmed();
     let mut out = String::new();
 
-    out.push_str(&header("Reference", status::OVERLAY, None, styled));
+    out.push_str(&header("Help", status::OVERLAY, None, styled));
     out.push('\n');
 
     for s in status::ORDER {
-        if !statuses.contains(&s) {
-            continue;
-        }
         let ch = status::glyph(s, ascii);
         let meaning = status::status_meaning(s);
         if styled {
@@ -332,22 +322,9 @@ pub fn reference(
             let _ = writeln!(out, "  {ch}  {meaning}");
         }
     }
-    if has_none {
-        let _ = writeln!(out, "  {}", empty_line("- no checks reported yet", styled));
-    }
+    let _ = writeln!(out, "  {}", empty_line("- no checks reported yet", styled));
 
-    // States in legend order, then any unknown extras.
-    let mut ordered: Vec<&str> = status::STATE_ORDER
-        .iter()
-        .copied()
-        .filter(|k| states.iter().any(|s| s == k))
-        .collect();
-    for s in states {
-        if !ordered.contains(&s.as_str()) {
-            ordered.push(s);
-        }
-    }
-    for st in ordered {
+    for st in status::STATE_ORDER {
         let meaning = status::state_meaning(st);
         let c = status::state_style(st);
         if ascii {
@@ -386,6 +363,26 @@ pub fn reference(
     out
 }
 
+/// The watch-mode key hints shown at the very bottom: `r refresh   ? help`.
+/// Each key glyph is a bold muted accent, its label dim; plain when unstyled.
+pub fn footer(styled: bool) -> String {
+    if !styled {
+        return "r refresh   ? help".to_string();
+    }
+    let key = status::fg(status::OVERLAY).bold();
+    let dim = Style::new().dimmed();
+    let hint = |k: &str, label: &str| {
+        format!(
+            "{}{k}{} {}{label}{}",
+            key.render(),
+            key.render_reset(),
+            dim.render(),
+            dim.render_reset(),
+        )
+    };
+    format!("{}   {}", hint("r", "refresh"), hint("?", "help"))
+}
+
 /// Clear the screen and home the cursor.
 pub fn clear() -> &'static str {
     "\x1b[2J\x1b[H"
@@ -410,6 +407,18 @@ pub fn ring_bell() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn footer_is_plain_or_styled_key_hints() {
+        assert_eq!(footer(false), "r refresh   ? help");
+        let styled = footer(true);
+        // Visible text is preserved...
+        assert!(styled.contains("refresh"));
+        assert!(styled.contains("help"));
+        // ...with a bold key accent and a dim label.
+        assert!(styled.contains("\x1b[1m"));
+        assert!(styled.contains("\x1b[2m"));
+    }
 
     #[test]
     fn plain_table_aligns_and_pads() {

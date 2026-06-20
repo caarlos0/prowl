@@ -17,10 +17,24 @@ pub fn now_hms() -> String {
     Local::now().format("%H:%M:%S").to_string()
 }
 
-/// Local `HH:MM:SS` of the next refresh, `after` from now.
-pub fn next_hms(after: Duration) -> String {
-    let delta = ChronoDuration::from_std(after).unwrap_or_else(|_| ChronoDuration::zero());
-    (Local::now() + delta).format("%H:%M:%S").to_string()
+/// Compact ETA until the next refresh, `after` from now: seconds under a minute
+/// (`45s`), otherwise minutes (`5m`), with hours rolled up for long intervals
+/// (`2h`, `1h30m`). Pure (takes the interval) so it is trivially testable.
+pub fn eta(after: Duration) -> String {
+    let secs = after.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m", (secs + 30) / 60)
+    } else {
+        let h = secs / 3_600;
+        let m = (secs % 3_600 + 30) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m}m")
+        }
+    }
 }
 
 /// Parse an RFC 3339 timestamp (e.g. GitHub's `mergedAt`) to UTC.
@@ -61,6 +75,19 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         parse_ts(s).unwrap()
+    }
+
+    #[test]
+    fn eta_buckets_seconds_minutes_hours() {
+        let s = |secs| eta(Duration::from_secs(secs));
+        assert_eq!(s(30), "30s");
+        assert_eq!(s(59), "59s");
+        assert_eq!(s(60), "1m");
+        assert_eq!(s(300), "5m");
+        assert_eq!(s(90), "2m"); // rounds to nearest minute
+        assert_eq!(s(3_600), "1h");
+        assert_eq!(s(7_200), "2h");
+        assert_eq!(s(5_400), "1h30m");
     }
 
     #[test]

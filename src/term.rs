@@ -3,13 +3,25 @@
 //! keys (Ctrl-C, Ctrl-Z, Ctrl-\) keep working because `ISIG` stays enabled — we
 //! only drop local echo and line buffering, then discard whatever was typed.
 
+/// The outcome of waiting for the next refresh while watching.
+pub enum Wait {
+    /// The interval elapsed: do a scheduled refresh.
+    Tick,
+    /// The user pressed `r`/`R`: refresh now.
+    Refresh,
+    /// The user pressed `?`: toggle the help (help) legend.
+    ToggleHelp,
+}
+
 #[cfg(unix)]
 mod imp {
     use std::cmp::Ordering;
     use std::io::IsTerminal;
     use std::os::fd::AsRawFd;
     use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
+
+    use super::Wait;
 
     use crate::render::{HIDE_CURSOR, SHOW_CURSOR};
 
@@ -145,20 +157,20 @@ mod imp {
         }
     }
 
-    /// Wait up to `dur` for the next refresh. Returns `true` early when the
-    /// user presses `r`/`R` to refresh now; every other keystroke is discarded.
-    /// Falls back to a plain sleep when stdin isn't a quieted terminal.
-    pub fn wait_or_refresh(dur: Duration) -> bool {
+    /// Wait up to `deadline` for the next scheduled refresh, returning early on
+    /// a recognized keypress: `r`/`R` to refresh now, `?` to toggle the help
+    /// (help) legend. Every other keystroke is discarded. Falls back to a
+    /// plain sleep when stdin isn't a quieted terminal.
+    pub fn wait(deadline: Instant) -> Wait {
         let Some((fd, _)) = *SAVED.lock().unwrap() else {
-            std::thread::sleep(dur);
-            return false;
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            return Wait::Tick;
         };
-        let deadline = Instant::now() + dur;
         let mut buf = [0u8; 256];
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return false;
+                return Wait::Tick;
             }
             let ms = remaining.as_millis().min(i32::MAX as u128) as i32;
             let mut pfd = libc::pollfd {
@@ -174,39 +186,48 @@ mod imp {
                         continue;
                     }
                     std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-                    return false;
+                    return Wait::Tick;
                 }
-                Ordering::Equal => return false, // timed out: scheduled refresh
+                Ordering::Equal => return Wait::Tick, // timed out: scheduled refresh
                 Ordering::Greater => {}
             }
             let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
                 // EOF/error on stdin: stop polling, just wait out the interval.
                 std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-                return false;
+                return Wait::Tick;
             }
-            if buf[..n as usize].iter().any(|&b| b == b'r' || b == b'R') {
-                // Collapse key-repeat into a single refresh.
+            let bytes = &buf[..n as usize];
+            // `r` (refresh) takes precedence over `?` (help toggle) if both were
+            // typed in the same burst. Collapse key-repeat into a single action.
+            if bytes.iter().any(|&b| b == b'r' || b == b'R') {
                 while unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
-                return true;
+                return Wait::Refresh;
             }
-            // Non-'r' keys are discarded; keep waiting for the rest of `dur`.
+            if bytes.contains(&b'?') {
+                while unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+                return Wait::ToggleHelp;
+            }
+            // Other keys are discarded; keep waiting until `deadline`.
         }
     }
 }
 
 #[cfg(not(unix))]
 mod imp {
+    use super::Wait;
+    use std::time::Instant;
+
     pub struct QuietInput;
 
     pub fn quiet() -> Option<QuietInput> {
         None
     }
     pub fn restore() {}
-    pub fn wait_or_refresh(dur: std::time::Duration) -> bool {
-        std::thread::sleep(dur);
-        false
+    pub fn wait(deadline: Instant) -> Wait {
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        Wait::Tick
     }
 }
 
-pub use imp::{QuietInput, quiet, restore, wait_or_refresh};
+pub use imp::{QuietInput, quiet, restore, wait};

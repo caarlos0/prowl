@@ -46,6 +46,8 @@ prowl --repo owner/name   # watch a specific repo
 prowl --once              # render once and exit
 ```
 
-While watching, press `r` to refresh now and `Ctrl-C` to quit.
+While watching, press `r` to refresh now, `?` to toggle the help legend, and
+`Ctrl-C` to quit. A footer at the bottom (`r refresh   ? help`) shows the keys.
+The legend is a full reference of every status glyph and `STATE` value.
 
 Run `prowl --help` for all flags (interval, `--only`, merged window, etc.).

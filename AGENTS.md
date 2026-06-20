@@ -7,8 +7,9 @@ model, or workflow change.
 ## What prowl is
 
 A small terminal dashboard that watches a GitHub repo and re-renders on an
-interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, with a reference
-legend at the bottom. It rings the terminal bell when one of your PRs merges or
+interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, then the
+status line, a `r refresh   ? help` footer, and an optional help legend last at
+the bottom. It rings the terminal bell when one of your PRs merges or
 an open PR's status changes, and flags the changed rows. It is a plain
 `std::thread::sleep` redraw loop — **not** a raw-mode/alt-screen TUI — so output
 stays pipe-friendly and URLs can be OSC-8 hyperlinks.
@@ -51,8 +52,9 @@ everything else is testable modules:
 - `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8
   (incl. `link_styled` for clickable PR numbers), `truncate` + `fit_titles`
   (cap/align the shared `TITLE` column so every table lines up and the whole
-  view stays within `MAX_WIDTH` = 120 columns), headers, reference legend,
-  status line, loading screen, bell, clear.
+  view stays within `MAX_WIDTH` = 120 columns), headers, status line, key-hint
+  footer, help legend (a full static reference of every status glyph + `STATE`
+  value, last at the very bottom), loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
   columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`).
@@ -64,8 +66,8 @@ everything else is testable modules:
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
 - `term.rs` — Unix terminal helper: while watching, quiet stdin (drop echo +
   line buffering, keep `ISIG` so signal keys work) and turn the interval wait
-  into a poll, so `r` refreshes now while every other key is discarded; restored
-  on every exit path. A no-op on non-Unix.
+  into a poll, so `r` refreshes now and `?` toggles the help legend, while every
+  other key is discarded; restored on every exit path. A no-op on non-Unix.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 ## Key behaviors
@@ -87,9 +89,13 @@ everything else is testable modules:
 - **Terminal:** while watching, the cursor is hidden and stdin echo/line
   buffering are turned off, so stray keystrokes neither garble the dashboard nor
   spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
-  refresh now (shown with a dim `refreshing…` line). Both the cursor and terminal
-  mode are restored on normal/`?` returns (Drop guards) and on SIGINT (the
-  Ctrl-C handler).
+  refresh now (shown with a dim `refreshing…` line); `?` toggles the help legend
+  (a full static reference of every status glyph + `STATE` value, hidden by
+  default, rendered last at the very bottom; `--no-help` only affects
+  one-shot/piped output). A dim footer (`r refresh   ? help`) sits just above the
+  legend and advertises both keys. Both the cursor and terminal mode are
+  restored on every normal or early (`?`-operator) return (Drop guards) and on
+  SIGINT (the Ctrl-C handler).
 
 ## The three GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
