@@ -108,3 +108,6 @@ nfpms:
       - apk
       - deb
       - rpm
+
+checksum:
+  name_template: checksums.txt
