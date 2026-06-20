@@ -96,12 +96,6 @@ npms:
       - cli
       - dashboard
 
-nix:
-  - repository:
-      owner: caarlos0
-      name: nur
-      token: "{{ .Env.GH_PAT }}"
-
 homebrew_casks:
   - repository:
       owner: caarlos0
