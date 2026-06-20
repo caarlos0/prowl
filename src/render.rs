@@ -90,23 +90,25 @@ pub fn truncate(s: &str, max: usize, ascii: bool) -> String {
     out
 }
 
+/// The display width of column `c`: its header and widest cell.
+fn col_width(table: &Table, c: usize) -> usize {
+    let mut cw = w(table.header[c]);
+    for row in &table.rows {
+        if let Some(cell) = row.get(c) {
+            cw = cw.max(w(&cell.text));
+        }
+    }
+    cw
+}
+
 /// The display width of every column of `table` except `skip`, plus the
 /// two-space separators — i.e. how wide a row is without its flexible column.
 fn fixed_width(table: &Table, skip: usize) -> usize {
     let cols = table.header.len();
-    let mut total = 0;
-    for c in 0..cols {
-        if c == skip {
-            continue;
-        }
-        let mut cw = w(table.header[c]);
-        for row in &table.rows {
-            if let Some(cell) = row.get(c) {
-                cw = cw.max(w(&cell.text));
-            }
-        }
-        total += cw;
-    }
+    let total: usize = (0..cols)
+        .filter(|&c| c != skip)
+        .map(|c| col_width(table, c))
+        .sum();
     total + 2 * cols.saturating_sub(1)
 }
 
@@ -122,13 +124,7 @@ pub fn fit_titles(tables: &mut [&mut Table], ascii: bool) {
         .collect();
     for (t, idx) in tables.iter().zip(&idxs) {
         if let Some(ti) = idx {
-            let mut tw = w(t.header[*ti]);
-            for row in &t.rows {
-                if let Some(cell) = row.get(*ti) {
-                    tw = tw.max(w(&cell.text));
-                }
-            }
-            natural = natural.max(tw);
+            natural = natural.max(col_width(t, *ti));
             fixed = fixed.max(fixed_width(t, *ti));
         }
     }

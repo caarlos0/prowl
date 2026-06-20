@@ -262,6 +262,34 @@ fn legend(s: &Sections) -> (Vec<status::Status>, bool, Vec<String>) {
     (statuses, has_none, states)
 }
 
+/// Render one PR section: a counted header, then either its table or, when
+/// empty, a dim placeholder. `table` is `None` exactly when the section is
+/// empty (empties are filtered out before alignment).
+fn section(
+    f: &mut String,
+    title: &str,
+    accent: status::Rgb,
+    count: usize,
+    empty_msg: &str,
+    table: Option<&render::Table>,
+    styled: bool,
+) {
+    f.push_str(&render::header(
+        title,
+        accent,
+        Some(&count.to_string()),
+        styled,
+    ));
+    f.push('\n');
+    if let Some(table) = table {
+        f.push_str(&render::render_table(table, styled));
+    } else {
+        f.push_str(&render::empty_line(empty_msg, styled));
+        f.push('\n');
+    }
+    f.push('\n');
+}
+
 /// Render the section bodies (no screen-clear, no status line): My open PRs,
 /// then Merge Queue, then My merged PRs, then the reference legend. Each PR
 /// section always shows its header (with a count); an empty section follows it
@@ -301,54 +329,39 @@ fn render_body(s: &Sections, cli: &Cli, changes: &Changes, styled: bool) -> Stri
     }
 
     if let Some(rows) = &s.prs {
-        f.push_str(&render::header(
+        section(
+            &mut f,
             "My open PRs",
             status::LAVENDER,
-            Some(&rows.len().to_string()),
+            rows.len(),
+            "No open PRs.",
+            prs_table.as_ref(),
             styled,
-        ));
-        f.push('\n');
-        if rows.is_empty() {
-            f.push_str(&render::empty_line("No open PRs.", styled));
-            f.push('\n');
-        } else if let Some(table) = &prs_table {
-            f.push_str(&render::render_table(table, styled));
-        }
-        f.push('\n');
+        );
     }
 
     if let Some(rows) = &s.queue {
-        f.push_str(&render::header(
+        section(
+            &mut f,
             "Merge Queue",
             status::BLUE,
-            Some(&rows.len().to_string()),
+            rows.len(),
+            "No merge queue.",
+            queue_table.as_ref(),
             styled,
-        ));
-        f.push('\n');
-        if rows.is_empty() {
-            f.push_str(&render::empty_line("No merge queue.", styled));
-            f.push('\n');
-        } else if let Some(table) = &queue_table {
-            f.push_str(&render::render_table(table, styled));
-        }
-        f.push('\n');
+        );
     }
 
     if let Some(rows) = &s.merged {
-        f.push_str(&render::header(
+        section(
+            &mut f,
             "My merged PRs",
             status::MAUVE,
-            Some(&rows.len().to_string()),
+            rows.len(),
+            "No recent merged PRs.",
+            merged_table.as_ref(),
             styled,
-        ));
-        f.push('\n');
-        if rows.is_empty() {
-            f.push_str(&render::empty_line("No recent merged PRs.", styled));
-            f.push('\n');
-        } else if let Some(table) = &merged_table {
-            f.push_str(&render::render_table(table, styled));
-        }
-        f.push('\n');
+        );
     }
 
     if let Some(stats) = &s.commits {
@@ -403,12 +416,13 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
 
     // Total commits by me across everything shown (upcoming + the releases); a
     // `+` if any bucket hit the compare API's window and is a lower bound.
-    let mut total = stats.upcoming.as_ref().map_or(0, |c| c.mine);
-    let mut capped = stats.upcoming.as_ref().is_some_and(|c| c.capped);
-    for r in &stats.releases {
-        total += r.count.mine;
-        capped |= r.count.capped;
-    }
+    let (total, capped) = stats
+        .upcoming
+        .iter()
+        .chain(stats.releases.iter().map(|r| &r.count))
+        .fold((0usize, false), |(n, capped), c| {
+            (n + c.mine, capped || c.capped)
+        });
     let total = format!("{total}{}", if capped { "+" } else { "" });
     f.push_str(&render::header(
         "My Shipments",
