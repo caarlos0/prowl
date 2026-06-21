@@ -3,7 +3,7 @@
 use crate::model::QueueEntryNode;
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, YELLOW};
-use anstyle::Style;
+use uncurses::style::Style;
 
 /// Queue author logins are truncated to this many display columns.
 const AUTHOR_WIDTH: usize = 16;
@@ -45,25 +45,29 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
 pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let (pos, pr, author_style, title) = if r.mine {
-            let hi = status::fg(YELLOW).bold();
-            (hi, hi, hi, Style::new().bold())
-        } else {
-            (
-                Style::new().dimmed(),
-                status::fg(BLUE),
-                Style::new(),
-                Style::new(),
-            )
-        };
         let author = render::truncate(&r.author, AUTHOR_WIDTH, ascii);
-        out.push(vec![
-            Cell::plain(" "),
-            Cell::styled(r.position.to_string(), pos),
-            Cell::link_styled(format!("#{}", r.number), r.url.clone(), pr),
-            Cell::styled(r.title.clone(), title),
-            Cell::styled(author, author_style),
-        ]);
+        let row = if r.mine {
+            // Mine: position, PR link, and author all share one highlight style,
+            // passed by reference (`Cell` takes `impl Into<Style>`, so `&Style`
+            // converts at the boundary).
+            let hi = status::fg(YELLOW).bold();
+            vec![
+                Cell::plain(" "),
+                Cell::styled(r.position.to_string(), &hi),
+                render::Cell::pr(r.number, r.url.clone(), &hi),
+                Cell::styled(r.title.clone(), Style::new().bold()),
+                Cell::styled(author, &hi),
+            ]
+        } else {
+            vec![
+                Cell::plain(" "),
+                Cell::styled(r.position.to_string(), Style::new().faint()),
+                render::Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
+                Cell::styled(r.title.clone(), None),
+                Cell::styled(author, None),
+            ]
+        };
+        out.push(row);
     }
     Table {
         // A leading (always-blank) marker column keeps the queue aligned with

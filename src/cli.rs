@@ -5,7 +5,7 @@ use clap::{Parser, ValueEnum};
 use std::str::FromStr;
 use std::time::Duration;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "prowl",
     version,

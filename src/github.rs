@@ -114,6 +114,7 @@ pub fn parse_graphql<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 }
 
 /// An authenticated GitHub API client.
+#[derive(Clone)]
 pub struct Client {
     agent: ureq::Agent,
     token: String,

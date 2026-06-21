@@ -5,8 +5,8 @@
 use crate::model::PrNode;
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, RED, Status};
-use anstyle::Style;
 use std::collections::HashSet;
+use uncurses::style::Style;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrRow {
@@ -54,20 +54,13 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
     for r in rows {
         let mark = render::change_marker(highlight.contains(&r.number), ascii);
         let st = match r.status {
-            Some(s) => Cell::styled(
-                status::glyph(s, ascii).to_string(),
-                status::fg(status::status_style(s).1),
-            ),
-            None => Cell::styled("-".to_string(), Style::new().dimmed()),
+            Some(s) => render::status_cell(s, ascii),
+            None => Cell::styled("-".to_string(), Style::new().faint()),
         };
         let pr = if r.is_draft {
-            Cell::link_styled(
-                format!("#{}", r.number),
-                r.url.clone(),
-                Style::new().dimmed(),
-            )
+            render::Cell::pr(r.number, r.url.clone(), Style::new().faint())
         } else {
-            Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE))
+            render::Cell::pr(r.number, r.url.clone(), status::fg(BLUE))
         };
         let state_raw = r.merge_state.clone().unwrap_or_else(|| "?".to_string());
         let state_text = if ascii {
@@ -77,7 +70,7 @@ pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table 
         };
         let state = Cell::styled(state_text, status::state_style(&state_raw));
         let (fail_text, fail_style) = if r.fail == 0 {
-            ("-".to_string(), Style::new().dimmed())
+            ("-".to_string(), Style::new().faint())
         } else {
             (r.fail.to_string(), status::fg(RED).bold())
         };

@@ -1,23 +1,34 @@
-//! Terminal rendering: styled, aligned tables with OSC-8 hyperlinks, concise
-//! section headers, the dim key-hint footer, and the bell. Every escape is
-//! gated on a `styled` flag, so piped / non-TTY output is plain text.
+//! Dashboard rendering: the styled, aligned view is painted **directly onto an
+//! `uncurses` surface** — an offscreen [`TextBuffer`](uncurses::buffer::TextBuffer)
+//! for one-shot output, or the watch [`Screen`](uncurses::screen::Screen). There is
+//! one painter, so the layout lives in exactly one place.
+//!
+//! Width math uses the surface's own [`str_width`](uncurses::text::TextSurface::str_width)
+//! and column gaps are implicit (unpainted cells stay blank, so no padding is
+//! emitted). Each cell's OSC-8 link rides in its style, and the surface's color
+//! [`Profile`](uncurses::color::Profile) downsamples styling at encode/present
+//! time — so piped output (a `Disabled` profile) degrades to plain text with no
+//! special-casing here.
 
-use crate::status::{self, Rgb};
-use anstyle::Style;
-use std::fmt::Write as _;
-use std::io::Write as _;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use crate::status;
+use uncurses::ansi::truncate::truncate as truncate_tail;
+use uncurses::color::Color;
+use uncurses::style::Style;
+use uncurses::text::TextSurface;
 
 /// The whole dashboard is kept within this many display columns; the flexible
 /// title column is truncated (with an ellipsis) to make every table fit.
 pub const MAX_WIDTH: usize = 120;
 
-/// One table cell: visible text plus how to style and (optionally) link it.
+/// Two blank columns separate adjacent table columns.
+const SEP: usize = 2;
+
+/// One table cell: visible text plus its style. The style carries any OSC-8
+/// link (uncurses styles hold the hyperlink), so there is no separate field.
 #[derive(Clone, Debug)]
 pub struct Cell {
     pub text: String,
     pub style: Style,
-    pub link: Option<String>,
 }
 
 impl Cell {
@@ -25,15 +36,13 @@ impl Cell {
         Cell {
             text: text.into(),
             style: Style::new(),
-            link: None,
         }
     }
 
-    pub fn styled(text: impl Into<String>, style: Style) -> Cell {
+    pub fn styled(text: impl Into<String>, style: impl Into<Style>) -> Cell {
         Cell {
             text: text.into(),
-            style,
-            link: None,
+            style: style.into(),
         }
     }
 
@@ -41,19 +50,26 @@ impl Cell {
     pub fn link(text: impl Into<String>, url: impl Into<String>) -> Cell {
         Cell {
             text: text.into(),
-            style: Style::new().dimmed().underline(),
-            link: Some(url.into()),
+            style: Style::new().faint().underline().link(url.into(), ""),
         }
     }
 
     /// An OSC-8 hyperlink carrying an explicit style (e.g. a colored, clickable
     /// PR number). Underlined so it reads as a link even when colored.
-    pub fn link_styled(text: impl Into<String>, url: impl Into<String>, style: Style) -> Cell {
+    pub fn link_styled(
+        text: impl Into<String>,
+        url: impl Into<String>,
+        style: impl Into<Style>,
+    ) -> Cell {
         Cell {
             text: text.into(),
-            style: style.underline(),
-            link: Some(url.into()),
+            style: style.into().underline().link(url.into(), ""),
         }
+    }
+
+    /// A styled, clickable `#<number>` PR link.
+    pub fn pr(number: i64, url: impl Into<String>, style: impl Into<Style>) -> Cell {
+        Cell::link_styled(format!("#{number}"), url, style)
     }
 }
 
@@ -63,211 +79,141 @@ pub struct Table {
     pub rows: Vec<Vec<Cell>>,
 }
 
-fn w(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
-}
-
 /// Truncate `s` to at most `max` display columns, marking the cut with an
-/// ellipsis (`\u{22ef}`, or `...` in ASCII mode). Returns `s` unchanged when it
-/// already fits.
+/// ellipsis (`\u{22ef}`, or `...` in ASCII mode). Delegates to the uncurses
+/// width-aware truncator, so it counts display columns, not bytes.
 pub fn truncate(s: &str, max: usize, ascii: bool) -> String {
-    if w(s) <= max {
-        return s.to_string();
-    }
-    let ell = if ascii { "..." } else { "\u{22ef}" };
-    let budget = max.saturating_sub(w(ell));
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in s.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + cw > budget {
-            break;
-        }
-        out.push(ch);
-        width += cw;
-    }
-    out.push_str(ell);
-    out
+    truncate_tail(s, max, if ascii { "..." } else { "\u{22ef}" })
 }
 
-/// The display width of column `c`: its header and widest cell.
-fn col_width(table: &Table, c: usize) -> usize {
-    let mut cw = w(table.header[c]);
+/// The display width of table column `c`: its header and widest cell.
+fn col_width(s: &impl TextSurface, table: &Table, c: usize) -> usize {
+    let mut w = s.str_width(table.header[c]) as usize;
     for row in &table.rows {
         if let Some(cell) = row.get(c) {
-            cw = cw.max(w(&cell.text));
+            w = w.max(s.str_width(&cell.text) as usize);
         }
     }
-    cw
+    w
 }
 
-/// The display width of every column of `table` except `skip`, plus the
-/// two-space separators — i.e. how wide a row is without its flexible column.
-fn fixed_width(table: &Table, skip: usize) -> usize {
+/// The width of every column of `table` except `skip`, plus the separators —
+/// i.e. how wide a row is without its flexible column.
+fn fixed_width(s: &impl TextSurface, table: &Table, skip: usize) -> usize {
     let cols = table.header.len();
     let total: usize = (0..cols)
         .filter(|&c| c != skip)
-        .map(|c| col_width(table, c))
+        .map(|c| col_width(s, table, c))
         .sum();
-    total + 2 * cols.saturating_sub(1)
+    total + SEP * cols.saturating_sub(1)
 }
 
-/// Cap and align the `TITLE` column across several tables so they line up and
-/// the widest row of every table fits within `MAX_WIDTH`. The title column is
-/// truncated (with an ellipsis) and padded to one shared width.
-pub fn fit_titles(tables: &mut [&mut Table], ascii: bool) {
+/// The shared `TITLE` column width across `tables`, capped so the widest row of
+/// every table fits within [`MAX_WIDTH`]. Pass this to [`paint_table`] so the
+/// section tables line up and the whole view stays within the budget.
+pub fn title_width(s: &impl TextSurface, tables: &[&Table]) -> usize {
     let mut natural = 0;
     let mut fixed = 0;
-    let idxs: Vec<Option<usize>> = tables
-        .iter()
-        .map(|t| t.header.iter().position(|h| *h == "TITLE"))
-        .collect();
-    for (t, idx) in tables.iter().zip(&idxs) {
-        if let Some(ti) = idx {
-            natural = natural.max(col_width(t, *ti));
-            fixed = fixed.max(fixed_width(t, *ti));
+    for t in tables {
+        if let Some(ti) = t.header.iter().position(|h| *h == "TITLE") {
+            natural = natural.max(col_width(s, t, ti));
+            fixed = fixed.max(fixed_width(s, t, ti));
         }
     }
-    let budget = MAX_WIDTH.saturating_sub(fixed);
-    let target = natural.min(budget);
-    for (t, idx) in tables.iter_mut().zip(&idxs) {
-        if let Some(ti) = idx {
-            for row in t.rows.iter_mut() {
-                if let Some(cell) = row.get_mut(*ti) {
-                    let mut text = truncate(&cell.text, target, ascii);
-                    for _ in 0..target.saturating_sub(w(&text)) {
-                        text.push(' ');
-                    }
-                    cell.text = text;
-                }
-            }
-        }
-    }
+    natural.min(MAX_WIDTH.saturating_sub(fixed))
 }
 
-const OSC8_END: &str = "\x1b]8;;\x1b\\";
-
-fn osc8_start(url: &str) -> String {
-    format!("\x1b]8;;{url}\x1b\\")
-}
-
-/// Append one cell, padded to `col_w` unless it is the last column.
-fn push_cell(out: &mut String, cell: &Cell, col_w: usize, last: bool, styled: bool) {
-    if styled {
-        if let Some(url) = &cell.link {
-            out.push_str(&osc8_start(url));
-        }
-        let _ = write!(
-            out,
-            "{}{}{}",
-            cell.style.render(),
-            cell.text,
-            cell.style.render_reset()
-        );
-        if cell.link.is_some() {
-            out.push_str(OSC8_END);
-        }
-    } else {
-        out.push_str(&cell.text);
-    }
-    if !last {
-        for _ in 0..col_w.saturating_sub(w(&cell.text)) {
-            out.push(' ');
-        }
-    }
-}
-
-/// Render a table. Columns are left-aligned, padded to the widest cell (by
-/// display width), separated by two spaces; the header row is bold.
-pub fn render_table(table: &Table, styled: bool) -> String {
+/// Paint `table` onto `s` starting at row `top`, forcing the `TITLE` column to
+/// `title_w` columns when present (titles longer than that are ellipsized).
+/// Columns are left-aligned and separated by two blank columns; the header row
+/// is bold. Returns the next free row.
+pub fn paint_table(
+    s: &mut impl TextSurface,
+    table: &Table,
+    title_w: usize,
+    ascii: bool,
+    top: u16,
+) -> u16 {
     let cols = table.header.len();
-    let mut widths = vec![0usize; cols];
-    for (i, h) in table.header.iter().enumerate() {
-        widths[i] = w(h);
+    let title_idx = table.header.iter().position(|h| *h == "TITLE");
+
+    let mut widths: Vec<usize> = (0..cols).map(|c| col_width(s, table, c)).collect();
+    if let Some(ti) = title_idx {
+        widths[ti] = title_w;
     }
-    for row in &table.rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < cols {
-                widths[i] = widths[i].max(w(&cell.text));
-            }
+
+    // Column start positions: running sum of widths plus the separators.
+    let mut xs = vec![0u16; cols];
+    let mut acc = 0usize;
+    for i in 0..cols {
+        xs[i] = acc as u16;
+        acc += widths[i] + SEP;
+    }
+
+    let bold = Style::new().bold();
+    for (i, h) in table.header.iter().enumerate() {
+        if !h.is_empty() {
+            s.set_str((xs[i], top), h, &bold);
         }
     }
 
-    let mut out = String::new();
-    let header_style = if styled {
-        Style::new().bold()
-    } else {
-        Style::new()
-    };
-    for (i, h) in table.header.iter().enumerate() {
-        let last = i + 1 == cols;
-        push_cell(
-            &mut out,
-            &Cell::styled((*h).to_string(), header_style),
-            widths[i],
-            last,
-            styled,
-        );
-        if !last {
-            out.push_str("  ");
-        }
-    }
-    out.push('\n');
-    for row in &table.rows {
+    for (r, row) in table.rows.iter().enumerate() {
+        let y = top + 1 + r as u16;
         for (i, cell) in row.iter().enumerate() {
-            let last = i + 1 == cols;
-            push_cell(&mut out, cell, widths[i], last, styled);
-            if !last {
-                out.push_str("  ");
-            }
+            let text = if Some(i) == title_idx {
+                truncate(&cell.text, widths[i], ascii)
+            } else {
+                cell.text.clone()
+            };
+            s.set_str((xs[i], y), &text, &cell.style);
         }
-        out.push('\n');
     }
-    out
+    top + 1 + table.rows.len() as u16
 }
 
-/// A concise, non-figlet section header: a colored bold accent bar, the title,
-/// and an optional dim count badge (already formatted, e.g. `6` or `47+`).
-pub fn header(title: &str, accent: Rgb, count: Option<&str>, styled: bool) -> String {
-    if styled {
-        let bar = status::fg(accent).bold();
-        let dim = Style::new().dimmed();
-        let count_part = match count {
-            Some(c) => format!("  {}{}{}", dim.render(), c, dim.render_reset()),
-            None => String::new(),
-        };
-        format!(
-            "{}\u{258c} {title}{}{count_part}",
-            bar.render(),
-            bar.render_reset(),
-        )
-    } else {
-        match count {
+/// Paint a dim one-liner (an empty-section placeholder, the error line) at row
+/// `y`. Returns y + 1.
+pub fn paint_dim(s: &mut impl TextSurface, msg: &str, y: u16) -> u16 {
+    s.set_str((0, y), msg, Style::new().faint());
+    y + 1
+}
+
+/// Paint a section header at row `y`: a colored bold accent bar, the title, and
+/// an optional dim count badge (or `Title (count)` in ASCII mode). Returns y + 1.
+pub fn paint_header(
+    s: &mut impl TextSurface,
+    title: &str,
+    accent: Color,
+    count: Option<&str>,
+    ascii: bool,
+    y: u16,
+) -> u16 {
+    if ascii {
+        let text = match count {
             Some(c) => format!("{title} ({c})"),
             None => title.to_string(),
+        };
+        s.set_str((0, y), &text, None);
+    } else {
+        let end = s.set_str(
+            (0, y),
+            &format!("\u{258c} {title}"),
+            status::fg(accent).bold(),
+        );
+        if let Some(c) = count {
+            s.set_str((end.x + 2, y), c, Style::new().faint());
         }
     }
+    y + 1
 }
 
-/// A dim one-liner: an empty-section placeholder, or other plain dim text (the
-/// error line, the loading screen). Plain when not styled.
-pub fn empty_line(msg: &str, styled: bool) -> String {
-    if styled {
-        let dim = Style::new().dimmed();
-        format!("{}{msg}{}", dim.render(), dim.render_reset())
-    } else {
-        msg.to_string()
-    }
-}
-
-/// Wrap `msg` in italics when styled; plain text otherwise.
-pub fn italic(msg: &str, styled: bool) -> String {
-    if styled {
-        let italic = Style::new().italic();
-        format!("{}{msg}{}", italic.render(), italic.render_reset())
-    } else {
-        msg.to_string()
-    }
+/// A status glyph cell: the Nerd Font glyph (or ASCII letter) in the status's
+/// palette color.
+pub fn status_cell(status: status::Status, ascii: bool) -> Cell {
+    Cell::styled(
+        status::glyph(status, ascii).to_string(),
+        status::fg(status::status_style(status).1),
+    )
 }
 
 /// A leading cell marking a row that changed since the previous refresh.
@@ -280,135 +226,95 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// The help legend: a complete reference of every status glyph and every
-/// `mergeStateStatus` value (not just those on screen). The title reuses the
-/// shared section-header style; the explanations themselves are dim.
-pub fn help(ascii: bool, styled: bool) -> String {
-    let dim = Style::new().dimmed();
-    let mut out = String::new();
-
-    out.push_str(&header("Help", status::OVERLAY, None, styled));
-    out.push('\n');
-
-    for s in status::ORDER {
-        let ch = status::glyph(s, ascii);
-        let meaning = status::status_meaning(s);
-        if styled {
-            let g = status::fg(status::status_style(s).1);
-            let _ = writeln!(
-                out,
-                "  {}{ch}{}  {}{meaning}{}",
-                g.render(),
-                g.render_reset(),
-                dim.render(),
-                dim.render_reset()
-            );
-        } else {
-            let _ = writeln!(out, "  {ch}  {meaning}");
-        }
+/// Paint the watch-mode key-hint footer at row `y`, folding the next-refresh
+/// countdown into the refresh hint: `r refresh (next in 5m) - ? help`. Each key
+/// glyph is a bold muted accent, its labels dim; plain in ASCII mode. Returns
+/// y + 1.
+pub fn paint_footer(s: &mut impl TextSurface, next: &str, ascii: bool, y: u16) -> u16 {
+    if ascii {
+        s.set_str(
+            (0, y),
+            &format!("r refresh (next in {next}) - ? help"),
+            None,
+        );
+    } else {
+        let key = status::fg(status::OVERLAY).bold();
+        let dim = Style::new().faint();
+        let p = s.set_str((0, y), "r", &key);
+        let p = s.set_str((p.x + 1, y), &format!("refresh (next in {next})"), &dim);
+        let p = s.set_str((p.x, y), " - ", &dim);
+        let p = s.set_str((p.x, y), "?", &key);
+        s.set_str((p.x + 1, y), "help", &dim);
     }
-    let _ = writeln!(out, "  {}", empty_line("- no checks reported yet", styled));
+    y + 1
+}
+
+/// Paint one indented `glyph  meaning` legend row at `y`: the glyph in `gstyle`,
+/// two blank columns, then the meaning in `dim`.
+fn legend_row(
+    s: &mut impl TextSurface,
+    glyph: &str,
+    gstyle: Style,
+    meaning: &str,
+    dim: &Style,
+    y: u16,
+) {
+    let p = s.set_str((2, y), glyph, gstyle);
+    s.set_str((p.x + 2, y), meaning, dim);
+}
+
+/// Paint the help legend at row `top`: a complete reference of every status
+/// glyph and every `mergeStateStatus` value. Returns the next free row.
+pub fn paint_help(s: &mut impl TextSurface, ascii: bool, top: u16) -> u16 {
+    let dim = Style::new().faint();
+    let mut y = paint_header(s, "Help", status::OVERLAY, None, ascii, top);
+
+    for st in status::ORDER {
+        let glyph = status::glyph(st, ascii).to_string();
+        let color = status::fg(status::status_style(st).1);
+        legend_row(s, &glyph, color, status::status_meaning(st), &dim, y);
+        y += 1;
+    }
+    s.set_str((2, y), "- no checks reported yet", &dim);
+    y += 1;
 
     for st in status::STATE_ORDER {
         let meaning = status::state_meaning(st);
         let c = status::state_style(st);
         if ascii {
             // Label form (matches the ASCII/piped STATE column).
-            let label = status::state_label(st);
-            let tail = if meaning.is_empty() {
-                String::new()
-            } else {
-                format!(" \u{2014} {meaning}")
-            };
-            if styled {
-                let _ = writeln!(
-                    out,
-                    "  {}{label}{}{}{tail}{}",
-                    c.render(),
-                    c.render_reset(),
-                    dim.render(),
-                    dim.render_reset()
-                );
-            } else {
-                let _ = writeln!(out, "  {label}{tail}");
+            let p = s.set_str((2, y), status::state_label(st), c);
+            if !meaning.is_empty() {
+                s.set_str((p.x, y), &format!(" \u{2014} {meaning}"), &dim);
             }
         } else {
-            // Glyph form (matches the Nerd Font STATE column); always styled.
-            let g = status::state_glyph(st);
-            let _ = writeln!(
-                out,
-                "  {}{g}{}  {}{meaning}{}",
-                c.render(),
-                c.render_reset(),
-                dim.render(),
-                dim.render_reset()
-            );
+            // Glyph form (matches the Nerd Font STATE column).
+            legend_row(s, &status::state_glyph(st).to_string(), c, meaning, &dim, y);
         }
+        y += 1;
     }
-    out
-}
-
-/// The watch-mode key hints shown at the very bottom, with the next-refresh
-/// countdown folded into the refresh hint: `r refresh (next in 5m) - ? help`.
-/// Each key glyph is a bold muted accent, its labels dim; plain when unstyled.
-pub fn footer(next: &str, styled: bool) -> String {
-    if !styled {
-        return format!("r refresh (next in {next}) - ? help");
-    }
-    let key = status::fg(status::OVERLAY).bold();
-    let dim = Style::new().dimmed();
-    let hint = |k: &str, label: &str| {
-        format!(
-            "{}{k}{} {}{label}{}",
-            key.render(),
-            key.render_reset(),
-            dim.render(),
-            dim.render_reset(),
-        )
-    };
-    let sep = format!("{} - {}", dim.render(), dim.render_reset());
-    format!(
-        "{}{sep}{}",
-        hint("r", &format!("refresh (next in {next})")),
-        hint("?", "help")
-    )
-}
-
-/// Clear the screen and home the cursor.
-pub fn clear() -> &'static str {
-    "\x1b[2J\x1b[H"
-}
-
-/// Hide / show the terminal cursor.
-pub const HIDE_CURSOR: &str = "\x1b[?25l";
-pub const SHOW_CURSOR: &str = "\x1b[?25h";
-
-/// The dim placeholder shown during the very first fetch, before any data has
-/// been rendered.
-pub fn loading(styled: bool) -> String {
-    empty_line("Loading...", styled)
-}
-
-/// Ring the terminal bell once.
-pub fn ring_bell() {
-    print!("\x07");
-    let _ = std::io::stdout().flush();
+    y
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uncurses::buffer::TextBuffer;
+    use uncurses::color::Profile;
+    use uncurses::text::Encode;
 
-    #[test]
-    fn footer_is_plain_or_styled_key_hints() {
-        assert_eq!(footer("5m", false), "r refresh (next in 5m) - ? help");
-        let styled = footer("5m", true);
-        // Visible text is preserved...
-        assert!(styled.contains("refresh (next in 5m)"));
-        assert!(styled.contains("help"));
-        // ...with a bold key accent and a dim label.
-        assert!(styled.contains("\x1b[1m"));
-        assert!(styled.contains("\x1b[2m"));
+    /// Paint `f` into a fresh buffer and return its encoded form at `profile`.
+    fn encode(
+        width: u16,
+        height: u16,
+        profile: Profile,
+        f: impl FnOnce(&mut TextBuffer),
+    ) -> String {
+        let mut canvas = TextBuffer::new(width, height);
+        f(&mut canvas);
+        let mut out = Vec::new();
+        canvas.encode_with(&mut out, profile).unwrap();
+        String::from_utf8(out).unwrap()
     }
 
     #[test]
@@ -420,12 +326,11 @@ mod tests {
                 vec![Cell::plain("#42"), Cell::plain("x")],
             ],
         };
-        let out = render_table(&table, false);
-        assert_eq!(
-            out,
-            // "PR " padded to width 3, two-space gap, last column unpadded.
-            "PR   TITLE\n#1   short\n#42  x\n"
-        );
+        let out = encode(20, 3, Profile::Disabled, |b| {
+            paint_table(b, &table, 5, true, 0);
+        });
+        // Header, then two rows; columns line up by display width, no escapes.
+        assert_eq!(out, "PR   TITLE\r\n#1   short\r\n#42  x");
     }
 
     #[test]
@@ -440,15 +345,19 @@ mod tests {
                 vec![Cell::plain("xx"), Cell::plain("#2")],
             ],
         };
-        let out = render_table(&table, false);
-        let lines: Vec<&str> = out.lines().collect();
-        // Display width of everything before the PR column must match across
-        // rows, even though the byte offsets differ (multi-byte glyph).
-        let display_col = |line: &str| {
-            let idx = line.find('#').unwrap();
-            UnicodeWidthStr::width(&line[..idx])
+        let out = encode(10, 3, Profile::Disabled, |b| {
+            paint_table(b, &table, 0, true, 0);
+        });
+        let lines: Vec<&str> = out.split("\r\n").collect();
+        let col = |line: &str| {
+            line.find('#')
+                .map(|i| &line[..i])
+                .unwrap_or("")
+                .chars()
+                .count()
         };
-        assert_eq!(display_col(lines[1]), display_col(lines[2]));
+        // The "#" starts at the same display column on both rows.
+        assert_eq!(col(lines[1]), col(lines[2]));
     }
 
     #[test]
@@ -457,30 +366,42 @@ mod tests {
             header: vec!["URL"],
             rows: vec![vec![Cell::link("https://x/1", "https://x/1")]],
         };
-        let out = render_table(&table, true);
+        let out = encode(12, 2, Profile::TrueColor, |b| {
+            paint_table(b, &table, 0, false, 0);
+        });
+        // OSC-8 framing around the link text; dim + underline SGR.
         assert!(out.contains("\x1b]8;;https://x/1\x1b\\"));
-        assert!(out.contains(OSC8_END));
-        // dim + underline.
-        assert!(out.contains("\x1b[2m"));
-        assert!(out.contains("\x1b[4m"));
+        assert!(out.contains("\x1b]8;;\x1b\\"));
+        assert!(out.contains("\x1b[2;4m"));
     }
 
     #[test]
-    fn unstyled_url_is_just_text() {
+    fn disabled_profile_drops_styling_and_links() {
         let table = Table {
             header: vec!["URL"],
             rows: vec![vec![Cell::link("https://x/1", "https://x/1")]],
         };
-        let out = render_table(&table, false);
+        let out = encode(12, 2, Profile::Disabled, |b| {
+            paint_table(b, &table, 0, false, 0);
+        });
         assert!(!out.contains('\x1b'));
         assert!(out.contains("https://x/1"));
     }
 
     #[test]
-    fn loading_is_plain_or_dim() {
-        assert_eq!(loading(false), "Loading...");
-        let styled = loading(true);
-        assert!(styled.contains("Loading..."));
+    fn footer_is_plain_or_styled_key_hints() {
+        let plain = encode(40, 1, Profile::Disabled, |b| {
+            paint_footer(b, "5m", true, 0);
+        });
+        assert_eq!(plain, "r refresh (next in 5m) - ? help");
+
+        let styled = encode(40, 1, Profile::TrueColor, |b| {
+            paint_footer(b, "5m", false, 0);
+        });
+        assert!(styled.contains("refresh (next in 5m)"));
+        assert!(styled.contains("help"));
+        // Bold key accent (combined with the muted color) and a dim label.
+        assert!(styled.contains("\x1b[1;"));
         assert!(styled.contains("\x1b[2m"));
     }
 
@@ -492,9 +413,9 @@ mod tests {
     }
 
     #[test]
-    fn fit_titles_caps_long_title_to_max_width() {
+    fn title_column_is_capped_to_max_width() {
         let long = "x".repeat(200);
-        let mut table = Table {
+        let table = Table {
             header: vec!["", "PR", "TITLE", "BASE"],
             rows: vec![vec![
                 Cell::plain(" "),
@@ -503,30 +424,14 @@ mod tests {
                 Cell::plain("main"),
             ]],
         };
-        fit_titles(&mut [&mut table], false);
-        let out = render_table(&table, false);
-        for line in out.lines() {
-            assert!(w(line) <= MAX_WIDTH, "line exceeds MAX_WIDTH: {}", w(line));
+        let mut canvas = TextBuffer::new(MAX_WIDTH as u16, 2);
+        let tw = title_width(&canvas, &[&table]);
+        paint_table(&mut canvas, &table, tw, false, 0);
+        let out = canvas.display_with(Profile::Disabled).to_string();
+        for line in out.split("\r\n") {
+            assert!(line.chars().count() <= MAX_WIDTH, "line exceeds MAX_WIDTH");
         }
-        assert!(table.rows[0][2].text.ends_with('\u{22ef}'));
-    }
-
-    #[test]
-    fn fit_titles_aligns_title_column_across_tables() {
-        let mut a = Table {
-            header: vec!["PR", "TITLE", "BASE"],
-            rows: vec![vec![
-                Cell::plain("#1"),
-                Cell::plain("a short title"),
-                Cell::plain("main"),
-            ]],
-        };
-        let mut b = Table {
-            header: vec!["PR", "TITLE", "AUTHOR"],
-            rows: vec![vec![Cell::plain("#2"), Cell::plain("x"), Cell::plain("me")]],
-        };
-        fit_titles(&mut [&mut a, &mut b], false);
-        // Both title cells are padded/truncated to one shared display width.
-        assert_eq!(w(&a.rows[0][1].text), w(&b.rows[0][1].text));
+        // The title was truncated with the ellipsis.
+        assert!(out.contains('\u{22ef}'));
     }
 }

@@ -44,9 +44,19 @@ fn queue_null_and_empty_both_yield_no_rows() {
 
 #[test]
 fn queue_styled_render_uses_palette_and_links() {
+    use uncurses::buffer::TextBuffer;
+    use uncurses::color::Profile;
+    use uncurses::text::Encode;
+
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
     let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
-    let out = render::render_table(&queue::to_table(&rows, false), true);
+    let table = queue::to_table(&rows, false);
+
+    let mut canvas = TextBuffer::new(render::MAX_WIDTH as u16, 8);
+    render::paint_table(&mut canvas, &table, 40, false, 0);
+    let mut buf = Vec::new();
+    canvas.encode_with(&mut buf, Profile::TrueColor).unwrap();
+    let out = String::from_utf8(buf).unwrap();
 
     // Mine row is highlighted yellow (#f9e2af); others' PR cell is blue (#89b4fa).
     assert!(out.contains("38;2;249;226;175"), "expected mine yellow");

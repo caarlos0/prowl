@@ -3,21 +3,20 @@
 //! colors, Nerd Font glyphs, 24-bit truecolor.
 
 use crate::model::{CheckSuite, CheckSuites, PrNode};
-use anstyle::{RgbColor, Style};
-
-pub type Rgb = (u8, u8, u8);
+use uncurses::color::Color;
+use uncurses::style::Style;
 
 // Catppuccin Mocha palette (the subset the dashboard uses).
-pub const GREEN: Rgb = (166, 227, 161); // #a6e3a1
-pub const RED: Rgb = (243, 139, 168); // #f38ba8
-pub const YELLOW: Rgb = (249, 226, 175); // #f9e2af
-pub const MAUVE: Rgb = (203, 166, 247); // #cba6f7
-pub const PEACH: Rgb = (250, 179, 135); // #fab387
-pub const BLUE: Rgb = (137, 180, 250); // #89b4fa
-pub const LAVENDER: Rgb = (180, 190, 254); // #b4befe
-pub const TEAL: Rgb = (148, 226, 213); // #94e2d5
-pub const PINK: Rgb = (245, 194, 231); // #f5c2e7 — "changed since last refresh" marker
-pub const OVERLAY: Rgb = (147, 153, 178); // #9399b2 — muted accent (help legend)
+pub const GREEN: Color = Color::rgb(166, 227, 161); // #a6e3a1
+pub const RED: Color = Color::rgb(243, 139, 168); // #f38ba8
+pub const YELLOW: Color = Color::rgb(249, 226, 175); // #f9e2af
+pub const MAUVE: Color = Color::rgb(203, 166, 247); // #cba6f7
+pub const PEACH: Color = Color::rgb(250, 179, 135); // #fab387
+pub const BLUE: Color = Color::rgb(137, 180, 250); // #89b4fa
+pub const LAVENDER: Color = Color::rgb(180, 190, 254); // #b4befe
+pub const TEAL: Color = Color::rgb(148, 226, 213); // #94e2d5
+pub const PINK: Color = Color::rgb(245, 194, 231); // #f5c2e7 — "changed" marker
+pub const OVERLAY: Color = Color::rgb(147, 153, 178); // #9399b2 — muted accent
 
 /// CI/PR status. Glyphs/colors are fixed by the shared palette.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -51,7 +50,7 @@ pub const STATE_ORDER: [&str; 8] = [
 ];
 
 /// Glyph + truecolor for a status — the single lookup both views share.
-pub fn status_style(s: Status) -> (char, Rgb) {
+pub fn status_style(s: Status) -> (char, Color) {
     match s {
         Status::Pass => ('\u{F058}', GREEN),
         Status::Fail => ('\u{F057}', RED),
@@ -113,7 +112,7 @@ pub fn state_style(state: &str) -> Style {
         "CLEAN" | "HAS_HOOKS" => fg(GREEN),
         "UNSTABLE" | "BLOCKED" | "BEHIND" => fg(YELLOW),
         "DIRTY" | "DRAFT" => fg(RED),
-        _ => Style::new().dimmed(),
+        _ => Style::new().faint(),
     }
 }
 
@@ -141,9 +140,9 @@ pub fn state_glyph(state: &str) -> char {
     }
 }
 
-/// A truecolor foreground style.
-pub fn fg(rgb: Rgb) -> Style {
-    Style::new().fg_color(Some(RgbColor(rgb.0, rgb.1, rgb.2).into()))
+/// A foreground style for a palette color.
+pub fn fg(color: Color) -> Style {
+    Style::new().fg(color)
 }
 
 /// Check-suite conclusions that count as a failure.
@@ -268,13 +267,25 @@ mod tests {
 
     #[test]
     fn palette_glyphs_and_colors_are_exact() {
-        assert_eq!(status_style(Status::Pass), ('\u{F058}', (166, 227, 161)));
-        assert_eq!(status_style(Status::Fail), ('\u{F057}', (243, 139, 168)));
-        assert_eq!(status_style(Status::Pending), ('\u{F111}', (249, 226, 175)));
-        assert_eq!(status_style(Status::Merged), ('\u{E0A0}', (203, 166, 247)));
+        assert_eq!(
+            status_style(Status::Pass),
+            ('\u{F058}', Color::rgb(166, 227, 161))
+        );
+        assert_eq!(
+            status_style(Status::Fail),
+            ('\u{F057}', Color::rgb(243, 139, 168))
+        );
+        assert_eq!(
+            status_style(Status::Pending),
+            ('\u{F111}', Color::rgb(249, 226, 175))
+        );
+        assert_eq!(
+            status_style(Status::Merged),
+            ('\u{E0A0}', Color::rgb(203, 166, 247))
+        );
         assert_eq!(
             status_style(Status::Conflicts),
-            ('\u{F071}', (250, 179, 135))
+            ('\u{F071}', Color::rgb(250, 179, 135))
         );
     }
 
@@ -398,11 +409,12 @@ mod tests {
 
     #[test]
     fn state_styles_match_palette() {
-        assert_eq!(state_style("CLEAN"), fg(GREEN));
-        assert_eq!(state_style("UNSTABLE"), fg(YELLOW));
-        assert_eq!(state_style("BLOCKED"), fg(YELLOW));
-        assert_eq!(state_style("DIRTY"), fg(RED));
-        assert_eq!(state_style("WHATEVER"), Style::new().dimmed());
+        let s = |state| state_style(state).to_string();
+        assert_eq!(s("CLEAN"), fg(GREEN).to_string());
+        assert_eq!(s("UNSTABLE"), fg(YELLOW).to_string());
+        assert_eq!(s("BLOCKED"), fg(YELLOW).to_string());
+        assert_eq!(s("DIRTY"), fg(RED).to_string());
+        assert_eq!(s("WHATEVER"), Style::new().faint().to_string());
     }
 
     #[test]

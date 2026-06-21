@@ -3,10 +3,10 @@
 
 use crate::model::MergedNode;
 use crate::render::{self, Cell, Table};
-use crate::status::{self, BLUE, MAUVE, Status};
+use crate::status::{self, BLUE, Status};
 use crate::timefmt;
-use anstyle::Style;
 use std::collections::HashSet;
+use uncurses::style::Style;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MergedRow {
@@ -42,17 +42,16 @@ pub fn build_rows(nodes: Vec<MergedNode>, limit: usize) -> Vec<MergedRow> {
 }
 
 pub fn to_table(rows: &[MergedRow], ascii: bool, highlight: &HashSet<i64>) -> Table {
-    let glyph = status::glyph(Status::Merged, ascii);
-    let dim = Style::new().dimmed();
+    let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         out.push(vec![
             render::change_marker(highlight.contains(&r.number), ascii),
-            Cell::styled(glyph.to_string(), status::fg(MAUVE)),
-            Cell::link_styled(format!("#{}", r.number), r.url.clone(), status::fg(BLUE)),
+            render::status_cell(Status::Merged, ascii),
+            render::Cell::pr(r.number, r.url.clone(), status::fg(BLUE)),
             Cell::plain(r.title.clone()),
-            Cell::styled(r.base.clone(), dim),
-            Cell::styled(timefmt::age_of(r.merged_at.as_deref()), dim),
+            Cell::styled(r.base.clone(), &dim),
+            Cell::styled(timefmt::age_of(r.merged_at.as_deref()), &dim),
         ]);
     }
     Table {
