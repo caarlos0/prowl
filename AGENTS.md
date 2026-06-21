@@ -11,9 +11,11 @@ interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, th
 `r refresh (next in 5m) - ? help` footer (which also shows the time until the
 next refresh) and an optional help legend last at the bottom. It rings the
 terminal bell when one of your PRs merges or
-an open PR's status changes, and flags the changed rows. It is a plain
-`std::thread::sleep` redraw loop — **not** a raw-mode/alt-screen TUI — so output
-stays pipe-friendly and URLs can be OSC-8 hyperlinks.
+an open PR's status changes, and flags the changed rows. The interactive watch
+runs on the [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit:
+an alternate-screen [`Screen`] with an event loop. One-shot/piped output
+(`--once`, non-TTY, `--demo`) is plain text printed straight to stdout, so the
+dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 
 ## Golden rules
 
@@ -25,20 +27,27 @@ stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 - **Auth** lives in `auth.rs`: token resolution is `PROWL_TOKEN` → `GITHUB_TOKEN`
   → OS keyring / chmod-600 file → OAuth **device flow** (interactive). The OAuth
   App client id is public and embedded. `--login` forces the device flow.
-- **Don't add a TUI framework** (ratatui, etc.): it cannot emit OSC-8 hyperlinks
-  and does not degrade to plain text when piped. Both are required.
-- **Styling:** `anstyle` for SGR incl. 24-bit truecolor; OSC-8 links, the bell,
-  and the screen clear are emitted by hand. All of it is gated on a `styled`
-  flag, so output is plain when piped, on a non-TTY, or with `--once`, and styled
-  only on an interactive TTY watch. A false `styled` flag drops the SGR colors,
-  OSC-8 hyperlinks, glyphs, and the clear, leaving plain ASCII.
+- **The terminal toolkit is `uncurses`** (the author's own low-level library):
+  its `style::Style` carries SGR + the OSC-8 link, the `Screen` facade owns raw
+  mode / the alternate screen / input / teardown, and `text` provides width math.
+  Don't reach for a higher-level TUI framework (ratatui, etc.): the watch is a
+  full-repaint dashboard, and one-shot output must degrade to plain piped text.
+- **Styling:** built on `uncurses::style::Style` (SGR incl. 24-bit truecolor;
+  OSC-8 links ride in the style). There is **one painter**: the dashboard is
+  drawn straight onto an `uncurses` surface with `set_str`. Plain-vs-styled is
+  not a code branch — the surface's color `Profile` downsamples at encode/present
+  time, and `Profile::Disabled` (non-TTY/piped) drops SGR and hyperlinks, so
+  piped output is plain automatically. Glyph-vs-letter and bar-vs-parens are the
+  one content choice, driven by an `ascii` flag (`--ascii`, or a `Disabled`
+  profile).
 - **One status palette.** Colors and glyphs live only in `status.rs` (Catppuccin
-  Mocha + Nerd Font). Don't redefine them elsewhere.
+  Mocha + Nerd Font), as `uncurses::color::Color` constants. Don't redefine them.
 
 ## Layout (lib + thin bin)
 
-`src/main.rs` is a thin binary calling `prowl::run()`. `src/lib.rs` orchestrates;
-everything else is testable modules:
+`src/main.rs` is a thin binary calling `prowl::run()`. `src/lib.rs` orchestrates
+(painting the dashboard onto a surface, encoding the one-shot frame, and the
+watch event loop); everything else is testable modules:
 
 - `cli.rs` — clap derive CLI, `Section` enum, duration parser (`s/m/h/d/w`).
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
@@ -46,17 +55,19 @@ everything else is testable modules:
   `parse_graphql()`.
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the three queries; query strings.
-- `status.rs` — **the** palette: `Status`, `status_style`, glyphs/ASCII,
-  `derive_status` (precedence), `fail_count`; and the `mergeStateStatus`
-  helpers `state_style`, `state_label` (DIRTY → CONFLICTS), `state_glyph`,
-  `state_meaning`.
-- `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8
-  (incl. `link_styled` for clickable PR numbers), `truncate` + `fit_titles`
-  (cap/align the shared `TITLE` column so every table lines up and the whole
-  view stays within `MAX_WIDTH` = 120 columns), headers, the key-hint footer
-  (`footer`, carrying the relative next-refresh ETA), help legend (a full static
-  reference of every status glyph + `STATE`
-  value, last at the very bottom), loading screen, bell, clear.
+- `status.rs` — **the** palette: `Status`, `status_style` (returns a glyph +
+  `Color`), glyphs/ASCII, `derive_status` (precedence), `fail_count`; and the
+  `mergeStateStatus` helpers `state_style`, `state_label` (DIRTY → CONFLICTS),
+  `state_glyph`, `state_meaning`. `fg(Color)` builds the foreground `Style`.
+- `render.rs` — the surface painters: `paint_table`/`paint_header`/`paint_dim`/
+  `paint_footer`/`paint_help` write onto any `&mut impl TextSurface` using the
+  surface's own `str_width` (no in-house width math) and `set_str` (column gaps
+  are implicit — unpainted cells stay blank, so no padding is emitted). `Cell`
+  (text + `Style`, the OSC-8 link folded into the style) / `Table`, `truncate`
+  (uncurses' width-aware truncator), and `title_width` (cap/align the shared
+  `TITLE` column so every table lines up and the whole view stays within
+  `MAX_WIDTH` = 120). Headers, the key-hint footer (carrying the next-refresh
+  ETA), and the help legend live here too.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
   columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`).
@@ -66,11 +77,33 @@ everything else is testable modules:
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
-- `term.rs` — Unix terminal helper: while watching, quiet stdin (drop echo +
-  line buffering, keep `ISIG` so signal keys work) and turn the interval wait
-  into a poll, so `r` refreshes now and `?` toggles the help legend, while every
-  other key is discarded; restored on every exit path. A no-op on non-Unix.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
+
+`run()` first creates a `uncurses::terminal::Terminal::stdio()`; interactivity is
+its `is_terminal().1` (output a TTY?). For `--once`/piped/`--demo`, `render_once`
+paints the dashboard onto an offscreen `Canvas` sized to its content (a generous
+`height_bound`, then cropped to the painted height), and `encode_with`s it to the
+terminal's output (`Terminal::output`) using the **detected** color `Profile`
+(`Profile::detect_from`), so it's colored on a TTY and plain when piped. Otherwise
+the same `Terminal` is moved into `App::start` → `Screen::new(terminal)`.
+
+The interactive watch is `lib.rs::App`, following the uncurses example **`App`
+pattern**: the struct owns the `uncurses::Screen` plus all dashboard state, and
+`run()` does `let mut app = App::start(terminal, ...)?; let result = app.run();
+app.stop()?; result`. `start` builds the screen from the `Terminal`, brings it up
+(alt-screen, hidden cursor, keeping the terminal's detected color profile) and
+paints the
+cache/loading frame; `run` resolves `me`/default branch then loops fetch → paint
+→ wait, returning `Ok(())` on a quit key; `stop` consumes the app and calls
+**`Screen::finish`** (the idiomatic teardown: exit alt-screen, show cursor, leave
+raw mode). Because the caller always runs `stop`, the terminal is restored on
+every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
+calls `stop` itself before bailing). Each frame is painted by `draw`/
+`paint_dashboard`, which **resizes the screen canvas to the exact content height**
+(even in the alternate screen) before `present`. The loop uses `poll_event` with
+the interval as the timeout. Keys are matched with `Key::matches`: `r`/`R` refresh
+now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
+`Resize` repaints.
 
 ## Key behaviors
 
@@ -88,20 +121,22 @@ everything else is testable modules:
   seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
   but stays silent (no startup bell). `--no-cache` skips both read and write.
-- **Terminal:** while watching, the cursor is hidden and stdin echo/line
-  buffering are turned off, so stray keystrokes neither garble the dashboard nor
-  spill into the shell; signal keys (Ctrl-C/Ctrl-Z) still fire. `r`/`R` forces a
-  refresh now; `?` toggles the help legend
-  (a full static reference of every status glyph + `STATE` value, hidden by
-  default, rendered last at the very bottom; `--no-help` only affects
-  one-shot/piped output). The only persistent bottom line is the footer
+- **Terminal:** the watch runs on a `uncurses::Screen` in the alternate screen
+  with the cursor hidden; raw mode means stray keystrokes never garble the
+  dashboard or spill into the shell. `r`/`R` forces a refresh now; `?` toggles
+  the help legend (a full static reference of every status glyph + `STATE` value,
+  hidden by default, rendered last at the very bottom; `--no-help` only affects
+  one-shot/piped output); `q`/`Esc`/`Ctrl-C` quit and `Ctrl-Z` suspends/resumes.
+  The only persistent bottom line is the footer
   (`r refresh (next in 5m) - ? help`), which carries the next-refresh ETA; a
-  failed refresh adds a dim `error: …` line above it. The blocking fetch runs on
-  a worker thread (`std::thread::scope`) while the main thread keeps polling
-  input, so `?` stays responsive even mid-refresh. Both the cursor and terminal
-  mode are
-  restored on every normal or early (`?`-operator) return (Drop guards) and on
-  SIGINT (the Ctrl-C handler).
+  failed refresh adds a dim `error: …` line above it. Every fetch (and the
+  one-time `me`/default-branch resolution) runs on a **detached background
+  thread** and returns over a channel; the main thread only polls input and
+  paints, so network I/O never blocks the UI — `?`/resize/suspend stay live
+  mid-refresh and **quit is instant** (a quit abandons the in-flight request,
+  which is reaped at process exit). The terminal is restored on every exit path
+  by `App::stop` (`Screen::finish`), which the caller always runs after
+  `App::run`.
 
 ## The three GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
