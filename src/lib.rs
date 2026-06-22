@@ -64,7 +64,7 @@ fn fetch(
     // "unavailable" line rather than taking down the whole dashboard.
     let commits = if cli.show_shipments() {
         Some(
-            commits::fetch(client, repo, me, default_branch)
+            commits::fetch(client, repo, me, default_branch, cli.include_pre_releases)
                 .unwrap_or_else(|_| commits::CommitStats::unavailable()),
         )
     } else {

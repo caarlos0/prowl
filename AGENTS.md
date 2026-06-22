@@ -63,6 +63,7 @@ everything else is testable modules:
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
   never fatal. Rendered as the right-aligned "My Shipments" section.
+  `--include-pre-releases` also counts prereleases (drafts are always skipped).
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).

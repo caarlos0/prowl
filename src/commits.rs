@@ -68,16 +68,19 @@ struct Author {
     login: String,
 }
 
-/// Stable (non-draft, non-prerelease) release tags, most recent first.
+/// Release tags, most recent first.
 ///
-/// Releases are paginated until enough stable tags are found (we need one more
+/// Drafts are always skipped. Prereleases are skipped unless
+/// `include_prereleases` is set.
+///
+/// Releases are paginated until enough matching tags are found (we need one more
 /// than [`RELEASES`] to have a compare base for the oldest shown release), or
-/// the pages run out. Without this, a run of prereleases (common during
-/// goreleaser `-rc.N`) could fill the first page and hide every stable tag.
-fn stable_tags(client: &Client, repo: &Repo) -> Result<Vec<String>> {
+/// the pages run out. Without this, a run of skipped releases (common during
+/// goreleaser `-rc.N`) could fill the first page and hide every matching tag.
+fn release_tags(client: &Client, repo: &Repo, include_prereleases: bool) -> Result<Vec<String>> {
     let want = RELEASES + 1;
     let mut tags = Vec::new();
-    // Bounded so a repo with thousands of prereleases can't loop forever.
+    // Bounded so a repo with thousands of skipped releases can't loop forever.
     for page in 1..=20 {
         let path = format!(
             "repos/{}/{}/releases?per_page=50&page={page}",
@@ -88,7 +91,7 @@ fn stable_tags(client: &Client, repo: &Repo) -> Result<Vec<String>> {
         tags.extend(
             releases
                 .into_iter()
-                .filter(|r| !r.draft && !r.prerelease)
+                .filter(|r| !r.draft && (include_prereleases || !r.prerelease))
                 .map(|r| r.tag_name),
         );
         if tags.len() >= want || exhausted {
@@ -149,9 +152,16 @@ fn reachable_mine(
 }
 
 /// Compute the commit stats for `repo`: my commits in the next (unreleased)
-/// version, plus my commits in each of the last [`RELEASES`] stable releases.
-pub fn fetch(client: &Client, repo: &Repo, me: &str, default_branch: &str) -> Result<CommitStats> {
-    let tags = stable_tags(client, repo)?;
+/// version, plus my commits in each of the last [`RELEASES`] releases (stable
+/// only, or including prereleases when `include_prereleases` is set).
+pub fn fetch(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    default_branch: &str,
+    include_prereleases: bool,
+) -> Result<CommitStats> {
+    let tags = release_tags(client, repo, include_prereleases)?;
 
     // The next release is everything since the latest tag (or the whole default
     // branch when there are no releases yet).
