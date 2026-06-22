@@ -775,13 +775,18 @@ struct App<'a> {
     /// Whether the bell is armed. The first refresh after a cached start is
     /// silent (it still highlights changes).
     armed: bool,
+    /// Whether we've switched from the inline loading frame to the alternate
+    /// screen. The watch starts inline and enters the alt screen once the first
+    /// fetch lands (or immediately when there's a cache to paint).
+    in_alt: bool,
 }
 
 impl<'a> App<'a> {
-    /// Bring the terminal up (raw mode, alternate screen, hidden cursor) from the
-    /// supplied `Terminal` — the canvas keeps the terminal's detected color
-    /// profile — and paint instantly from the cache (otherwise a loading line) so
-    /// the dashboard appears before the first live fetch runs.
+    /// Bring the terminal up (raw mode, hidden cursor) from the supplied
+    /// `Terminal` — the screen keeps the terminal's detected color profile. The
+    /// loading frame shows **inline**; the alt screen is entered once the first
+    /// fetch lands (or immediately when there's a cache to paint), so loading
+    /// looks like ordinary command output before the dashboard takes over.
     fn start(
         terminal: Terminal<Stdin, Stdout>,
         cli: &'a Cli,
@@ -790,7 +795,6 @@ impl<'a> App<'a> {
     ) -> Result<Self> {
         let mut screen = Screen::new(terminal)?;
         screen.init()?;
-        screen.enter_alt_screen()?;
         screen.hide_cursor()?;
 
         let mut app = App {
@@ -806,10 +810,11 @@ impl<'a> App<'a> {
             show_help: false,
             last_error: String::new(),
             armed: false,
+            in_alt: false,
         };
 
         // If the very first paint fails, restore the terminal before bailing
-        // (we are already in the alternate screen by now).
+        // (`stop` handles both the inline and alt-screen states).
         if let Err(e) = app.paint_startup() {
             let _ = app.stop();
             return Err(e);
@@ -830,9 +835,24 @@ impl<'a> App<'a> {
                     c.sections.merged.as_deref(),
                 ));
                 self.last_good = Some(c.sections);
+                // Cached data is real content, so go straight to the alt screen.
+                self.enter_alt()?;
                 self.redraw(&Changes::default())?;
             }
             None => paint_loading(&mut self.screen)?,
+        }
+        Ok(())
+    }
+
+    /// Switch from the inline loading frame to the alternate screen, once. The
+    /// inline frame is dropped to zero rows and flushed first, so taking over the
+    /// screen leaves the terminal as it was before prowl ran.
+    fn enter_alt(&mut self) -> Result<()> {
+        if !self.in_alt {
+            self.screen.resize((self.screen.width().max(1), 0));
+            self.screen.render()?;
+            self.screen.enter_alt_screen()?;
+            self.in_alt = true;
         }
         Ok(())
     }
@@ -988,6 +1008,7 @@ impl<'a> App<'a> {
         self.last_error.clear();
         self.prev = Some(tracker);
         self.last_good = Some(sections);
+        self.enter_alt()?;
         self.redraw(&changes)?;
 
         if self.armed && bell && !self.cli.no_bell {
@@ -1006,6 +1027,7 @@ impl<'a> App<'a> {
     /// do not ring. With no data yet, just the error line and footer show.
     fn show_error(&mut self, e: anyhow::Error) -> Result<()> {
         self.last_error = short_error(&e);
+        self.enter_alt()?;
         self.redraw(&Changes::default())
     }
 

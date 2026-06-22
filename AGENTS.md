@@ -12,9 +12,11 @@ interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, th
 next refresh) and an optional help legend last at the bottom. It rings the
 terminal bell when one of your PRs merges or
 an open PR's status changes, and flags the changed rows. The interactive watch
-runs on the [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit:
-an alternate-screen [`Screen`] with an event loop. Interactive `--once` uses an
-*inline* `Screen` instead: a `Loading...` frame while the fetch runs (abortable
+runs on the [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with
+an event loop: it shows an *inline* `Loading...` frame, then enters the
+**alternate screen** [`Screen`] once the first fetch lands (or immediately when
+there's a cache to paint). Interactive `--once` uses an *inline* `Screen` instead:
+a `Loading...` frame while the fetch runs (abortable
 with `q`), then the dashboard is left in the terminal. Piped/non-TTY/`--demo`
 output is plain text printed straight to stdout, so the dashboard stays
 pipe-friendly and URLs can be OSC-8 hyperlinks.
@@ -99,11 +101,14 @@ paints, crops to the painted height, and renders.
 The interactive watch is `lib.rs::App`, following the uncurses example **`App`
 pattern**: the struct owns the `uncurses::Screen` plus all dashboard state, and
 `run()` does `let mut app = App::start(terminal, ...)?; let result = app.run();
-app.stop()?; result`. `start` builds the screen from the `Terminal`, brings it up
-(alt-screen, hidden cursor, keeping the terminal's detected color profile) and
-paints the
-cache/loading frame; `run` resolves `me`/default branch then loops fetch → paint
-→ wait, returning `Ok(())` on a quit key; `stop` consumes the app and calls
+app.stop()?; result`. `start` builds the screen from the `Terminal` and brings it
+up (raw mode, hidden cursor, keeping the terminal's detected color profile), then
+paints the startup frame: a cached dashboard if one exists (entering the alt screen
+straight away), otherwise an **inline** `Loading...` frame. `run` resolves
+`me`/default branch then loops fetch → paint → wait, returning `Ok(())` on a quit
+key. The first live paint calls `enter_alt` (once), which drops the inline frame to
+zero rows and switches to the alt screen — so loading looks like ordinary command
+output before the dashboard takes over the screen. `stop` consumes the app and calls
 **`Screen::finish`** (the idiomatic teardown: exit alt-screen, show cursor, leave
 raw mode). Because the caller always runs `stop`, the terminal is restored on
 every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
@@ -126,10 +131,12 @@ now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
   not ring). The first refresh is silent. Changed rows get a `▸` marker.
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
-- **Cache:** on a watch start, prowl paints the cached `Sections` immediately,
-  seeds change-detection from it
+- **Cache:** on a watch start, prowl paints the cached `Sections` immediately
+  (entering the alt screen straight away), seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
-  but stays silent (no startup bell). `--no-cache` skips both read and write.
+  but stays silent (no startup bell). With no cache it shows an inline
+  `Loading...` frame and enters the alt screen only once the first fetch lands.
+  `--no-cache` skips both read and write.
 - **Terminal:** the watch runs on a `uncurses::Screen` in the alternate screen
   with the cursor hidden; raw mode means stray keystrokes never garble the
   dashboard or spill into the shell. `r`/`R` forces a refresh now; `?` toggles
