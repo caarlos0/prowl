@@ -31,6 +31,17 @@ pub struct Cell {
     pub style: Style,
 }
 
+/// A per-URL OSC-8 `id=` parameter: the first 7 hex chars of the URL's hash, so
+/// terminals treat each link (e.g. a PR number) as one distinct hyperlink and
+/// don't merge adjacent ones.
+fn link_params(url: &str) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    url.hash(&mut h);
+    let hex = format!("{:016x}", h.finish());
+    format!("id={}", &hex[..7])
+}
+
 impl Cell {
     pub fn plain(text: impl Into<String>) -> Cell {
         Cell {
@@ -48,9 +59,11 @@ impl Cell {
 
     /// A dim + underlined OSC-8 hyperlink whose visible text is `text`.
     pub fn link(text: impl Into<String>, url: impl Into<String>) -> Cell {
+        let url = url.into();
+        let params = link_params(&url);
         Cell {
             text: text.into(),
-            style: Style::new().faint().underline().link(url.into(), ""),
+            style: Style::new().faint().underline().link(url, params),
         }
     }
 
@@ -61,9 +74,11 @@ impl Cell {
         url: impl Into<String>,
         style: impl Into<Style>,
     ) -> Cell {
+        let url = url.into();
+        let params = link_params(&url);
         Cell {
             text: text.into(),
-            style: style.into().underline().link(url.into(), ""),
+            style: style.into().underline().link(url, params),
         }
     }
 
@@ -369,10 +384,20 @@ mod tests {
         let out = encode(12, 2, Profile::TrueColor, |b| {
             paint_table(b, &table, 0, false, 0);
         });
-        // OSC-8 framing around the link text; dim + underline SGR.
-        assert!(out.contains("\x1b]8;;https://x/1\x1b\\"));
+        // OSC-8 framing: the opener carries a per-URL `id=` param, the closer is
+        // empty; dim + underline SGR.
+        assert!(out.contains("\x1b]8;id="));
+        assert!(out.contains(";https://x/1\x1b\\"));
         assert!(out.contains("\x1b]8;;\x1b\\"));
         assert!(out.contains("\x1b[2;4m"));
+    }
+
+    #[test]
+    fn link_params_is_a_7_hex_char_id() {
+        let p = link_params("https://github.com/o/r/pull/42");
+        let id = p.strip_prefix("id=").expect("id= prefix");
+        assert_eq!(id.len(), 7);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

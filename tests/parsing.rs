@@ -61,8 +61,9 @@ fn queue_styled_render_uses_palette_and_links() {
     // Mine row is highlighted yellow (#f9e2af); others' PR cell is blue (#89b4fa).
     assert!(out.contains("38;2;249;226;175"), "expected mine yellow");
     assert!(out.contains("38;2;137;180;250"), "expected not-mine blue");
-    // URLs are OSC-8 hyperlinks.
-    assert!(out.contains("\x1b]8;;https://github.com/octo/repo/pull/101\x1b\\"));
+    // URLs are OSC-8 hyperlinks carrying a per-URL `id=` param.
+    assert!(out.contains("\x1b]8;id="));
+    assert!(out.contains(";https://github.com/octo/repo/pull/101\x1b\\"));
 }
 
 // ---------------------------------------------------------------------------
