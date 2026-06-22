@@ -6,7 +6,7 @@
 //! Width math uses the surface's own [`str_width`](uncurses::text::TextSurface::str_width)
 //! and column gaps are implicit (unpainted cells stay blank, so no padding is
 //! emitted). Each cell's OSC-8 link rides in its style, and the surface's color
-//! [`Profile`](uncurses::color::Profile) downsamples styling at encode/present
+//! [`Profile`](uncurses::color::Profile) downsamples styling at encode/render
 //! time — so piped output (a `Disabled` profile) degrades to plain text with no
 //! special-casing here.
 

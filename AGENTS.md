@@ -13,9 +13,11 @@ next refresh) and an optional help legend last at the bottom. It rings the
 terminal bell when one of your PRs merges or
 an open PR's status changes, and flags the changed rows. The interactive watch
 runs on the [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit:
-an alternate-screen [`Screen`] with an event loop. One-shot/piped output
-(`--once`, non-TTY, `--demo`) is plain text printed straight to stdout, so the
-dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
+an alternate-screen [`Screen`] with an event loop. Interactive `--once` uses an
+*inline* `Screen` instead: a `Loading...` frame while the fetch runs (abortable
+with `q`), then the dashboard is left in the terminal. Piped/non-TTY/`--demo`
+output is plain text printed straight to stdout, so the dashboard stays
+pipe-friendly and URLs can be OSC-8 hyperlinks.
 
 ## Golden rules
 
@@ -35,7 +37,7 @@ dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 - **Styling:** built on `uncurses::style::Style` (SGR incl. 24-bit truecolor;
   OSC-8 links ride in the style). There is **one painter**: the dashboard is
   drawn straight onto an `uncurses` surface with `set_str`. Plain-vs-styled is
-  not a code branch — the surface's color `Profile` downsamples at encode/present
+  not a code branch — the surface's color `Profile` downsamples at encode/render
   time, and `Profile::Disabled` (non-TTY/piped) drops SGR and hyperlinks, so
   piped output is plain automatically. Glyph-vs-letter and bar-vs-parens are the
   one content choice, driven by an `ascii` flag (`--ascii`, or a `Disabled`
@@ -80,12 +82,19 @@ watch event loop); everything else is testable modules:
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 `run()` first creates a `uncurses::terminal::Terminal::stdio()`; interactivity is
-its `is_terminal().1` (output a TTY?). For `--once`/piped/`--demo`, `render_once`
-paints the dashboard onto an offscreen `Canvas` sized to its content (a generous
-`height_bound`, then cropped to the painted height), and `encode_with`s it to the
-terminal's output (`Terminal::output`) using the **detected** color `Profile`
-(`Profile::detect_from`), so it's colored on a TTY and plain when piped. Otherwise
-the same `Terminal` is moved into `App::start` → `Screen::new(terminal)`.
+its `is_terminal().1` (output a TTY?). When the output is **not** a TTY (piped,
+redirected) and for `--demo`, `render_once` paints the dashboard onto an offscreen
+`TextBuffer` sized to its content (a generous `height_bound`, then cropped to the
+painted height), and `encode_with`s it to the terminal's output (`Terminal::output`)
+using the **detected** color `Profile` (`Profile::detect_from`), so it's colored on
+a TTY and plain when piped. Interactive `--once` instead runs `run_once_interactive`:
+an *inline* `Screen` (raw mode, hidden cursor) shows a `Loading...` frame while the
+fetch runs on a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C`
+aborts mid-fetch; on success the dashboard replaces the frame and is left inline
+(`Screen::finish` doesn't wipe an inline surface). Otherwise the same `Terminal` is
+moved into `App::start` → `Screen::new(terminal)`. The watch redraw and the inline
+one-shot frame share `render_dashboard`, which sizes the surface to the content,
+paints, crops to the painted height, and renders.
 
 The interactive watch is `lib.rs::App`, following the uncurses example **`App`
 pattern**: the struct owns the `uncurses::Screen` plus all dashboard state, and
@@ -98,9 +107,9 @@ cache/loading frame; `run` resolves `me`/default branch then loops fetch → pai
 **`Screen::finish`** (the idiomatic teardown: exit alt-screen, show cursor, leave
 raw mode). Because the caller always runs `stop`, the terminal is restored on
 every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
-calls `stop` itself before bailing). Each frame is painted by `draw`/
-`paint_dashboard`, which **resizes the screen canvas to the exact content height**
-(even in the alternate screen) before `present`. The loop uses `poll_event` with
+calls `stop` itself before bailing). Each frame is painted by `redraw` →
+`render_dashboard`, which **resizes the surface to the exact content height**
+(even in the alternate screen) before `render`. The loop uses `poll_event` with
 the interval as the timeout. Keys are matched with `Key::matches`: `r`/`R` refresh
 now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
 `Resize` repaints.
@@ -137,6 +146,12 @@ now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
   which is reaped at process exit). The terminal is restored on every exit path
   by `App::stop` (`Screen::finish`), which the caller always runs after
   `App::run`.
+- **Interactive `--once`:** `run_once_interactive` brings up an *inline* `Screen`
+  (raw mode, hidden cursor) and paints a `Loading...` frame while the fetch runs on
+  a background thread, so keystrokes don't echo and `q`/`Esc`/`Ctrl-C` aborts the
+  fetch instantly. On success the dashboard replaces the frame and is left inline in
+  the terminal; on abort the frame is wiped. `Screen::finish` restores the terminal
+  on every path. Piped/non-TTY output keeps the plain `render_once` encode path.
 
 ## The three GraphQL queries + REST (see `model.rs` / `commits.rs`)
 

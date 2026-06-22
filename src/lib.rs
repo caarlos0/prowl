@@ -281,7 +281,7 @@ fn paint_section(
 /// previous refresh (per `changes`) are flagged with a leading marker.
 ///
 /// `ascii` selects letters/parens over Nerd Font glyphs/bars; colors are written
-/// as styles and downsampled by the surface's `Profile` at encode/present time.
+/// as styles and downsampled by the surface's `Profile` at encode/render time.
 /// Returns the number of rows used.
 #[allow(clippy::too_many_arguments)]
 fn paint_dashboard(
@@ -396,6 +396,42 @@ fn height_bound(s: &Sections, show_help: bool) -> u16 {
     n as u16
 }
 
+/// Paint the one-row `Loading...` startup frame (a single dim line) and render it.
+/// Shared by the watch's first paint when there's no cache and by interactive
+/// `--once`, so both show the identical loading frame.
+fn paint_loading(screen: &mut Screen<Stdin, Stdout>) -> Result<()> {
+    screen.resize((screen.width().max(1), 1));
+    screen.clear();
+    render::paint_dim(screen, "Loading...", 0);
+    screen.render()?;
+    Ok(())
+}
+
+/// Size an inline/alternate `Screen` to the dashboard's content height, paint it,
+/// crop to the height actually used, and render. Shared by the watch redraw and
+/// the interactive one-shot frame so the sizing dance lives in one place.
+fn render_dashboard(
+    screen: &mut Screen<Stdin, Stdout>,
+    sections: &Sections,
+    changes: &Changes,
+    error: &str,
+    footer_eta: Option<&str>,
+    show_help: bool,
+    ascii: bool,
+) -> Result<()> {
+    let w = screen.width().max(1);
+    // Grow tall enough to paint everything, paint, then shrink to the height
+    // actually used so the surface is exactly the dashboard's line count.
+    screen.resize((w, height_bound(sections, show_help).max(1)));
+    screen.clear();
+    let used = paint_dashboard(
+        screen, sections, changes, error, footer_eta, show_help, ascii,
+    );
+    screen.resize((w, used.max(1)));
+    screen.render()?;
+    Ok(())
+}
+
 /// Render the dashboard once into an offscreen [`TextBuffer`] sized to its content,
 /// then encode it to the terminal's output with the **detected** color profile
 /// (plain when piped) and exit. Used by `--once`, non-TTY output, and `--demo`.
@@ -434,6 +470,96 @@ fn render_once(
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Interactive `--once`: bring up an inline `Screen` (raw mode, hidden cursor, no
+/// echo) showing a `Loading...` frame while the fetch runs on a background
+/// thread, so keystrokes never echo and `q`/`Esc`/`Ctrl-C` can abort mid-fetch.
+/// On success the dashboard replaces the loading frame and is left inline in the
+/// terminal (like piped `--once`); on abort the frame is wiped and nothing is
+/// left behind. `Screen::finish` restores the terminal on every path.
+fn run_once_interactive(
+    terminal: Terminal<Stdin, Stdout>,
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+) -> Result<()> {
+    let mut screen = Screen::new(terminal)?;
+    screen.init()?;
+    screen.hide_cursor()?;
+
+    // Inline loading frame; raw mode swallows keystrokes so nothing echoes into
+    // the output while we wait.
+    paint_loading(&mut screen)?;
+
+    // Fetch off-thread so `q` stays live during network I/O. `me` and the
+    // default branch are resolved here too, so even the first round-trip never
+    // blocks the abort key.
+    let (cli2, client2, repo2) = (cli.clone(), client.clone(), repo.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = (|| {
+            let me = client2.me()?;
+            let default_branch = client2
+                .default_branch(&repo2)
+                .unwrap_or_else(|_| "main".to_string());
+            fetch(&cli2, &client2, &repo2, &me, &default_branch)
+        })();
+        let _ = tx.send(fetched); // ignored if we already aborted (rx dropped)
+    });
+
+    // `None` => the user aborted; `Some(result)` => the fetch finished.
+    let fetched = loop {
+        match rx.try_recv() {
+            Ok(result) => break Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                break Some(Err(anyhow::anyhow!("fetch worker stopped unexpectedly")));
+            }
+        }
+        if screen.poll_event(Some(Duration::from_millis(60)))? {
+            let mut aborted = false;
+            while let Some(ev) = screen.try_read_event() {
+                if let Action::Quit = classify(&ev) {
+                    aborted = true;
+                }
+            }
+            if aborted {
+                break None;
+            }
+        }
+    };
+
+    match fetched {
+        Some(Ok(sections)) => {
+            // Replace the loading frame with the dashboard, then leave it inline.
+            render_dashboard(
+                &mut screen,
+                &sections,
+                &Changes::default(),
+                "",
+                None,
+                !cli.no_help,
+                cli.ascii,
+            )?;
+            screen.finish()?;
+            if !cli.no_cache {
+                cache::save(repo, &sections);
+            }
+            Ok(())
+        }
+        Some(Err(e)) => {
+            screen.finish()?; // restore the terminal before surfacing the error
+            Err(e)
+        }
+        None => {
+            // Aborted: wipe the loading frame so nothing is left behind.
+            screen.clear();
+            screen.render()?;
+            screen.finish()?;
+            Ok(())
+        }
     }
 }
 
@@ -595,8 +721,9 @@ pub fn run() -> Result<()> {
         None => github::detect_repo()?,
     };
 
-    // Single render: `--once`, or whenever the output is not a TTY.
-    if cli.once || !interactive {
+    // Non-interactive (piped, redirected, not a TTY): a blocking fetch, encode
+    // the frame to stdout, and exit. No screen, no loading UI.
+    if !interactive {
         let me = client.me()?;
         let default_branch = client
             .default_branch(&repo)
@@ -606,6 +733,13 @@ pub fn run() -> Result<()> {
             cache::save(&repo, &sections);
         }
         return render_once(&terminal, &sections, &cli, &Changes::default(), None);
+    }
+
+    // Interactive `--once`: an inline screen shows a `Loading...` frame and
+    // swallows input while the fetch runs (abortable with `q`), then leaves the
+    // dashboard in the terminal.
+    if cli.once {
+        return run_once_interactive(terminal, &cli, &client, &repo);
     }
 
     // Interactive watch, structured as an uncurses `App` (start → run → stop):
@@ -698,28 +832,17 @@ impl<'a> App<'a> {
                 self.last_good = Some(c.sections);
                 self.redraw(&Changes::default())?;
             }
-            None => {
-                self.screen.clear();
-                render::paint_dim(&mut self.screen, "Loading...", 0);
-                self.screen.present()?;
-            }
+            None => paint_loading(&mut self.screen)?,
         }
         Ok(())
     }
 
-    /// Paint the current dashboard onto the screen, sizing the canvas to the
-    /// exact number of content rows (even in the alternate screen), then present.
-    /// Draws the last good sections (or an empty frame, so a first-fetch error
-    /// still shows its error line + footer) with `changes` highlighted.
+    /// Paint the current dashboard via [`render_dashboard`], drawing the last
+    /// good sections (or an empty frame, so a first-fetch error still shows its
+    /// error line + footer) with `changes` highlighted.
     fn redraw(&mut self, changes: &Changes) -> Result<()> {
         let sections = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
-        let w = self.screen.width().max(1);
-        // Grow tall enough to paint everything, paint, then shrink to the height
-        // actually used so the canvas is exactly the dashboard's line count.
-        self.screen
-            .resize((w, height_bound(sections, self.show_help).max(1)));
-        self.screen.clear();
-        let used = paint_dashboard(
+        render_dashboard(
             &mut self.screen,
             sections,
             changes,
@@ -727,10 +850,7 @@ impl<'a> App<'a> {
             Some(&self.eta),
             self.show_help,
             self.cli.ascii,
-        );
-        self.screen.resize((w, used.max(1)));
-        self.screen.present()?;
-        Ok(())
+        )
     }
 
     /// Drive the watch: loop fetch → paint → wait, returning `Ok(())` when the
