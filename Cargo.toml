@@ -16,7 +16,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 keyring = { version = "^3", default-features = false, features = ["apple-native", "windows-native"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-uncurses = { git = "https://github.com/aymanbagabas/uncurses", rev = "77aa0efe115dfe87c4f5f821c3e332c5fcb1620c" }
+uncurses = { git = "https://github.com/aymanbagabas/uncurses", rev = "1f8139b1aa10c24fd7d94a2cc7047fe913ede4a7" }
 ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
 
 # On Linux the default keyring backend is the in-process `mock`, which doesn't
