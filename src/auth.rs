@@ -7,6 +7,7 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
+use uncurses::style::Style;
 
 /// prowl's GitHub OAuth App client id. Public by design (the device flow needs
 /// no client secret); overridable for testing.
@@ -39,7 +40,7 @@ pub fn token(force_login: bool, interactive: bool) -> Result<String> {
             bail!("not authenticated: run `prowl --login`, or set GITHUB_TOKEN");
         }
     }
-    let token = device_flow()?;
+    let token = device_flow(interactive)?;
     store(&token);
     Ok(token)
 }
@@ -63,11 +64,17 @@ struct TokenResponse {
     error: Option<String>,
 }
 
-fn device_flow() -> Result<String> {
+fn device_flow(interactive: bool) -> Result<String> {
     let dc = request_device_code()?;
+    // Always render the URL through a style; on an interactive terminal it also
+    // carries an underlined, clickable OSC-8 hyperlink (emitted by the style).
+    let mut style = Style::new();
+    if interactive {
+        style = style.underline().link(&dc.verification_uri, "");
+    }
     eprintln!();
     eprintln!("  Authorize prowl:");
-    eprintln!("    1. open {}", dc.verification_uri);
+    eprintln!("    1. open {}", style.styled(&dc.verification_uri));
     eprintln!("    2. enter the code:  {}", dc.user_code);
     eprintln!();
     eprintln!("  Waiting for authorization...");
