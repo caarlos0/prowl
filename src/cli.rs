@@ -44,6 +44,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 20, value_name = "N")]
     pub merged_limit: usize,
 
+    /// Include pre-releases in the "My Shipments" section (they're skipped by default).
+    #[arg(long)]
+    pub include_pre_releases: bool,
+
     /// Hide the help legend in one-shot/piped output (in the watch view it
     /// starts hidden and is toggled with `?`).
     #[arg(long)]
@@ -58,6 +62,7 @@ pub struct Cli {
     pub no_cache: bool,
 
     /// Render a screen of synthetic demo data and exit (for screenshots).
+    #[cfg(feature = "demo")]
     #[arg(long, hide = true)]
     pub demo: bool,
 }

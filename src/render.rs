@@ -241,22 +241,22 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// Paint the watch-mode key-hint footer at row `y`, folding the next-refresh
-/// countdown into the refresh hint: `r refresh (next in 5m) - ? help`. Each key
-/// glyph is a bold muted accent, its labels dim; plain in ASCII mode. Returns
-/// y + 1.
-pub fn paint_footer(s: &mut impl TextSurface, next: &str, ascii: bool, y: u16) -> u16 {
+/// Paint the watch-mode key-hint footer at row `y`, folding the constant
+/// refresh interval into the refresh hint: `r refresh (every 5m) - ? help`. Each
+/// key glyph is a bold muted accent, its labels dim; plain in ASCII mode.
+/// Returns y + 1.
+pub fn paint_footer(s: &mut impl TextSurface, interval: &str, ascii: bool, y: u16) -> u16 {
     if ascii {
         s.set_str(
             (0, y),
-            &format!("r refresh (next in {next}) - ? help"),
+            &format!("r refresh (every {interval}) - ? help"),
             None,
         );
     } else {
         let key = status::fg(status::OVERLAY).bold();
         let dim = Style::new().faint();
         let p = s.set_str((0, y), "r", &key);
-        let p = s.set_str((p.x + 1, y), &format!("refresh (next in {next})"), &dim);
+        let p = s.set_str((p.x + 1, y), &format!("refresh (every {interval})"), &dim);
         let p = s.set_str((p.x, y), " - ", &dim);
         let p = s.set_str((p.x, y), "?", &key);
         s.set_str((p.x + 1, y), "help", &dim);
@@ -418,12 +418,12 @@ mod tests {
         let plain = encode(40, 1, Profile::Disabled, |b| {
             paint_footer(b, "5m", true, 0);
         });
-        assert_eq!(plain, "r refresh (next in 5m) - ? help");
+        assert_eq!(plain, "r refresh (every 5m) - ? help");
 
         let styled = encode(40, 1, Profile::TrueColor, |b| {
             paint_footer(b, "5m", false, 0);
         });
-        assert!(styled.contains("refresh (next in 5m)"));
+        assert!(styled.contains("refresh (every 5m)"));
         assert!(styled.contains("help"));
         // Bold key accent (combined with the muted color) and a dim label.
         assert!(styled.contains("\x1b[1;"));

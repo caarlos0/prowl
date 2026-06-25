@@ -8,8 +8,8 @@ model, or workflow change.
 
 A small terminal dashboard that watches a GitHub repo and re-renders on an
 interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, then a
-`r refresh (next in 5m) - ? help` footer (which also shows the time until the
-next refresh) and an optional help legend last at the bottom. It rings the
+`r refresh (every 5m) - ? help` footer (which also shows the refresh
+interval) and an optional help legend last at the bottom. It rings the
 terminal bell when one of your PRs merges or
 an open PR's status changes, and flags the changed rows. The interactive watch
 runs on the [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with
@@ -70,14 +70,20 @@ watch event loop); everything else is testable modules:
   (text + `Style`, the OSC-8 link folded into the style) / `Table`, `truncate`
   (uncurses' width-aware truncator), and `title_width` (cap/align the shared
   `TITLE` column so every table lines up and the whole view stays within
-  `MAX_WIDTH` = 120). Headers, the key-hint footer (carrying the next-refresh
-  ETA), and the help legend live here too.
+  `MAX_WIDTH` = 120). Headers, the key-hint footer (carrying the refresh
+  interval), and the help legend live here too.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
   columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`).
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
-  never fatal. Rendered as the right-aligned "My Shipments" section.
+  never fatal. Rendered as the right-aligned "My Shipments" section. Each label
+  is a link — `upcoming` to the compare log (last tag → default branch), each
+  release tag to its release page. Beneath each, it lists my PRs (number parsed
+  from each commit subject's trailing `(#NNN)`, the squash / merge-commit
+  convention) **filtered to those still in the recently-merged set**, so it
+  cross-references where my recent merges landed.
+  `--include-pre-releases` also counts prereleases (drafts are always skipped).
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
@@ -144,7 +150,7 @@ now, `?` toggles help, `q`/`Esc`/`Ctrl-C` quit, `Ctrl-Z` suspends/resumes,
   hidden by default, rendered last at the very bottom; `--no-help` only affects
   one-shot/piped output); `q`/`Esc`/`Ctrl-C` quit and `Ctrl-Z` suspends/resumes.
   The only persistent bottom line is the footer
-  (`r refresh (next in 5m) - ? help`), which carries the next-refresh ETA; a
+  (`r refresh (every 5m) - ? help`), which carries the refresh interval; a
   failed refresh adds a dim `error: …` line above it. Every fetch (and the
   one-time `me`/default-branch resolution) runs on a **detached background
   thread** and returns over a channel; the main thread only polls input and
@@ -178,6 +184,10 @@ cargo clippy --all-targets -- -D warnings    # must be clean
 cargo fmt --all --check                      # must be formatted
 cargo test                                   # offline, fixture-based
 ```
+
+The hidden `--demo` flag (synthetic data for screenshots) is behind the
+off-by-default `demo` cargo feature, so release builds don't ship it. Build or
+run it with `cargo run --features demo -- --demo`.
 
 CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test on push and PRs.
 
