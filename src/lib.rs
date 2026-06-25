@@ -391,7 +391,7 @@ fn help_block(cli: &Cli, show_help: bool, styled: bool) -> String {
 }
 
 /// Compose the bottom of the frame in order: an optional error line (empty
-/// unless a refresh failed), then (watch only) the `r refresh (next in 5m) - ?
+/// unless a refresh failed), then (watch only) the `r refresh (every 5m) - ?
 /// help` footer, then the help legend last. Any part may be empty to omit it;
 /// present parts are separated by a single blank line. The render body already
 /// ends with a blank line, so the first part is not prefixed with one.
@@ -554,11 +554,11 @@ pub fn run() -> Result<()> {
             status_changed: std::collections::HashSet::from([127]),
             newly_merged: std::collections::HashSet::from([119]),
         };
-        let next = timefmt::eta(cli.interval.dur);
+        let interval = timefmt::eta(cli.interval.dur);
         let body = render_body(&sections, &cli, &changes, interactive)
             + &bottom(
                 "",
-                &render::footer(&next, interactive),
+                &render::footer(&interval, interactive),
                 &help_block(&cli, !cli.no_help, interactive),
             );
         repaint(&body)?;
@@ -584,8 +584,8 @@ pub fn run() -> Result<()> {
     // `styled` already implies `!cli.once`, so watch mode is just `styled`.
     let watch = styled;
 
-    // The next-refresh ETA is constant (the poll interval), so the key-hint
-    // footer that carries it (`r refresh (next in 5m) - ? help`) is built once.
+    // The refresh interval is constant, so the key-hint footer that carries it
+    // (`r refresh (every 5m) - ? help`) is built once.
     let footer = render::footer(&timefmt::eta(cli.interval.dur), styled);
 
     // Change-detection / last-good state, seeded from the cache below so the

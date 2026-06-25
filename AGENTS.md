@@ -8,8 +8,8 @@ model, or workflow change.
 
 A small terminal dashboard that watches a GitHub repo and re-renders on an
 interval: **My open PRs → Merge Queue → My merged PRs → My Shipments**, then a
-`r refresh (next in 5m) - ? help` footer (which also shows the time until the
-next refresh) and an optional help legend last at the bottom. It rings the
+`r refresh (every 5m) - ? help` footer (which also shows the refresh
+interval) and an optional help legend last at the bottom. It rings the
 terminal bell when one of your PRs merges or
 an open PR's status changes, and flags the changed rows. It is a plain
 `std::thread::sleep` redraw loop — **not** a raw-mode/alt-screen TUI — so output
@@ -54,7 +54,7 @@ everything else is testable modules:
   (incl. `link_styled` for clickable PR numbers), `truncate` + `fit_titles`
   (cap/align the shared `TITLE` column so every table lines up and the whole
   view stays within `MAX_WIDTH` = 120 columns), headers, the key-hint footer
-  (`footer`, carrying the relative next-refresh ETA), help legend (a full static
+  (`footer`, carrying the refresh interval), help legend (a full static
   reference of every status glyph + `STATE`
   value, last at the very bottom), loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
@@ -101,7 +101,7 @@ everything else is testable modules:
   (a full static reference of every status glyph + `STATE` value, hidden by
   default, rendered last at the very bottom; `--no-help` only affects
   one-shot/piped output). The only persistent bottom line is the footer
-  (`r refresh (next in 5m) - ? help`), which carries the next-refresh ETA; a
+  (`r refresh (every 5m) - ? help`), which carries the refresh interval; a
   failed refresh adds a dim `error: …` line above it. The blocking fetch runs on
   a worker thread (`std::thread::scope`) while the main thread keeps polling
   input, so `?` stays responsive even mid-refresh. Both the cursor and terminal

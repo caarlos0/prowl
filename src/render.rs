@@ -346,12 +346,12 @@ pub fn help(ascii: bool, styled: bool) -> String {
     out
 }
 
-/// The watch-mode key hints shown at the very bottom, with the next-refresh
-/// countdown folded into the refresh hint: `r refresh (next in 5m) - ? help`.
-/// Each key glyph is a bold muted accent, its labels dim; plain when unstyled.
-pub fn footer(next: &str, styled: bool) -> String {
+/// The watch-mode key hints shown at the very bottom, with the refresh interval
+/// folded into the refresh hint: `r refresh (every 5m) - ? help`. Each key glyph
+/// is a bold muted accent, its labels dim; plain when unstyled.
+pub fn footer(interval: &str, styled: bool) -> String {
     if !styled {
-        return format!("r refresh (next in {next}) - ? help");
+        return format!("r refresh (every {interval}) - ? help");
     }
     let key = status::fg(status::OVERLAY).bold();
     let dim = Style::new().dimmed();
@@ -367,7 +367,7 @@ pub fn footer(next: &str, styled: bool) -> String {
     let sep = format!("{} - {}", dim.render(), dim.render_reset());
     format!(
         "{}{sep}{}",
-        hint("r", &format!("refresh (next in {next})")),
+        hint("r", &format!("refresh (every {interval})")),
         hint("?", "help")
     )
 }
@@ -399,10 +399,10 @@ mod tests {
 
     #[test]
     fn footer_is_plain_or_styled_key_hints() {
-        assert_eq!(footer("5m", false), "r refresh (next in 5m) - ? help");
+        assert_eq!(footer("5m", false), "r refresh (every 5m) - ? help");
         let styled = footer("5m", true);
         // Visible text is preserved...
-        assert!(styled.contains("refresh (next in 5m)"));
+        assert!(styled.contains("refresh (every 5m)"));
         assert!(styled.contains("help"));
         // ...with a bold key accent and a dim label.
         assert!(styled.contains("\x1b[1m"));
