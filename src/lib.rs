@@ -63,9 +63,20 @@ fn fetch(
     // Best-effort: a failure here (no releases, empty repo, ...) degrades to an
     // "unavailable" line rather than taking down the whole dashboard.
     let commits = if cli.show_shipments() {
+        // Cross-reference the shipments PR lists against the recently-merged set,
+        // so each bucket only lists my PRs that are also shown above.
+        let recent: std::collections::HashSet<i64> =
+            merged.iter().flatten().map(|r| r.number).collect();
         Some(
-            commits::fetch(client, repo, me, default_branch, cli.include_pre_releases)
-                .unwrap_or_else(|_| commits::CommitStats::unavailable()),
+            commits::fetch(
+                client,
+                repo,
+                me,
+                default_branch,
+                cli.include_pre_releases,
+                &recent,
+            )
+            .unwrap_or_else(|_| commits::CommitStats::unavailable()),
         )
     } else {
         None
@@ -203,27 +214,49 @@ fn demo_sections() -> Sections {
         mrow(108, "feat(render): OSC-8 hyperlinks for URLs", 259_200),
     ];
 
-    let count = |mine, capped| commits::Count { mine, capped };
+    let base = "https://github.com/caarlos0/prowl";
+    let pr = |n: u32, title: &str| commits::Shipped {
+        number: n,
+        url: format!("{base}/pull/{n}"),
+        title: title.to_string(),
+    };
+    let bucket = |mine, capped, url: String, prs| commits::Bucket {
+        count: commits::Count { mine, capped },
+        url,
+        prs,
+    };
+    let release = |tag: &str, mine, capped, prs| commits::Release {
+        tag: tag.to_string(),
+        bucket: bucket(mine, capped, format!("{base}/releases/tag/{tag}"), prs),
+    };
+    // The listed PRs mirror the recently-merged numbers above (119/116/112/108),
+    // since shipments only lists my PRs that are also recently merged.
     let commits = commits::CommitStats {
         available: true,
-        upcoming: Some(count(7, false)),
+        upcoming: Some(bucket(
+            7,
+            false,
+            format!("{base}/compare/v0.4.0...main"),
+            vec![
+                pr(119, "feat(status): ignore phantom check suites"),
+                pr(116, "fix(github): exact-match the remote host"),
+            ],
+        )),
         releases: vec![
-            commits::ReleaseCount {
-                tag: "v0.4.0".to_string(),
-                count: count(12, false),
-            },
-            commits::ReleaseCount {
-                tag: "v0.3.0".to_string(),
-                count: count(9, false),
-            },
-            commits::ReleaseCount {
-                tag: "v0.2.0".to_string(),
-                count: count(31, true),
-            },
-            commits::ReleaseCount {
-                tag: "v0.1.0".to_string(),
-                count: count(18, false),
-            },
+            release(
+                "v0.4.0",
+                12,
+                false,
+                vec![pr(112, "ci: build a snapshot on pull requests")],
+            ),
+            release(
+                "v0.3.0",
+                9,
+                false,
+                vec![pr(108, "feat(render): OSC-8 hyperlinks for URLs")],
+            ),
+            release("v0.2.0", 31, true, vec![]),
+            release("v0.1.0", 18, false, vec![]),
         ],
     };
 
@@ -380,8 +413,10 @@ fn bottom(status: &str, footer: &str, help: &str) -> String {
 }
 
 /// Render the "My Shipments" section: my commit counts for the next
-/// (unreleased) version and the last few stable releases, with the labels
-/// right-aligned so the colons and counts line up.
+/// (unreleased) version and the last few stable releases, each label
+/// left-aligned at a shared indent with its PRs nested beneath it. Each label
+/// is a link (the upcoming one to the compare log, each release to its release
+/// page), listing the PRs I shipped that are still recently merged.
 fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
     if !stats.available {
         f.push_str(&render::empty_line("Commit stats unavailable.", styled));
@@ -395,7 +430,8 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
     let (total, capped) = stats
         .upcoming
         .iter()
-        .chain(stats.releases.iter().map(|r| &r.count))
+        .map(|b| &b.count)
+        .chain(stats.releases.iter().map(|r| &r.bucket.count))
         .fold((0usize, false), |(n, capped), c| {
             (n + c.mine, capped || c.capped)
         });
@@ -408,26 +444,61 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
     ));
     f.push('\n');
 
-    // (label, count) rows: the upcoming release first, then the shipped ones.
-    let mut rows: Vec<(String, String)> = Vec::with_capacity(stats.releases.len() + 1);
-    rows.push((
-        "upcoming".to_string(),
+    // Each bucket: the upcoming (unreleased) version first, then the shipped
+    // releases newest-first. `None` is only the (rare) missing-upcoming case.
+    let upcoming = ("upcoming".to_string(), stats.upcoming.as_ref());
+    let buckets = std::iter::once(upcoming).chain(
         stats
-            .upcoming
-            .as_ref()
-            .map_or_else(|| "\u{2014}".to_string(), &count),
-    ));
-    for r in &stats.releases {
-        rows.push((r.tag.clone(), count(&r.count)));
-    }
+            .releases
+            .iter()
+            .map(|r| (r.tag.clone(), Some(&r.bucket))),
+    );
 
-    let width = rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
-    for (i, (label, value)) in rows.iter().enumerate() {
-        let pad = " ".repeat(width - label.width());
+    for (i, (label, bucket)) in buckets.enumerate() {
         // The first row is the upcoming (unreleased) version; set it apart in
-        // italics. Plain (not dim): the counts are real data, not placeholders.
-        let label = render::italic(label, styled && i == 0);
-        f.push_str(&format!("  {pad}{label}: {value}\n"));
+        // italics. The label links to the bucket's log/release page.
+        let style = if i == 0 {
+            anstyle::Style::new().italic()
+        } else {
+            anstyle::Style::new()
+        };
+        let (value, cell) = match bucket {
+            Some(b) => (
+                count(&b.count),
+                render::Cell::link_styled(label.clone(), b.url.clone(), style),
+            ),
+            None => (
+                "\u{2014}".to_string(),
+                render::Cell::styled(label.clone(), style),
+            ),
+        };
+        f.push_str(&format!(
+            "  {}: {value}\n",
+            render::render_cell(&cell, styled)
+        ));
+        if let Some(b) = bucket {
+            push_shipped(f, &b.prs, styled);
+        }
+    }
+}
+
+/// List the PRs shipped in one bucket, indented beneath its label, with the PR
+/// numbers (clickable blue links) padded to a shared width.
+fn push_shipped(f: &mut String, prs: &[commits::Shipped], styled: bool) {
+    let numw = prs
+        .iter()
+        .map(|s| format!("#{}", s.number).width())
+        .max()
+        .unwrap_or(0);
+    for s in prs {
+        let text = format!("#{}", s.number);
+        let cell = render::Cell::link_styled(text.clone(), s.url.clone(), status::fg(status::BLUE));
+        let pad = " ".repeat(numw - text.width());
+        f.push_str(&format!(
+            "    {}{pad}  {}\n",
+            render::render_cell(&cell, styled),
+            s.title
+        ));
     }
 }
 

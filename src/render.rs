@@ -226,6 +226,14 @@ pub fn render_table(table: &Table, styled: bool) -> String {
     out
 }
 
+/// Render a single cell (its style and optional OSC-8 link) with no padding,
+/// for non-table contexts such as the shipments PR list.
+pub fn render_cell(cell: &Cell, styled: bool) -> String {
+    let mut out = String::new();
+    push_cell(&mut out, cell, 0, true, styled);
+    out
+}
+
 /// A concise, non-figlet section header: a colored bold accent bar, the title,
 /// and an optional dim count badge (already formatted, e.g. `6` or `47+`).
 pub fn header(title: &str, accent: Rgb, count: Option<&str>, styled: bool) -> String {
@@ -255,16 +263,6 @@ pub fn empty_line(msg: &str, styled: bool) -> String {
     if styled {
         let dim = Style::new().dimmed();
         format!("{}{msg}{}", dim.render(), dim.render_reset())
-    } else {
-        msg.to_string()
-    }
-}
-
-/// Wrap `msg` in italics when styled; plain text otherwise.
-pub fn italic(msg: &str, styled: bool) -> String {
-    if styled {
-        let italic = Style::new().italic();
-        format!("{}{msg}{}", italic.render(), italic.render_reset())
     } else {
         msg.to_string()
     }

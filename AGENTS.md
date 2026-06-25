@@ -62,7 +62,12 @@ everything else is testable modules:
   columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`).
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
-  never fatal. Rendered as the right-aligned "My Shipments" section.
+  never fatal. Rendered as the right-aligned "My Shipments" section. Each label
+  is a link — `upcoming` to the compare log (last tag → default branch), each
+  release tag to its release page. Beneath each, it lists my PRs (number parsed
+  from each commit subject's trailing `(#NNN)`, the squash / merge-commit
+  convention) **filtered to those still in the recently-merged set**, so it
+  cross-references where my recent merges landed.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
