@@ -62,6 +62,7 @@ pub struct Cli {
     pub no_cache: bool,
 
     /// Render a screen of synthetic demo data and exit (for screenshots).
+    #[cfg(feature = "demo")]
     #[arg(long, hide = true)]
     pub demo: bool,
 }

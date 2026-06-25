@@ -9,6 +9,11 @@ license = "MIT"
 name = "prowl"
 path = "src/main.rs"
 
+[features]
+# The hidden `--demo` flag (synthetic data for screenshots). Off by default so
+# release builds don't ship it; enable with `cargo run --features demo`.
+demo = []
+
 [dependencies]
 anstyle = "1.0.14"
 anyhow = "1.0.102"

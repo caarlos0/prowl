@@ -80,6 +80,7 @@ fn fetch(
 
 /// Synthetic dashboard data for `--demo` (screenshots): no auth, repo, or
 /// network. Times are relative to now so the ages look fresh. Temporary.
+#[cfg(feature = "demo")]
 fn demo_sections() -> Sections {
     use chrono::{SecondsFormat, Utc};
     let ago = |secs: i64| {
@@ -475,6 +476,7 @@ pub fn run() -> Result<()> {
 
     // `--demo`: render synthetic data once and exit (no auth/repo/network), so
     // the dashboard can be screenshotted. Styled on a TTY, plain when piped.
+    #[cfg(feature = "demo")]
     if cli.demo {
         let sections = demo_sections();
         let changes = Changes {
