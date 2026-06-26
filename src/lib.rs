@@ -209,7 +209,6 @@ fn demo_sections() -> Sections {
         url: format!("{base}/pull/{number}"),
         release,
         merged_at: Some(ago(secs)),
-        updated_at: Some(ago(secs)),
     };
     // Recent merges aren't shipped yet (None); older ones map to a release.
     let merged = vec![

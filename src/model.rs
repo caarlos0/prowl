@@ -209,8 +209,6 @@ pub struct MergedNode {
     pub url: String,
     #[serde(rename = "mergedAt")]
     pub merged_at: Option<String>,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: Option<String>,
 }
 
 /// The recently-merged query; `first` is the page size (clamped 1..=100).
@@ -221,7 +219,7 @@ pub fn merged_query(limit: usize) -> String {
   search(type: ISSUE, first: {first}, query: $q) {{
     nodes {{
       ... on PullRequest {{
-        number title url mergedAt updatedAt
+        number title url mergedAt
       }}
     }}
   }}
@@ -230,6 +228,10 @@ pub fn merged_query(limit: usize) -> String {
 }
 
 pub fn merged_search(repo: &Repo, me: &str, since: &str) -> String {
+    // GitHub search can't sort by merge time, but a merge bumps `updatedAt` and
+    // later edits only bump it further, so `updated-desc` still surfaces the most
+    // recently merged PRs when the result is capped (rows are re-sorted by
+    // `mergedAt` for display).
     format!(
         "repo:{}/{} is:pr is:merged author:{} merged:>={} sort:updated-desc",
         repo.owner, repo.name, me, since

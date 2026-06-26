@@ -88,7 +88,8 @@ everything else is testable modules:
   Check suites with **zero check runs** (`checkRuns.totalCount == 0`) are
   phantom and ignored for both the glyph and the `FAIL` count, matching GitHub's
   rollup (so a `CLEAN` PR stays green).
-- **Sorting:** open and merged PRs by `updatedAt` desc; queue by `position` asc.
+- **Sorting:** open PRs by `updatedAt` desc, merged PRs by `mergedAt` desc;
+  queue by `position` asc.
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
   not ring). The first refresh is silent. Changed rows get a `▸` marker.
@@ -119,8 +120,9 @@ everything else is testable modules:
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
   `mergeStateStatus`, `mergeQueueEntry`, last commit `checkSuites { conclusion
   checkRuns { totalCount } }`, `updatedAt`.
-- Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with `mergedAt`,
-  `updatedAt`.
+- Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with `mergedAt`
+  (fetched `sort:updated-desc`, since search can't sort by merge time, then
+  re-sorted by `mergedAt` for display).
 - Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
 
 ## Build / test / lint

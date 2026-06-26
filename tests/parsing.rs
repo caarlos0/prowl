@@ -151,12 +151,12 @@ fn merged_parses_sorts_desc_and_caps() {
     let rows = merged::build_rows(data.search.nodes, 4, &Default::default());
 
     assert_eq!(rows.len(), 4); // capped at the limit
-    // Most recently updated first.
+    // Most recently merged first.
     assert_eq!(rows[0].number, 6649);
     // No release map supplied, so nothing is annotated as shipped.
     assert!(rows[0].release.is_none());
-    // Strictly descending update timestamps.
-    let ts: Vec<&Option<String>> = rows.iter().map(|r| &r.updated_at).collect();
+    // Strictly descending merge timestamps.
+    let ts: Vec<&Option<String>> = rows.iter().map(|r| &r.merged_at).collect();
     assert!(ts.windows(2).all(|w| w[0] >= w[1]));
 }
 

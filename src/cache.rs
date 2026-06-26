@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bump when the cached layout changes; older files are then ignored.
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]
