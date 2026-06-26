@@ -402,10 +402,11 @@ fn bottom(status: &str, footer: &str, help: &str) -> String {
 }
 
 /// Render the "My Shipments" section: my commit counts for the next
-/// (unreleased) version and the last few stable releases, one left-aligned
-/// labelled row each. Each label links out — the upcoming one to the compare
-/// log, each release to its release page — and shipped releases also show how
-/// long ago they were published, aligned into a trailing column.
+/// (unreleased) version and the last few stable releases, one labelled row
+/// each with the labels right-aligned so the colons and counts line up. Each
+/// label links out — the upcoming one to the compare log, each release to its
+/// release page — and shipped releases also show how long ago they were
+/// published, aligned into a trailing column.
 fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
     if !stats.available {
         f.push_str(&render::empty_line("Commit stats unavailable.", styled));
@@ -456,13 +457,10 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
         ));
     }
 
-    // Pad the `label: count` prefix to a shared width so the ages line up.
-    let prefix = |label: &str, value: &str| label.width() + 2 + value.width();
-    let prefix_w = rows
-        .iter()
-        .map(|(l, _, v, _)| prefix(l, v))
-        .max()
-        .unwrap_or(0);
+    // Right-align the labels and pad the counts to shared widths, so the
+    // colons, counts, and publish ages each line up in a readable column.
+    let label_w = rows.iter().map(|(l, ..)| l.width()).max().unwrap_or(0);
+    let value_w = rows.iter().map(|(.., v, _)| v.width()).max().unwrap_or(0);
 
     for (i, (label, url, value, age)) in rows.iter().enumerate() {
         // The first row is the upcoming (unreleased) version; set it apart in
@@ -476,14 +474,15 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
             Some(url) => render::Cell::link_styled(label.clone(), url.clone(), style),
             None => render::Cell::styled(label.clone(), style),
         };
+        let lpad = " ".repeat(label_w - label.width());
         f.push_str(&format!(
-            "  {}: {value}",
+            "  {lpad}{}: {value}",
             render::render_cell(&cell, styled)
         ));
         if let Some(age) = age {
-            let pad = prefix_w - prefix(label, value) + 3;
+            let vpad = " ".repeat(value_w - value.width() + 3);
             let age_cell = render::Cell::styled(age.clone(), anstyle::Style::new().dimmed());
-            f.push_str(&" ".repeat(pad));
+            f.push_str(&vpad);
             f.push_str(&render::render_cell(&age_cell, styled));
         }
         f.push('\n');
