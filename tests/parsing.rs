@@ -148,12 +148,13 @@ fn mine_partial_null_surfaces_graphql_error() {
 #[test]
 fn merged_parses_sorts_desc_and_caps() {
     let data: MergedData = parse(include_str!("fixtures/merged.json"));
-    let rows = merged::build_rows(data.search.nodes, 4);
+    let rows = merged::build_rows(data.search.nodes, 4, &Default::default());
 
     assert_eq!(rows.len(), 4); // capped at the limit
     // Most recently updated first.
     assert_eq!(rows[0].number, 6649);
-    assert_eq!(rows[0].base, "main");
+    // No release map supplied, so nothing is annotated as shipped.
+    assert!(rows[0].release.is_none());
     // Strictly descending update timestamps.
     let ts: Vec<&Option<String>> = rows.iter().map(|r| &r.updated_at).collect();
     assert!(ts.windows(2).all(|w| w[0] >= w[1]));

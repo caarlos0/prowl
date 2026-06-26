@@ -88,7 +88,7 @@ mod tests {
             number,
             title: format!("PR {number}"),
             url: format!("https://x/{number}"),
-            base: "main".to_string(),
+            release: None,
             merged_at: Some("2026-06-19T00:00:00Z".to_string()),
             updated_at: Some("2026-06-19T00:00:00Z".to_string()),
         }

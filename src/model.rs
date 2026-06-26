@@ -211,8 +211,6 @@ pub struct MergedNode {
     pub merged_at: Option<String>,
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<String>,
-    #[serde(rename = "baseRefName")]
-    pub base_ref_name: Option<String>,
 }
 
 /// The recently-merged query; `first` is the page size (clamped 1..=100).
@@ -223,7 +221,7 @@ pub fn merged_query(limit: usize) -> String {
   search(type: ISSUE, first: {first}, query: $q) {{
     nodes {{
       ... on PullRequest {{
-        number title url mergedAt updatedAt baseRefName
+        number title url mergedAt updatedAt
       }}
     }}
   }}

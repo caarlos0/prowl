@@ -59,15 +59,19 @@ everything else is testable modules:
   value, last at the very bottom), loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
-  columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`).
+  columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`). The
+  merged columns are `# PR TITLE RELEASE MERGED`, where `RELEASE` is the release
+  that shipped the PR (a link to its release page) or `—` if not yet shipped,
+  looked up from the `commits::ReleaseMap`.
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
-  never fatal. Rendered as the right-aligned "My Shipments" section. Each label
-  is a link — `upcoming` to the compare log (last tag → default branch), each
-  release tag to its release page. Beneath each, it lists my PRs (number parsed
-  from each commit subject's trailing `(#NNN)`, the squash / merge-commit
-  convention) **filtered to those still in the recently-merged set**, so it
-  cross-references where my recent merges landed.
+  never fatal. `fetch` returns both the `CommitStats` (rendered as the "My
+  Shipments" section: one left-aligned labelled count per bucket, each label a
+  link — `upcoming` to the compare log (last tag → default branch), each release
+  tag to its release page, with each shipped release's relative publish age in a
+  trailing dim column) and a `ReleaseMap` (PR number → the release that
+  shipped it, parsed from each commit subject's trailing `(#NNN)`, the squash /
+  merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
@@ -116,7 +120,7 @@ everything else is testable modules:
   `mergeStateStatus`, `mergeQueueEntry`, last commit `checkSuites { conclusion
   checkRuns { totalCount } }`, `updatedAt`.
 - Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with `mergedAt`,
-  `updatedAt`, `baseRefName`.
+  `updatedAt`.
 - Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
 
 ## Build / test / lint
