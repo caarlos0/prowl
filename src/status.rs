@@ -38,6 +38,29 @@ pub const ORDER: [Status; 5] = [
     Status::Merged,
 ];
 
+/// A reviewer's relationship to a PR, for the Reviews view's per-row glyph.
+/// Precedence when both apply: a pending request (re-review / awaiting) beats a
+/// quiet "updated" or "reviewed".
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ReviewState {
+    /// Review requested from you; you haven't reviewed yet.
+    Awaiting,
+    /// Re-requested after you already reviewed — the author wants another look.
+    ReReview,
+    /// You reviewed, and there are new commits since.
+    Updated,
+    /// You reviewed; nothing new and no pending request.
+    Reviewed,
+}
+
+/// Review states in legend / sort order (most actionable first).
+pub const REVIEW_ORDER: [ReviewState; 4] = [
+    ReviewState::Awaiting,
+    ReviewState::ReReview,
+    ReviewState::Updated,
+    ReviewState::Reviewed,
+];
+
 /// `mergeStateStatus` values in legend order.
 pub const STATE_ORDER: [&str; 8] = [
     "CLEAN",
@@ -89,6 +112,45 @@ pub fn status_meaning(s: Status) -> &'static str {
         Status::Pending => "checks are still running",
         Status::Merged => "merged into its base branch",
         Status::Conflicts => "merge conflict — needs a rebase",
+    }
+}
+
+/// Glyph + truecolor for a review state — the Reviews view's per-row indicator.
+pub fn review_style(s: ReviewState) -> (char, Rgb) {
+    match s {
+        ReviewState::Awaiting => ('\u{F06E}', YELLOW), // eye: needs your review
+        ReviewState::ReReview => ('\u{F021}', PEACH),  // rotate: look again
+        ReviewState::Updated => ('\u{F0AA}', BLUE),    // arrow-up: new commits
+        ReviewState::Reviewed => ('\u{F00C}', GREEN),  // check: done
+    }
+}
+
+/// ASCII fallback letter for a review state (non-Nerd-Font / piped output).
+pub fn review_ascii(s: ReviewState) -> char {
+    match s {
+        ReviewState::Awaiting => 'a',
+        ReviewState::ReReview => '@',
+        ReviewState::Updated => '^',
+        ReviewState::Reviewed => 'v',
+    }
+}
+
+/// The review-state glyph to render, honoring the ASCII toggle.
+pub fn review_glyph(s: ReviewState, ascii: bool) -> char {
+    if ascii {
+        review_ascii(s)
+    } else {
+        review_style(s).0
+    }
+}
+
+/// One-line meaning of a review state (for the help legend).
+pub fn review_meaning(s: ReviewState) -> &'static str {
+    match s {
+        ReviewState::Awaiting => "review requested from you",
+        ReviewState::ReReview => "re-review requested after you reviewed",
+        ReviewState::Updated => "updated since your review — new commits",
+        ReviewState::Reviewed => "you've reviewed; nothing pending",
     }
 }
 
@@ -285,6 +347,32 @@ mod tests {
         assert_eq!(status_ascii(Status::Pending), '.');
         assert_eq!(status_ascii(Status::Merged), 'm');
         assert_eq!(status_ascii(Status::Conflicts), '!');
+    }
+
+    #[test]
+    fn review_palette_glyphs_colors_and_letters() {
+        assert_eq!(review_style(ReviewState::Awaiting), ('\u{F06E}', YELLOW));
+        assert_eq!(review_style(ReviewState::ReReview), ('\u{F021}', PEACH));
+        assert_eq!(review_style(ReviewState::Updated), ('\u{F0AA}', BLUE));
+        assert_eq!(review_style(ReviewState::Reviewed), ('\u{F00C}', GREEN));
+        assert_eq!(review_ascii(ReviewState::Awaiting), 'a');
+        assert_eq!(review_ascii(ReviewState::ReReview), '@');
+        assert_eq!(review_ascii(ReviewState::Updated), '^');
+        assert_eq!(review_ascii(ReviewState::Reviewed), 'v');
+        // The ASCII toggle picks the letter; otherwise the glyph.
+        assert_eq!(review_glyph(ReviewState::Updated, true), '^');
+        assert_eq!(review_glyph(ReviewState::Updated, false), '\u{F0AA}');
+    }
+
+    #[test]
+    fn review_letters_are_distinct_from_status_letters() {
+        let status_letters: Vec<char> = ORDER.iter().map(|s| status_ascii(*s)).collect();
+        for r in REVIEW_ORDER {
+            assert!(
+                !status_letters.contains(&review_ascii(r)),
+                "review letter for {r:?} collides with a status letter"
+            );
+        }
     }
 
     #[test]
