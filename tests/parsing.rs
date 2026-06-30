@@ -2,9 +2,9 @@
 //! responses are parsed through the same path the binary uses, then turned into
 //! rows and rendered. No network access.
 
-use prowl::model::{MergedData, MineData, QueueData};
-use prowl::status::Status;
-use prowl::{github, merged, prs, queue, render};
+use prowl::model::{MergedData, MineData, QueueData, ReviewsData};
+use prowl::status::{ReviewState, Status};
+use prowl::{github, merged, prs, queue, render, reviews};
 use std::collections::HashSet;
 
 fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
@@ -164,6 +164,61 @@ fn merged_parses_sorts_desc_and_caps() {
 fn merged_empty_yields_no_rows() {
     let data: MergedData = parse(include_str!("fixtures/merged_empty.json"));
     assert!(data.search.nodes.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Reviews (PRs to review + reviewed-and-merged)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reviews_parse_dedupe_and_derive_states() {
+    let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
+    let rows = reviews::build_open_rows(data);
+
+    // #102 is in both searches (a re-review) -> de-duplicated to four rows,
+    // ordered by state rank: Awaiting, ReReview, Updated, Reviewed.
+    assert_eq!(
+        rows.iter().map(|r| (r.number, r.state)).collect::<Vec<_>>(),
+        vec![
+            (101, ReviewState::Awaiting),
+            (102, ReviewState::ReReview),
+            (103, ReviewState::Updated),
+            (104, ReviewState::Reviewed),
+        ]
+    );
+    // #101 has a null author -> "ghost".
+    assert_eq!(rows[0].author, "ghost");
+}
+
+#[test]
+fn reviews_open_render_uses_palette_and_links() {
+    let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
+    let rows = reviews::build_open_rows(data);
+    let out = render::render_table(&reviews::open_to_table(&rows, false), true);
+    // The Awaiting glyph is yellow (#f9e2af); PR numbers are OSC-8 hyperlinks.
+    assert!(out.contains("38;2;249;226;175"), "expected awaiting yellow");
+    assert!(out.contains("\x1b]8;;https://github.com/octo/repo/pull/101\x1b\\"));
+}
+
+#[test]
+fn reviews_ascii_state_letters() {
+    let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
+    let rows = reviews::build_open_rows(data);
+    let table = reviews::open_to_table(&rows, true); // ascii
+    // Column 0 is the margin; column 1 is the review-state glyph.
+    let st: Vec<&str> = table.rows.iter().map(|r| r[1].text.as_str()).collect();
+    assert_eq!(st, vec!["a", "@", "^", "v"]); // awaiting, re-review, updated, reviewed
+}
+
+#[test]
+fn reviewed_merged_parses_sorts_desc_with_author() {
+    let data: MergedData = parse(include_str!("fixtures/reviewed_merged.json"));
+    let rows = reviews::build_merged_rows(data.search.nodes, 10);
+    // Most recently merged first; author is carried through.
+    assert_eq!(rows[0].number, 201);
+    assert_eq!(rows[0].author, "erin");
+    assert_eq!(rows[1].number, 202);
+    assert_eq!(rows[1].author, "frank");
 }
 
 // `model::queue_nodes` takes ownership; a tiny shim keeps the call sites tidy.
