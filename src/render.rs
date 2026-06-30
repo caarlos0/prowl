@@ -2,6 +2,7 @@
 //! section headers, the dim key-hint footer, and the bell. Every escape is
 //! gated on a `styled` flag, so piped / non-TTY output is plain text.
 
+use crate::cli::View;
 use crate::status::{self, Rgb};
 use anstyle::Style;
 use std::fmt::Write as _;
@@ -278,21 +279,22 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
-/// The help legend: a complete reference of every status glyph and every
-/// `mergeStateStatus` value (not just those on screen). The title reuses the
-/// shared section-header style; the explanations themselves are dim.
-pub fn help(ascii: bool, styled: bool) -> String {
+/// The help legend for `view`: only the glyphs and values that view actually
+/// uses, so a glyph the other view reuses for something else can't muddy it. The
+/// Mine view lists the status glyphs + every `mergeStateStatus` value; the
+/// Reviews view lists the review-state glyphs + the merged glyph (its only
+/// shared icon). The title reuses the section-header style; meanings are dim.
+pub fn help(view: View, ascii: bool, styled: bool) -> String {
     let dim = Style::new().dimmed();
     let mut out = String::new();
 
     out.push_str(&header("Help", status::OVERLAY, None, styled));
     out.push('\n');
 
-    for s in status::ORDER {
-        let ch = status::glyph(s, ascii);
-        let meaning = status::status_meaning(s);
+    // One "glyph  meaning" line: colored glyph, dim meaning (plain when unstyled).
+    let line = |out: &mut String, ch: char, color: Rgb, meaning: &str| {
         if styled {
-            let g = status::fg(status::status_style(s).1);
+            let g = status::fg(color);
             let _ = writeln!(
                 out,
                 "  {}{ch}{}  {}{meaning}{}",
@@ -304,42 +306,73 @@ pub fn help(ascii: bool, styled: bool) -> String {
         } else {
             let _ = writeln!(out, "  {ch}  {meaning}");
         }
-    }
-    let _ = writeln!(out, "  {}", empty_line("- no checks reported yet", styled));
+    };
 
-    for st in status::STATE_ORDER {
-        let meaning = status::state_meaning(st);
-        let c = status::state_style(st);
-        if ascii {
-            // Label form (matches the ASCII/piped STATE column).
-            let label = status::state_label(st);
-            let tail = if meaning.is_empty() {
-                String::new()
-            } else {
-                format!(" \u{2014} {meaning}")
-            };
-            if styled {
-                let _ = writeln!(
-                    out,
-                    "  {}{label}{}{}{tail}{}",
-                    c.render(),
-                    c.render_reset(),
-                    dim.render(),
-                    dim.render_reset()
+    match view {
+        View::Mine => {
+            for s in status::ORDER {
+                line(
+                    &mut out,
+                    status::glyph(s, ascii),
+                    status::status_style(s).1,
+                    status::status_meaning(s),
                 );
-            } else {
-                let _ = writeln!(out, "  {label}{tail}");
             }
-        } else {
-            // Glyph form (matches the Nerd Font STATE column); always styled.
-            let g = status::state_glyph(st);
-            let _ = writeln!(
-                out,
-                "  {}{g}{}  {}{meaning}{}",
-                c.render(),
-                c.render_reset(),
-                dim.render(),
-                dim.render_reset()
+            let _ = writeln!(out, "  {}", empty_line("- no checks reported yet", styled));
+
+            for st in status::STATE_ORDER {
+                let meaning = status::state_meaning(st);
+                let c = status::state_style(st);
+                if ascii {
+                    // Label form (matches the ASCII/piped STATE column).
+                    let label = status::state_label(st);
+                    let tail = if meaning.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" \u{2014} {meaning}")
+                    };
+                    if styled {
+                        let _ = writeln!(
+                            out,
+                            "  {}{label}{}{}{tail}{}",
+                            c.render(),
+                            c.render_reset(),
+                            dim.render(),
+                            dim.render_reset()
+                        );
+                    } else {
+                        let _ = writeln!(out, "  {label}{tail}");
+                    }
+                } else {
+                    // Glyph form (matches the Nerd Font STATE column); always styled.
+                    let g = status::state_glyph(st);
+                    let _ = writeln!(
+                        out,
+                        "  {}{g}{}  {}{meaning}{}",
+                        c.render(),
+                        c.render_reset(),
+                        dim.render(),
+                        dim.render_reset()
+                    );
+                }
+            }
+        }
+        View::Reviews => {
+            for r in status::REVIEW_ORDER {
+                line(
+                    &mut out,
+                    status::review_glyph(r, ascii),
+                    status::review_style(r).1,
+                    status::review_meaning(r),
+                );
+            }
+            // The "Reviewed & merged" section leads each row with the merged glyph.
+            let merged = status::Status::Merged;
+            line(
+                &mut out,
+                status::glyph(merged, ascii),
+                status::status_style(merged).1,
+                status::status_meaning(merged),
             );
         }
     }
@@ -347,11 +380,12 @@ pub fn help(ascii: bool, styled: bool) -> String {
 }
 
 /// The watch-mode key hints shown at the very bottom, with the refresh interval
-/// folded into the refresh hint: `r refresh (every 5m) - ? help`. Each key glyph
-/// is a bold muted accent, its labels dim; plain when unstyled.
+/// folded into the refresh hint: `r refresh (every 5m) - tab switch view - ?
+/// help`. Each key glyph is a bold muted accent, its labels dim; plain when
+/// unstyled.
 pub fn footer(interval: &str, styled: bool) -> String {
     if !styled {
-        return format!("r refresh (every {interval}) - ? help");
+        return format!("r refresh (every {interval}) - tab switch view - ? help");
     }
     let key = status::fg(status::OVERLAY).bold();
     let dim = Style::new().dimmed();
@@ -366,10 +400,44 @@ pub fn footer(interval: &str, styled: bool) -> String {
     };
     let sep = format!("{} - {}", dim.render(), dim.render_reset());
     format!(
-        "{}{sep}{}",
+        "{}{sep}{}{sep}{}",
         hint("r", &format!("refresh (every {interval})")),
+        hint("tab", "switch view"),
         hint("?", "help")
     )
+}
+
+/// The view switcher shown at the top while watching: both view names, the
+/// active one accented with a section-style bar, the other dim. When unstyled,
+/// the active view is bracketed instead.
+pub fn tabs(view: View, styled: bool) -> String {
+    let names = [(View::Mine, "my PRs"), (View::Reviews, "reviews")];
+    if !styled {
+        return names
+            .iter()
+            .map(|(v, n)| {
+                if *v == view {
+                    format!("[{n}]")
+                } else {
+                    (*n).to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+    }
+    let bar = status::fg(status::LAVENDER).bold();
+    let dim = Style::new().dimmed();
+    names
+        .iter()
+        .map(|(v, n)| {
+            if *v == view {
+                format!("{}\u{258c}{n}{}", bar.render(), bar.render_reset())
+            } else {
+                format!("{}{n}{}", dim.render(), dim.render_reset())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 /// Clear the screen and home the cursor.
@@ -399,14 +467,29 @@ mod tests {
 
     #[test]
     fn footer_is_plain_or_styled_key_hints() {
-        assert_eq!(footer("5m", false), "r refresh (every 5m) - ? help");
+        assert_eq!(
+            footer("5m", false),
+            "r refresh (every 5m) - tab switch view - ? help"
+        );
         let styled = footer("5m", true);
         // Visible text is preserved...
         assert!(styled.contains("refresh (every 5m)"));
+        assert!(styled.contains("switch view"));
         assert!(styled.contains("help"));
         // ...with a bold key accent and a dim label.
         assert!(styled.contains("\x1b[1m"));
         assert!(styled.contains("\x1b[2m"));
+    }
+
+    #[test]
+    fn tabs_marks_the_active_view() {
+        // Plain: the active view is bracketed.
+        assert_eq!(tabs(View::Mine, false), "[my PRs]  reviews");
+        assert_eq!(tabs(View::Reviews, false), "my PRs  [reviews]");
+        // Styled: the active view carries the accent bar.
+        let styled = tabs(View::Reviews, true);
+        assert!(styled.contains("\u{258c}reviews"));
+        assert!(styled.contains("my PRs"));
     }
 
     #[test]

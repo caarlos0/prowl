@@ -48,6 +48,16 @@ pub struct Cli {
     #[arg(long)]
     pub include_pre_releases: bool,
 
+    /// Which view to show first, toggled with Tab while watching: your PRs
+    /// (open, queue, merged, shipments) or your code reviews.
+    #[arg(long, value_enum, default_value_t = View::Mine, value_name = "VIEW")]
+    pub view: View,
+
+    /// In the Reviews view, whose requested reviews to include: only PRs that
+    /// request you directly, or also those requesting a team you belong to.
+    #[arg(long, value_enum, default_value_t = ReviewScope::All, value_name = "SCOPE")]
+    pub review_scope: ReviewScope,
+
     /// Hide the help legend in one-shot/piped output (in the watch view it
     /// starts hidden and is toggled with `?`).
     #[arg(long)]
@@ -74,6 +84,44 @@ pub enum Section {
     Mine,
     Merged,
     Shipments,
+}
+
+/// The two dashboard views, toggled with Tab while watching.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum View {
+    /// Your PRs: open, merge queue, merged, shipments.
+    Mine,
+    /// Code reviews: PRs to review, and merged PRs you reviewed.
+    Reviews,
+}
+
+impl View {
+    /// The other view (for the Tab toggle).
+    pub fn toggle(self) -> View {
+        match self {
+            View::Mine => View::Reviews,
+            View::Reviews => View::Mine,
+        }
+    }
+}
+
+/// Which requested reviews to include in the Reviews view.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ReviewScope {
+    /// Only PRs that request your review directly.
+    Direct,
+    /// PRs that request your review directly or via a team you belong to.
+    All,
+}
+
+impl ReviewScope {
+    /// The GitHub search qualifier for the "requesting my review" search.
+    pub fn qualifier(self) -> &'static str {
+        match self {
+            ReviewScope::Direct => "user-review-requested",
+            ReviewScope::All => "review-requested",
+        }
+    }
 }
 
 impl Cli {

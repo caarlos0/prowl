@@ -15,6 +15,7 @@ pub mod model;
 pub mod prs;
 pub mod queue;
 pub mod render;
+pub mod reviews;
 pub mod status;
 pub mod term;
 pub mod timefmt;
@@ -22,7 +23,7 @@ pub mod timefmt;
 use anyhow::{Context, Result};
 use changes::{Changes, Tracker};
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, View};
 use github::{Client, Repo};
 use std::io::{IsTerminal, Write};
 use unicode_width::UnicodeWidthStr;
@@ -34,21 +35,31 @@ pub(crate) struct Sections {
     queue: Option<Vec<queue::QueueRow>>,
     prs: Option<Vec<prs::PrRow>>,
     commits: Option<commits::CommitStats>,
+    /// Reviews view: open PRs awaiting / under my review.
+    reviews: Option<Vec<reviews::ReviewRow>>,
+    /// Reviews view: merged PRs I reviewed.
+    reviewed_merged: Option<Vec<reviews::ReviewedMergedRow>>,
 }
 
+/// Fetch the sections for the requested views. `want_mine` covers the Mine view
+/// (open PRs, queue, merged, shipments, honoring `--only`); `want_reviews`
+/// covers the Reviews view (PRs to review, reviewed-and-merged). In watch mode
+/// both are fetched so Tab can switch instantly; `--once` fetches just one.
 fn fetch(
     cli: &Cli,
     client: &Client,
     repo: &Repo,
     me: &str,
     default_branch: &str,
+    want_mine: bool,
+    want_reviews: bool,
 ) -> Result<Sections> {
     // Release data powers both the "My Shipments" counts and the merged
     // "RELEASE" column, so fetch it once when either section is shown.
     // Best-effort: a failure (no releases, empty repo, ...) degrades to an
     // "unavailable" shipments line and blank release cells rather than taking
     // down the whole dashboard.
-    let (commit_stats, release_map) = if cli.show_shipments() || cli.show_merged() {
+    let (commit_stats, release_map) = if want_mine && (cli.show_shipments() || cli.show_merged()) {
         commits::fetch(client, repo, me, default_branch, cli.include_pre_releases).ok()
     } else {
         None
@@ -60,29 +71,45 @@ fn fetch(
         )
     });
 
-    let merged = if cli.show_merged() {
+    let merged = if want_mine && cli.show_merged() {
         let since = timefmt::since_date(&cli.merged_window);
         let nodes = model::fetch_merged(client, repo, me, &since, cli.merged_limit)?;
         Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
     } else {
         None
     };
-    let queue = if cli.show_queue() {
+    let queue = if want_mine && cli.show_queue() {
         Some(queue::build_rows(model::fetch_queue(client, repo)?, me))
     } else {
         None
     };
-    let prs = if cli.show_mine() {
+    let prs = if want_mine && cli.show_mine() {
         Some(prs::build_rows(model::fetch_my_prs(client, repo, me)?))
     } else {
         None
     };
-    let commits = cli.show_shipments().then_some(commit_stats);
+    let commits = (want_mine && cli.show_shipments()).then_some(commit_stats);
+
+    // Reviews view: PRs awaiting / under my review, plus merged PRs I reviewed.
+    let (reviews, reviewed_merged) = if want_reviews {
+        let data = model::fetch_reviews(client, repo, me, cli.review_scope.qualifier())?;
+        let open = reviews::build_open_rows(data);
+        let since = timefmt::since_date(&cli.merged_window);
+        let merged_nodes =
+            model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)?;
+        let merged_reviews = reviews::build_merged_rows(merged_nodes, cli.merged_limit);
+        (Some(open), Some(merged_reviews))
+    } else {
+        (None, None)
+    };
+
     Ok(Sections {
         merged,
         queue,
         prs,
         commits,
+        reviews,
+        reviewed_merged,
     })
 }
 
@@ -248,11 +275,76 @@ fn demo_sections() -> Sections {
         ],
     };
 
+    // Reviews-view demo data (shown with `--demo --view reviews`).
+    use status::ReviewState;
+    let rrow = |number, author: &str, title: &str, state, secs| reviews::ReviewRow {
+        number,
+        is_draft: false,
+        title: title.to_string(),
+        author: author.to_string(),
+        url: format!("{base}/pull/{number}"),
+        state,
+        updated_at: Some(ago(secs)),
+    };
+    let reviews = vec![
+        rrow(
+            142,
+            "octocat",
+            "feat(api): paginate the search endpoint",
+            ReviewState::Awaiting,
+            420,
+        ),
+        rrow(
+            139,
+            "hubot",
+            "fix(auth): refresh tokens before expiry",
+            ReviewState::ReReview,
+            1500,
+        ),
+        rrow(
+            133,
+            "dependabot[bot]",
+            "build(deps): bump rustls to 0.24",
+            ReviewState::Updated,
+            5400,
+        ),
+        rrow(
+            130,
+            "octocat",
+            "docs: expand the troubleshooting guide",
+            ReviewState::Reviewed,
+            9000,
+        ),
+    ];
+    let mrow_rev = |number, author: &str, title: &str, secs| reviews::ReviewedMergedRow {
+        number,
+        title: title.to_string(),
+        author: author.to_string(),
+        url: format!("{base}/pull/{number}"),
+        merged_at: Some(ago(secs)),
+    };
+    let reviewed_merged = vec![
+        mrow_rev(
+            126,
+            "hubot",
+            "refactor(store): drop the legacy cache path",
+            64_800,
+        ),
+        mrow_rev(
+            122,
+            "octocat",
+            "test(queue): cover the empty queue",
+            172_800,
+        ),
+    ];
+
     Sections {
         merged: Some(merged),
         queue: Some(queue),
         prs: Some(prs),
         commits: Some(commits),
+        reviews: Some(reviews),
+        reviewed_merged: Some(reviewed_merged),
     }
 }
 
@@ -284,14 +376,30 @@ fn section(
     f.push('\n');
 }
 
-/// Render the section bodies (no screen-clear, no footer): My open PRs,
-/// then Merge Queue, then My merged PRs, then My Shipments. Each PR section
-/// always shows its header (with a count); an empty section follows it with a
-/// dim placeholder one-liner. Rows that changed since the previous refresh (per
-/// `changes`) are flagged with a leading marker. The footer and help legend are
-/// rendered separately (below the body) by `bottom`.
-fn render_body(s: &Sections, cli: &Cli, changes: &Changes, styled: bool) -> String {
+/// Render the body for `view` (no screen-clear, no footer). In watch mode it
+/// leads with the `my PRs / reviews` tab strip, then the active view's sections.
+/// Rows that changed since the previous refresh (per `changes`) are flagged with
+/// a leading marker. The footer and help legend are rendered separately (below
+/// the body) by `bottom`.
+fn render_body(s: &Sections, cli: &Cli, view: View, changes: &Changes, styled: bool) -> String {
     let mut f = String::new();
+    // The tab strip is an interactive affordance, so only while watching (styled
+    // implies a watch TTY); piped/`--once` output goes straight to the sections.
+    if styled {
+        f.push_str(&render::tabs(view, styled));
+        f.push_str("\n\n");
+    }
+    match view {
+        View::Mine => render_mine(&mut f, s, cli, changes, styled),
+        View::Reviews => render_reviews(&mut f, s, cli, styled),
+    }
+    f
+}
+
+/// The Mine view: My open PRs, then Merge Queue, then My merged PRs, then My
+/// Shipments. Each section always shows its header (with a count); an empty
+/// section follows it with a dim placeholder one-liner.
+fn render_mine(f: &mut String, s: &Sections, cli: &Cli, changes: &Changes, styled: bool) {
     let ascii = cli.ascii || !styled;
 
     // Build the section tables first, then cap and align their TITLE columns so
@@ -325,7 +433,7 @@ fn render_body(s: &Sections, cli: &Cli, changes: &Changes, styled: bool) -> Stri
 
     if let Some(rows) = &s.prs {
         section(
-            &mut f,
+            f,
             "My open PRs",
             status::LAVENDER,
             rows.len(),
@@ -337,7 +445,7 @@ fn render_body(s: &Sections, cli: &Cli, changes: &Changes, styled: bool) -> Stri
 
     if let Some(rows) = &s.queue {
         section(
-            &mut f,
+            f,
             "Merge Queue",
             status::BLUE,
             rows.len(),
@@ -349,7 +457,7 @@ fn render_body(s: &Sections, cli: &Cli, changes: &Changes, styled: bool) -> Stri
 
     if let Some(rows) = &s.merged {
         section(
-            &mut f,
+            f,
             "My merged PRs",
             status::MAUVE,
             rows.len(),
@@ -360,22 +468,68 @@ fn render_body(s: &Sections, cli: &Cli, changes: &Changes, styled: bool) -> Stri
     }
 
     if let Some(stats) = &s.commits {
-        render_commits(&mut f, stats, styled);
+        render_commits(f, stats, styled);
         f.push('\n');
     }
-
-    f
 }
 
-/// The help legend (the complete status-glyph + `STATE` reference), shown at
-/// the very bottom. Empty (no leading/trailing blank) when `show_help` is
-/// false; ends with a newline otherwise.
-fn help_block(cli: &Cli, show_help: bool, styled: bool) -> String {
+/// The Reviews view: PRs to review (with a per-row review-state glyph), then
+/// merged PRs I reviewed. Their TITLE columns are aligned together.
+fn render_reviews(f: &mut String, s: &Sections, cli: &Cli, styled: bool) {
+    let ascii = cli.ascii || !styled;
+
+    let mut open_table = s
+        .reviews
+        .as_ref()
+        .filter(|r| !r.is_empty())
+        .map(|rows| reviews::open_to_table(rows, ascii));
+    let mut merged_table = s
+        .reviewed_merged
+        .as_ref()
+        .filter(|r| !r.is_empty())
+        .map(|rows| reviews::merged_to_table(rows, ascii));
+    {
+        let mut tables: Vec<&mut render::Table> = [open_table.as_mut(), merged_table.as_mut()]
+            .into_iter()
+            .flatten()
+            .collect();
+        render::fit_titles(&mut tables, ascii);
+    }
+
+    if let Some(rows) = &s.reviews {
+        section(
+            f,
+            "Reviews",
+            status::LAVENDER,
+            rows.len(),
+            "No PRs to review.",
+            open_table.as_ref(),
+            styled,
+        );
+    }
+
+    if let Some(rows) = &s.reviewed_merged {
+        section(
+            f,
+            "Reviewed & merged",
+            status::MAUVE,
+            rows.len(),
+            "No reviewed PRs merged recently.",
+            merged_table.as_ref(),
+            styled,
+        );
+    }
+}
+
+/// The help legend for `view` (the glyphs that view uses), shown at the very
+/// bottom. Empty (no leading/trailing blank) when `show_help` is false; ends
+/// with a newline otherwise.
+fn help_block(cli: &Cli, view: View, show_help: bool, styled: bool) -> String {
     if !show_help {
         return String::new();
     }
     let ascii = cli.ascii || !styled;
-    render::help(ascii, styled)
+    render::help(view, ascii, styled)
 }
 
 /// Compose the bottom of the frame in order: an optional error line (empty
@@ -541,11 +695,11 @@ pub fn run() -> Result<()> {
             newly_merged: std::collections::HashSet::from([119]),
         };
         let interval = timefmt::eta(cli.interval.dur);
-        let body = render_body(&sections, &cli, &changes, interactive)
+        let body = render_body(&sections, &cli, cli.view, &changes, interactive)
             + &bottom(
                 "",
                 &render::footer(&interval, interactive),
-                &help_block(&cli, !cli.no_help, interactive),
+                &help_block(&cli, cli.view, !cli.no_help, interactive),
             );
         repaint(&body)?;
         return Ok(());
@@ -571,13 +725,28 @@ pub fn run() -> Result<()> {
     let watch = styled;
 
     // The refresh interval is constant, so the key-hint footer that carries it
-    // (`r refresh (every 5m) - ? help`) is built once.
+    // (`r refresh (every 5m) - tab switch view - ? help`) is built once.
     let footer = render::footer(&timefmt::eta(cli.interval.dur), styled);
+
+    // Build a frame from already-fetched data (no new fetch): the active view of
+    // `good` plus the current help/status and the footer. Used for the
+    // cached-start paint and for every `?`/Tab repaint while idling or
+    // mid-refresh, so those stay in lockstep.
+    let idle_frame = |good: &Sections, view: View, show_help: bool, last_status: &str| {
+        render_body(good, &cli, view, &Changes::default(), styled)
+            + &bottom(
+                last_status,
+                &footer,
+                &help_block(&cli, view, show_help, styled),
+            )
+    };
 
     // Change-detection / last-good state, seeded from the cache below so the
     // first refresh can highlight what changed while prowl wasn't running.
     let mut prev: Option<Tracker> = None;
     let mut last_good: Option<Sections> = None;
+    // The active view starts at `--view` (default Mine) and toggles with Tab.
+    let mut view = cli.view;
     // The help legend starts hidden and is toggled live with `?`. `last_status`
     // is the most recent error line (empty unless a refresh failed), reused so a
     // `?` toggle keeps that error on screen.
@@ -600,9 +769,7 @@ pub fn run() -> Result<()> {
         });
         match (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
             Some(c) => {
-                let body = render_body(&c.sections, &cli, &Changes::default(), styled)
-                    + &bottom("", &footer, &help_block(&cli, show_help, styled));
-                repaint(&body)?;
+                repaint(&idle_frame(&c.sections, view, show_help, ""))?;
                 prev = Some(Tracker::build(
                     c.sections.prs.as_deref(),
                     c.sections.merged.as_deref(),
@@ -626,14 +793,23 @@ pub fn run() -> Result<()> {
         .default_branch(&repo)
         .unwrap_or_else(|_| "main".to_string());
 
-    // Single render: --once, or whenever stdout is not a TTY.
+    // Single render: --once, or whenever stdout is not a TTY. Only the selected
+    // view's sections are fetched (you can't Tab in one-shot output).
     if cli.once || !styled {
-        let sections = fetch(&cli, &client, &repo, &me, &default_branch)?;
+        let sections = fetch(
+            &cli,
+            &client,
+            &repo,
+            &me,
+            &default_branch,
+            cli.view == View::Mine,
+            cli.view == View::Reviews,
+        )?;
         if !cli.no_cache {
             cache::save(&repo, &sections);
         }
-        let frame = render_body(&sections, &cli, &Changes::default(), styled)
-            + &bottom("", "", &help_block(&cli, !cli.no_help, styled));
+        let frame = render_body(&sections, &cli, cli.view, &Changes::default(), styled)
+            + &bottom("", "", &help_block(&cli, cli.view, !cli.no_help, styled));
         print!("{frame}");
         std::io::stdout().flush()?;
         return Ok(());
@@ -647,19 +823,21 @@ pub fn run() -> Result<()> {
     let mut armed = false;
     loop {
         // Run the blocking fetch on a worker thread and poll input while it
-        // runs, so `?` still toggles the help legend mid-refresh. Ticks and `r`
-        // are ignored here — a refresh is already in flight.
+        // runs, so `?` (help) and Tab (switch view) stay responsive mid-refresh.
+        // Both views are fetched every refresh so Tab can switch instantly.
+        // Ticks and `r` are ignored here — a refresh is already in flight.
         let result = std::thread::scope(|scope| {
-            let handle = scope.spawn(|| fetch(&cli, &client, &repo, &me, &default_branch));
+            let handle =
+                scope.spawn(|| fetch(&cli, &client, &repo, &me, &default_branch, true, true));
             while !handle.is_finished() {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(60);
-                if let term::Wait::ToggleHelp = term::wait(deadline) {
-                    show_help = !show_help;
-                    if let Some(good) = &last_good {
-                        let body = render_body(good, &cli, &Changes::default(), styled)
-                            + &bottom(&last_status, &footer, &help_block(&cli, show_help, styled));
-                        let _ = repaint(&body);
-                    }
+                match term::wait(deadline) {
+                    term::Wait::ToggleHelp => show_help = !show_help,
+                    term::Wait::SwitchView => view = view.toggle(),
+                    _ => continue,
+                }
+                if let Some(good) = &last_good {
+                    let _ = repaint(&idle_frame(good, view, show_help, &last_status));
                 }
             }
             handle.join().expect("fetch thread panicked")
@@ -671,8 +849,8 @@ pub fn run() -> Result<()> {
                 let bell = changes.any();
 
                 last_status = String::new();
-                let body = render_body(&sections, &cli, &changes, styled)
-                    + &bottom("", &footer, &help_block(&cli, show_help, styled));
+                let body = render_body(&sections, &cli, view, &changes, styled)
+                    + &bottom("", &footer, &help_block(&cli, view, show_help, styled));
                 repaint(&body)?;
 
                 if armed && bell && !cli.no_bell {
@@ -689,8 +867,8 @@ pub fn run() -> Result<()> {
                 last_status = error_trailing(&short_error(&e), styled);
                 let (main, help) = match &last_good {
                     Some(good) => (
-                        render_body(good, &cli, &Changes::default(), styled),
-                        help_block(&cli, show_help, styled),
+                        render_body(good, &cli, view, &Changes::default(), styled),
+                        help_block(&cli, view, show_help, styled),
                     ),
                     None => (String::new(), String::new()),
                 };
@@ -699,20 +877,18 @@ pub fn run() -> Result<()> {
             }
         }
         // Wait for the interval, but let the user act now: `r` forces a refresh
-        // (the worker thread then re-fetches with `?` still live), `?` toggles
-        // the help legend in place; all other keys are discarded.
+        // (the worker thread then re-fetches with `?`/Tab still live), `?`
+        // toggles the help legend in place, Tab switches view in place; all
+        // other keys are discarded.
         let deadline = std::time::Instant::now() + cli.interval.dur;
         loop {
             match term::wait(deadline) {
                 term::Wait::Tick | term::Wait::Refresh => break,
-                term::Wait::ToggleHelp => {
-                    show_help = !show_help;
-                    if let Some(good) = &last_good {
-                        let body = render_body(good, &cli, &Changes::default(), styled)
-                            + &bottom(&last_status, &footer, &help_block(&cli, show_help, styled));
-                        repaint(&body)?;
-                    }
-                }
+                term::Wait::ToggleHelp => show_help = !show_help,
+                term::Wait::SwitchView => view = view.toggle(),
+            }
+            if let Some(good) = &last_good {
+                repaint(&idle_frame(good, view, show_help, &last_status))?;
             }
         }
     }
@@ -730,8 +906,10 @@ mod tests {
             queue: Some(vec![]),
             merged: Some(vec![]),
             commits: None,
+            reviews: None,
+            reviewed_merged: None,
         };
-        let body = render_body(&sections, &cli, &Changes::default(), false);
+        let body = render_body(&sections, &cli, View::Mine, &Changes::default(), false);
 
         // Each section header is present even though it has no rows...
         assert!(body.contains("My open PRs (0)"));
@@ -746,5 +924,23 @@ mod tests {
         after("My open PRs (0)", "No open PRs.");
         after("Merge Queue (0)", "No merge queue.");
         after("My merged PRs (0)", "No recent merged PRs.");
+    }
+
+    #[test]
+    fn reviews_view_renders_its_own_sections() {
+        let cli = Cli::parse_from(["prowl"]);
+        let sections = Sections {
+            prs: None,
+            queue: None,
+            merged: None,
+            commits: None,
+            reviews: Some(vec![]),
+            reviewed_merged: Some(vec![]),
+        };
+        let body = render_body(&sections, &cli, View::Reviews, &Changes::default(), false);
+        // The Reviews view shows its two headers (not the Mine ones).
+        assert!(body.contains("Reviews (0)"));
+        assert!(body.contains("Reviewed & merged (0)"));
+        assert!(!body.contains("My open PRs"));
     }
 }

@@ -11,6 +11,8 @@ pub enum Wait {
     Refresh,
     /// The user pressed `?`: toggle the help (help) legend.
     ToggleHelp,
+    /// The user pressed Tab: switch to the other view.
+    SwitchView,
 }
 
 #[cfg(unix)]
@@ -158,9 +160,9 @@ mod imp {
     }
 
     /// Wait up to `deadline` for the next scheduled refresh, returning early on
-    /// a recognized keypress: `r`/`R` to refresh now, `?` to toggle the help
-    /// legend. Every other keystroke is discarded. Falls back to a plain sleep
-    /// when stdin isn't a quieted terminal.
+    /// a recognized keypress: `r`/`R` to refresh now, Tab to switch view, `?` to
+    /// toggle the help legend. Every other keystroke is discarded. Falls back to
+    /// a plain sleep when stdin isn't a quieted terminal.
     pub fn wait(deadline: Instant) -> Wait {
         let Some((fd, _)) = *SAVED.lock().unwrap() else {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
@@ -198,10 +200,13 @@ mod imp {
                 return Wait::Tick;
             }
             let bytes = &buf[..n as usize];
-            // `r` (refresh) takes precedence over `?` (help toggle) if both were
-            // typed in the same burst; other keys keep us waiting.
+            // `r` (refresh) takes precedence, then Tab (switch view), then `?`
+            // (help toggle) if several were typed in the same burst; other keys
+            // keep us waiting.
             let action = if bytes.iter().any(|&b| b == b'r' || b == b'R') {
                 Wait::Refresh
+            } else if bytes.contains(&b'\t') {
+                Wait::SwitchView
             } else if bytes.contains(&b'?') {
                 Wait::ToggleHelp
             } else {
