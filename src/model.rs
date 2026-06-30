@@ -207,11 +207,16 @@ pub struct MergedNode {
     pub number: i64,
     pub title: String,
     pub url: String,
+    /// PR author; used by the reviewed-and-merged section (the Mine merged
+    /// section ignores it, since those are all the viewer's own PRs).
+    pub author: Option<Login>,
     #[serde(rename = "mergedAt")]
     pub merged_at: Option<String>,
 }
 
-/// The recently-merged query; `first` is the page size (clamped 1..=100).
+/// The recently-merged query; `first` is the page size (clamped 1..=100). Used
+/// for both the "my merged PRs" and "reviewed & merged" sections (only the
+/// search query differs).
 pub fn merged_query(limit: usize) -> String {
     let first = limit.clamp(1, 100);
     format!(
@@ -219,7 +224,7 @@ pub fn merged_query(limit: usize) -> String {
   search(type: ISSUE, first: {first}, query: $q) {{
     nodes {{
       ... on PullRequest {{
-        number title url mergedAt
+        number title url mergedAt author {{ login }}
       }}
     }}
   }}
@@ -248,4 +253,127 @@ pub fn fetch_merged(
     let q = merged_search(repo, me, since);
     let data: MergedData = client.graphql(&merged_query(limit), serde_json::json!({ "q": q }))?;
     Ok(data.search.nodes)
+}
+
+/// The "merged PRs I reviewed" search: merged PRs in the repo that I reviewed,
+/// excluding my own (those live in the Mine view). Same shape as `merged_search`.
+pub fn reviewed_merged_search(repo: &Repo, me: &str, since: &str) -> String {
+    format!(
+        "repo:{}/{} is:pr is:merged reviewed-by:{} -author:{} merged:>={} sort:updated-desc",
+        repo.owner, repo.name, me, me, since
+    )
+}
+
+pub fn fetch_reviewed_merged(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    since: &str,
+    limit: usize,
+) -> Result<Vec<MergedNode>> {
+    let q = reviewed_merged_search(repo, me, since);
+    let data: MergedData = client.graphql(&merged_query(limit), serde_json::json!({ "q": q }))?;
+    Ok(data.search.nodes)
+}
+
+// ----------------------------------------------------------------------------
+// Reviews (open PRs awaiting / under my review)
+// ----------------------------------------------------------------------------
+
+/// Two aliased searches in one request: PRs whose review is requested from me
+/// (`requested`) and PRs I've already reviewed (`reviewed`). A PR can appear in
+/// both (a re-review). Each node carries my own reviews (so we know if/when I
+/// reviewed) and its last commit date (so we can flag "updated since").
+pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!) {
+  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
+}
+fragment rev on PullRequest {
+  number title url isDraft updatedAt
+  author { login }
+  commits(last: 1) { nodes { commit { committedDate } } }
+  reviews(author: $me, first: 20, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) { nodes { submittedAt } }
+}"#;
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewsData {
+    /// PRs requesting my review (directly or via a team, per the scope).
+    pub requested: ReviewSearch,
+    /// PRs I have already reviewed.
+    pub reviewed: ReviewSearch,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewSearch {
+    pub nodes: Vec<ReviewPrNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewPrNode {
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    #[serde(rename = "isDraft")]
+    pub is_draft: bool,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: Option<String>,
+    pub author: Option<Login>,
+    pub commits: ReviewCommits,
+    /// My reviews on this PR (submitted only; the query filters out PENDING).
+    pub reviews: MyReviews,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewCommits {
+    pub nodes: Vec<ReviewCommitNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewCommitNode {
+    pub commit: ReviewCommit,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewCommit {
+    #[serde(rename = "committedDate")]
+    pub committed_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MyReviews {
+    pub nodes: Vec<MyReview>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MyReview {
+    #[serde(rename = "submittedAt")]
+    pub submitted_at: Option<String>,
+}
+
+/// The two review searches: PRs requesting my review and PRs I have reviewed,
+/// both open, in this repo, excluding my own. `requested_qualifier` is
+/// `review-requested` (me + my teams) or `user-review-requested` (only me).
+pub fn reviews_searches(repo: &Repo, me: &str, requested_qualifier: &str) -> (String, String) {
+    let requested = format!(
+        "repo:{}/{} is:pr is:open {}:{} -author:{} archived:false sort:updated-desc",
+        repo.owner, repo.name, requested_qualifier, me, me
+    );
+    let reviewed = format!(
+        "repo:{}/{} is:pr is:open reviewed-by:{} -author:{} archived:false sort:updated-desc",
+        repo.owner, repo.name, me, me
+    );
+    (requested, reviewed)
+}
+
+pub fn fetch_reviews(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    requested_qualifier: &str,
+) -> Result<ReviewsData> {
+    let (requested, reviewed) = reviews_searches(repo, me, requested_qualifier);
+    client.graphql(
+        REVIEWS_QUERY,
+        serde_json::json!({ "me": me, "requested": requested, "reviewed": reviewed }),
+    )
 }

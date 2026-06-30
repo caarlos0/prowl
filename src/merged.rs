@@ -76,6 +76,7 @@ mod tests {
             number,
             title: format!("PR {number}"),
             url: format!("https://x/{number}"),
+            author: None,
             merged_at: Some(merged_at.to_string()),
         }
     }
