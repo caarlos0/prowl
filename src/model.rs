@@ -17,7 +17,13 @@ pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
         nodes {
           position
           enqueuedAt
-          headCommit { committedDate }
+          headCommit {
+            statusCheckRollup {
+              contexts(first: 40) {
+                nodes { ... on CheckRun { startedAt } }
+              }
+            }
+          }
           pullRequest { number title url author { login } }
         }
       }
@@ -52,8 +58,9 @@ pub struct QueueEntryNode {
     /// When the entry joined the queue; drives the WAIT column.
     #[serde(rename = "enqueuedAt")]
     pub enqueued_at: Option<String>,
-    /// The speculative merge commit the queue is building; its `committedDate`
-    /// approximates when the build for this entry started (the BUILD column).
+    /// The speculative merge commit the queue is building; its checks' `startedAt`
+    /// mark when CI actually began (the BUILD column). `None` until the entry has
+    /// a speculative commit.
     #[serde(rename = "headCommit")]
     pub head_commit: Option<QueueCommit>,
     #[serde(rename = "pullRequest")]
@@ -62,8 +69,49 @@ pub struct QueueEntryNode {
 
 #[derive(Debug, Deserialize)]
 pub struct QueueCommit {
-    #[serde(rename = "committedDate")]
-    pub committed_date: Option<String>,
+    /// Flat rollup of every check on the commit. Preferred over `checkSuites`:
+    /// it is a single (cheaper) connection and front-loads the actual check
+    /// runs, whereas the first check suites are often app integrations with no
+    /// started run. `None` when the commit has no checks configured.
+    #[serde(rename = "statusCheckRollup")]
+    pub status_check_rollup: Option<QueueRollup>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueueRollup {
+    pub contexts: QueueContexts,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueueContexts {
+    pub nodes: Vec<QueueContext>,
+}
+
+/// One rollup context. Only a `CheckRun` carries `startedAt`; a legacy
+/// `StatusContext` has no such field and deserializes to `None`.
+#[derive(Debug, Deserialize)]
+pub struct QueueContext {
+    #[serde(rename = "startedAt")]
+    pub started_at: Option<String>,
+}
+
+impl QueueEntryNode {
+    /// The earliest moment any check on the speculative merge commit began
+    /// running (RFC 3339). `None` when nothing has started yet (or there is no
+    /// speculative commit / no checks), which the BUILD column renders as a
+    /// dash. RFC 3339 `...Z` timestamps sort lexically == chronologically, so
+    /// `min` is earliest.
+    pub fn build_started_at(&self) -> Option<String> {
+        self.head_commit
+            .as_ref()?
+            .status_check_rollup
+            .as_ref()?
+            .contexts
+            .nodes
+            .iter()
+            .filter_map(|c| c.started_at.clone())
+            .min()
+    }
 }
 
 #[derive(Debug, Deserialize)]

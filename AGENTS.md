@@ -79,8 +79,12 @@ everything else is testable modules:
   columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
   `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
   `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
-  building (now − `headCommit.committedDate`, or `—` when it isn't building
-  yet). The
+  building — now − the earliest check-run `startedAt` in the commit's
+  `statusCheckRollup.contexts` (`QueueEntryNode::build_started_at`), or `—` until
+  a check actually starts running (still queued, or no speculative commit /
+  checks). The rollup is a single flat connection (cheap, and front-loads the
+  real check runs, unlike `checkSuites` whose first entries are app
+  integrations). The
   merged columns are `# PR TITLE RELEASE MERGED`, where `RELEASE` is the release
   that shipped the PR (a link to its release page) or `—` if not yet shipped,
   looked up from the `commits::ReleaseMap`.
@@ -160,7 +164,8 @@ everything else is testable modules:
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
 - Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`), each
-  entry carrying `enqueuedAt` (WAIT) and `headCommit { committedDate }` (BUILD).
+  entry carrying `enqueuedAt` (WAIT) and `headCommit.statusCheckRollup.contexts`
+  check-run `startedAt` timestamps (BUILD = now − the earliest).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
   `mergeStateStatus`, `mergeQueueEntry`, last commit `checkSuites { conclusion
   checkRuns { totalCount } }`, `updatedAt`.

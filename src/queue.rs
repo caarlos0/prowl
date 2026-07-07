@@ -29,6 +29,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
     let mut rows: Vec<QueueRow> = nodes
         .into_iter()
         .map(|n| {
+            let build_started_at = n.build_started_at();
             let author = n
                 .pull_request
                 .author
@@ -42,7 +43,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
                 title: n.pull_request.title,
                 url: n.pull_request.url,
                 enqueued_at: n.enqueued_at,
-                build_started_at: n.head_commit.and_then(|c| c.committed_date),
+                build_started_at,
             }
         })
         .collect();
@@ -66,7 +67,7 @@ pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
         };
         let author = render::truncate(&r.author, AUTHOR_WIDTH, ascii);
         let wait = timefmt::age_of(r.enqueued_at.as_deref());
-        // An entry that isn't building yet has no head commit; show a dash.
+        // No check has started running yet (queued, or no speculative commit).
         let build = match r.build_started_at.as_deref() {
             Some(ts) => timefmt::age_of(Some(ts)),
             None => "\u{2014}".to_string(),
@@ -92,7 +93,7 @@ pub fn to_table(rows: &[QueueRow], ascii: bool) -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Login, QueuePr};
+    use crate::model::{Login, QueueCommit, QueueContext, QueueContexts, QueuePr, QueueRollup};
 
     fn node(position: i64, number: i64, login: &str) -> QueueEntryNode {
         QueueEntryNode {
@@ -107,6 +108,23 @@ mod tests {
                     login: login.to_string(),
                 }),
             },
+        }
+    }
+
+    /// A speculative merge commit whose rollup checks started at the given times
+    /// (`None` = a context with no start, e.g. a legacy status or a queued run).
+    fn commit(starts: &[Option<&str>]) -> QueueCommit {
+        QueueCommit {
+            status_check_rollup: Some(QueueRollup {
+                contexts: QueueContexts {
+                    nodes: starts
+                        .iter()
+                        .map(|s| QueueContext {
+                            started_at: s.map(str::to_string),
+                        })
+                        .collect(),
+                },
+            }),
         }
     }
 
@@ -132,27 +150,38 @@ mod tests {
     }
 
     #[test]
-    fn carries_enqueued_and_build_times() {
-        use crate::model::QueueCommit;
+    fn build_time_is_earliest_check_run_start() {
         let mut n = node(1, 1, "caarlos0");
         n.enqueued_at = Some("2026-06-19T11:50:00Z".to_string());
-        n.head_commit = Some(QueueCommit {
-            committed_date: Some("2026-06-19T11:55:00Z".to_string()),
-        });
+        // Checks started well after the entry was enqueued; BUILD tracks the
+        // earliest run start, not the enqueue time.
+        n.head_commit = Some(commit(&[
+            Some("2026-06-19T12:05:00Z"),
+            Some("2026-06-19T12:00:00Z"),
+            Some("2026-06-19T12:10:00Z"),
+        ]));
         let rows = build_rows(vec![n], "caarlos0");
         assert_eq!(rows[0].enqueued_at.as_deref(), Some("2026-06-19T11:50:00Z"));
         assert_eq!(
             rows[0].build_started_at.as_deref(),
-            Some("2026-06-19T11:55:00Z")
+            Some("2026-06-19T12:00:00Z")
         );
     }
 
     #[test]
-    fn no_head_commit_leaves_build_time_empty() {
-        // An entry that isn't building yet has no head commit -> no build time.
+    fn build_time_empty_until_a_check_starts() {
+        // No speculative commit yet -> no build time.
         let rows = build_rows(vec![node(1, 1, "caarlos0")], "caarlos0");
         assert!(rows[0].build_started_at.is_none());
-        // ...which renders as a dash in the BUILD column.
+
+        // A commit whose checks are all still queued (no `startedAt`) also has
+        // no build time...
+        let mut queued = node(2, 2, "caarlos0");
+        queued.head_commit = Some(commit(&[None, None]));
+        let rows = build_rows(vec![queued], "caarlos0");
+        assert!(rows[0].build_started_at.is_none());
+
+        // ...and both render as a dash in the BUILD column.
         let out = render::render_table(&to_table(&rows, true), false);
         assert!(out.contains("WAIT"));
         assert!(out.contains("BUILD"));

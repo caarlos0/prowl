@@ -7,7 +7,16 @@
             {
               "position": 2,
               "enqueuedAt": "2026-06-19T11:52:00Z",
-              "headCommit": { "committedDate": "2026-06-19T11:57:00Z" },
+              "headCommit": {
+                "statusCheckRollup": {
+                  "contexts": {
+                    "nodes": [
+                      { "startedAt": "2026-06-19T12:02:00Z" },
+                      { "startedAt": "2026-06-19T11:59:00Z" }
+                    ]
+                  }
+                }
+              },
               "pullRequest": {
                 "number": 102,
                 "title": "feat: add the widget",
@@ -18,7 +27,17 @@
             {
               "position": 1,
               "enqueuedAt": "2026-06-19T11:50:00Z",
-              "headCommit": { "committedDate": "2026-06-19T11:55:00Z" },
+              "headCommit": {
+                "statusCheckRollup": {
+                  "contexts": {
+                    "nodes": [
+                      {},
+                      { "startedAt": "2026-06-19T11:58:00Z" },
+                      { "startedAt": "2026-06-19T12:05:00Z" }
+                    ]
+                  }
+                }
+              },
               "pullRequest": {
                 "number": 101,
                 "title": "fix: flaky integration test",
@@ -29,7 +48,13 @@
             {
               "position": 3,
               "enqueuedAt": "2026-06-19T11:55:00Z",
-              "headCommit": null,
+              "headCommit": {
+                "statusCheckRollup": {
+                  "contexts": {
+                    "nodes": [{}, { "startedAt": null }]
+                  }
+                }
+              },
               "pullRequest": {
                 "number": 103,
                 "title": "chore: bump dependencies",

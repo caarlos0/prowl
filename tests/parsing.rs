@@ -53,10 +53,34 @@ fn queue_styled_render_uses_palette_and_links() {
     assert!(out.contains("38;2;137;180;250"), "expected not-mine blue");
     // URLs are OSC-8 hyperlinks.
     assert!(out.contains("\x1b]8;;https://github.com/octo/repo/pull/101\x1b\\"));
-    // Wait/build columns are present; the entry with no head commit shows a dash.
+    // Wait/build columns are present; the entry whose checks are all still
+    // queued (no `startedAt`) shows a dash.
     assert!(out.contains("WAIT"));
     assert!(out.contains("BUILD"));
     assert!(out.contains('\u{2014}'));
+}
+
+#[test]
+fn queue_build_time_is_earliest_check_run_start() {
+    let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
+    let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
+
+    // #101 (pos 1): earliest check-run start across its suites (ignoring the
+    // empty / null / not-yet-started ones).
+    assert_eq!(rows[0].number, 101);
+    assert_eq!(
+        rows[0].build_started_at.as_deref(),
+        Some("2026-06-19T11:58:00Z")
+    );
+    // #102 (pos 2): the earlier of its two suite starts.
+    assert_eq!(rows[1].number, 102);
+    assert_eq!(
+        rows[1].build_started_at.as_deref(),
+        Some("2026-06-19T11:59:00Z")
+    );
+    // #103 (pos 3): its only run hasn't started -> no build time.
+    assert_eq!(rows[2].number, 103);
+    assert!(rows[2].build_started_at.is_none());
 }
 
 // ---------------------------------------------------------------------------
