@@ -4,6 +4,27 @@
 //! thin binary so the parsing/rendering/change-detection logic can be exercised
 //! by offline, fixture-based tests under `tests/`.
 
+#![warn(clippy::pedantic)]
+// Pedantic lints that are noise for this small binary crate. Its `pub` items
+// exist so the offline fixture tests can reach them, not as a stable public API,
+// so most "document/annotate the public surface" lints don't apply.
+#![allow(clippy::must_use_candidate)] // internal API; blanket #[must_use] is noise
+#![allow(clippy::return_self_not_must_use)] // same, for builder-style methods
+#![allow(clippy::missing_errors_doc)] // anyhow Results; the failure modes are self-evident
+#![allow(clippy::missing_panics_doc)] // the only panics are non-poisonable mutex locks
+#![allow(clippy::struct_excessive_bools)] // clap flag structs are naturally bool-heavy
+#![allow(clippy::struct_field_names)] // serde structs mirror GitHub's JSON field names
+#![allow(clippy::implicit_hasher)] // internal HashSet params use the one default hasher
+#![allow(clippy::needless_pass_by_value)] // by-value serde_json::Value is the ergonomic form
+#![allow(clippy::borrow_as_ptr)] // FFI-boundary `&x` coercions read clearer than ptr::from_ref
+#![allow(clippy::needless_raw_string_hashes)] // `r#"…"#` is the convention for query blocks
+#![allow(clippy::format_push_string)]
+// The few numeric casts are bounded/guarded (poll timeout, non-negative display
+// seconds); the one size-sensitive calc — the duration parser — uses checked_mul.
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::duration_suboptimal_units)] // tests spell durations in seconds on purpose
+
 pub mod auth;
 pub mod cache;
 pub mod changes;
@@ -710,6 +731,7 @@ fn repaint(body: &str) -> std::io::Result<()> {
 }
 
 /// Entry point: authenticate, resolve repo + user, then render once or watch.
+#[allow(clippy::too_many_lines)] // top-level orchestration reads better in one place
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     // Auth can drive the interactive device flow whenever there's a terminal,
@@ -799,19 +821,16 @@ pub fn run() -> Result<()> {
             let _ = std::io::stdout().flush();
             std::process::exit(130);
         });
-        match (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
-            Some(c) => {
-                repaint(&idle_frame(&c.sections, view, show_help, ""))?;
-                prev = Some(Tracker::build(
-                    c.sections.prs.as_deref(),
-                    c.sections.merged.as_deref(),
-                ));
-                last_good = Some(c.sections);
-            }
-            None => {
-                println!("{}{}", render::clear(), render::loading(styled));
-                std::io::stdout().flush()?;
-            }
+        if let Some(c) = (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
+            repaint(&idle_frame(&c.sections, view, show_help, ""))?;
+            prev = Some(Tracker::build(
+                c.sections.prs.as_deref(),
+                c.sections.merged.as_deref(),
+            ));
+            last_good = Some(c.sections);
+        } else {
+            println!("{}{}", render::clear(), render::loading(styled));
+            std::io::stdout().flush()?;
         }
         (Some(CursorGuard), input)
     } else {

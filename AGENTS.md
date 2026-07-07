@@ -196,6 +196,11 @@ cargo fmt --all --check                      # must be formatted
 cargo test                                   # offline, fixture-based
 ```
 
+`lib.rs` opts the crate into `#![warn(clippy::pedantic)]` with a curated block of
+`#![allow(...)]`s (each justified) for the lints that are noise for a small
+bin-plus-test-lib — so `clippy -D warnings` still runs pedantic and new pedantic
+findings fail CI.
+
 The hidden `--demo` flag (synthetic data for screenshots) is behind the
 off-by-default `demo` cargo feature, so release builds don't ship it. Build or
 run it with `cargo run --features demo -- --demo`.
