@@ -16,6 +16,8 @@ pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
       entries(first: 100) {
         nodes {
           position
+          enqueuedAt
+          headCommit { committedDate }
           pullRequest { number title url author { login } }
         }
       }
@@ -47,8 +49,21 @@ pub struct QueueEntries {
 #[derive(Debug, Deserialize)]
 pub struct QueueEntryNode {
     pub position: i64,
+    /// When the entry joined the queue; drives the WAIT column.
+    #[serde(rename = "enqueuedAt")]
+    pub enqueued_at: Option<String>,
+    /// The speculative merge commit the queue is building; its `committedDate`
+    /// approximates when the build for this entry started (the BUILD column).
+    #[serde(rename = "headCommit")]
+    pub head_commit: Option<QueueCommit>,
     #[serde(rename = "pullRequest")]
     pub pull_request: QueuePr,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueueCommit {
+    #[serde(rename = "committedDate")]
+    pub committed_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

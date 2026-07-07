@@ -197,14 +197,19 @@ fn demo_sections() -> Sections {
         ),
     ];
 
-    let qrow = |position, number, author: &str, title: &str, mine| queue::QueueRow {
-        position,
-        number,
-        author: author.to_string(),
-        title: title.to_string(),
-        url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
-        mine,
-    };
+    let qrow =
+        |position, number, author: &str, title: &str, mine, wait_secs, build_secs: Option<i64>| {
+            queue::QueueRow {
+                position,
+                number,
+                author: author.to_string(),
+                title: title.to_string(),
+                url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
+                mine,
+                enqueued_at: Some(ago(wait_secs)),
+                build_started_at: build_secs.map(|s| ago(s)),
+            }
+        };
     let queue = vec![
         qrow(
             1,
@@ -212,6 +217,8 @@ fn demo_sections() -> Sections {
             "caarlos0",
             "feat(queue): inline merge-queue position",
             true,
+            720,
+            Some(480),
         ),
         qrow(
             2,
@@ -219,8 +226,18 @@ fn demo_sections() -> Sections {
             "dependabot[bot]",
             "build(deps): bump anstyle to 1.1",
             false,
+            480,
+            Some(180),
         ),
-        qrow(3, 117, "octocat", "docs: clarify the --only flag", false),
+        qrow(
+            3,
+            117,
+            "octocat",
+            "docs: clarify the --only flag",
+            false,
+            300,
+            None,
+        ),
     ];
 
     let base = "https://github.com/caarlos0/prowl";

@@ -76,7 +76,11 @@ everything else is testable modules:
   loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
   Each row's PR number is the OSC-8 link (no separate URL column); the queue
-  columns are `# PR TITLE AUTHOR` (author truncated to `AUTHOR_WIDTH`). The
+  columns are `# PR TITLE AUTHOR WAIT BUILD` (author truncated to
+  `AUTHOR_WIDTH`), where `WAIT` is how long the entry has been queued (now −
+  `enqueuedAt`) and `BUILD` is how long its speculative merge commit has been
+  building (now − `headCommit.committedDate`, or `—` when it isn't building
+  yet). The
   merged columns are `# PR TITLE RELEASE MERGED`, where `RELEASE` is the release
   that shipped the PR (a link to its release page) or `—` if not yet shipped,
   looked up from the `commits::ReleaseMap`.
@@ -155,7 +159,8 @@ everything else is testable modules:
 
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
-- Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`).
+- Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`), each
+  entry carrying `enqueuedAt` (WAIT) and `headCommit { committedDate }` (BUILD).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
   `mergeStateStatus`, `mergeQueueEntry`, last commit `checkSuites { conclusion
   checkRuns { totalCount } }`, `updatedAt`.

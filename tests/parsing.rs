@@ -53,6 +53,10 @@ fn queue_styled_render_uses_palette_and_links() {
     assert!(out.contains("38;2;137;180;250"), "expected not-mine blue");
     // URLs are OSC-8 hyperlinks.
     assert!(out.contains("\x1b]8;;https://github.com/octo/repo/pull/101\x1b\\"));
+    // Wait/build columns are present; the entry with no head commit shows a dash.
+    assert!(out.contains("WAIT"));
+    assert!(out.contains("BUILD"));
+    assert!(out.contains('\u{2014}'));
 }
 
 // ---------------------------------------------------------------------------
