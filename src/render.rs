@@ -250,7 +250,7 @@ pub fn header(
         let dim = Style::new().dimmed();
         let seg = |s: &str| format!("  {}{}{}", dim.render(), s, dim.render_reset());
         let count_part = count.map(&seg).unwrap_or_default();
-        let note_part = note.map(seg).unwrap_or_default();
+        let note_part = note.map(&seg).unwrap_or_default();
         format!(
             "{}\u{258c} {title}{}{count_part}{note_part}",
             bar.render(),
