@@ -33,8 +33,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
             let author = n
                 .pull_request
                 .author
-                .map(|a| a.login)
-                .unwrap_or_else(|| "ghost".to_string());
+                .map_or_else(|| "ghost".to_string(), |a| a.login);
             QueueRow {
                 position: n.position,
                 number: n.pull_request.number,

@@ -188,7 +188,7 @@ pub fn state_label(state: &str) -> &str {
     }
 }
 
-/// Nerd Font glyph for a `mergeStateStatus` value (FontAwesome range, so it
+/// Nerd Font glyph for a `mergeStateStatus` value (`FontAwesome` range, so it
 /// renders in any Nerd Font). Used on a TTY; `--ascii`/piped output falls back
 /// to [`state_label`].
 pub fn state_glyph(state: &str) -> char {
@@ -277,9 +277,7 @@ pub fn derive_status(
 
 /// The check suites of a PR's last commit (empty if none).
 pub fn last_suites(pr: &PrNode) -> &[CheckSuite] {
-    last_check_suites(pr)
-        .map(|s| s.nodes.as_slice())
-        .unwrap_or(&[])
+    last_check_suites(pr).map_or(&[], |s| s.nodes.as_slice())
 }
 
 /// The last commit's check suites, with the server-reported total.

@@ -90,7 +90,7 @@ pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
                 number: n.number,
                 is_draft: n.is_draft,
                 title: n.title,
-                author: n.author.map(|a| a.login).unwrap_or_else(|| "ghost".into()),
+                author: n.author.map_or_else(|| "ghost".into(), |a| a.login),
                 url: n.url,
                 state,
                 updated_at: n.updated_at,
@@ -154,7 +154,7 @@ pub fn build_merged_rows(nodes: Vec<MergedNode>, limit: usize) -> Vec<ReviewedMe
         .map(|n| ReviewedMergedRow {
             number: n.number,
             title: n.title,
-            author: n.author.map(|a| a.login).unwrap_or_else(|| "ghost".into()),
+            author: n.author.map_or_else(|| "ghost".into(), |a| a.login),
             url: n.url,
             merged_at: n.merged_at,
         })

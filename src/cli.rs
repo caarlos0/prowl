@@ -183,8 +183,7 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     let split = s
         .char_indices()
         .find(|(_, c)| c.is_ascii_alphabetic())
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
+        .map_or(s.len(), |(i, _)| i);
     let (num, unit) = s.split_at(split);
     let n: u64 = num
         .parse()

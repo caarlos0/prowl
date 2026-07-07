@@ -133,7 +133,7 @@ pub fn fit_titles(tables: &mut [&mut Table], ascii: bool) {
     let target = natural.min(budget);
     for (t, idx) in tables.iter_mut().zip(&idxs) {
         if let Some(ti) = idx {
-            for row in t.rows.iter_mut() {
+            for row in &mut t.rows {
                 if let Some(cell) = row.get_mut(*ti) {
                     let mut text = truncate(&cell.text, target, ascii);
                     for _ in 0..target.saturating_sub(w(&text)) {
