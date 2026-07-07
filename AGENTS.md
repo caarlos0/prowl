@@ -69,8 +69,10 @@ everything else is testable modules:
 - `render.rs` — `Cell`/`Table`, width-aware padding (`unicode-width`), OSC-8
   (incl. `link_styled` for clickable PR numbers), `truncate` + `fit_titles`
   (cap/align the shared `TITLE` column so every table lines up and the whole
-  view stays within `MAX_WIDTH` = 120 columns), headers, the `tabs` view-switcher
-  strip, the key-hint footer (`footer`, carrying the refresh interval), help
+  view stays within `MAX_WIDTH` = 120 columns), headers (`header`, with an
+  optional dim count badge and trailing note — the queue ETA), the `tabs`
+  view-switcher strip, the key-hint footer (`footer`, carrying the refresh
+  interval), help
   legend (`help(view, …)` — contextual: status glyphs + every `STATE` value for
   Mine, review glyphs + the merged glyph for Reviews; last at the very bottom),
   loading screen, bell, clear.
@@ -84,7 +86,9 @@ everything else is testable modules:
   a check actually starts running (still queued, or no speculative commit /
   checks). The rollup is a single flat connection (cheap, and front-loads the
   real check runs, unlike `checkSuites` whose first entries are app
-  integrations). The
+  integrations). The `Merge Queue` header also carries the queue-level ETA
+  (`~11m to merge`, from `mergeQueue.nextEntryEstimatedTimeToMerge`) as a dim
+  note. The
   merged columns are `# PR TITLE RELEASE MERGED`, where `RELEASE` is the release
   that shipped the PR (a link to its release page) or `—` if not yet shipped,
   looked up from the `commits::ReleaseMap`.
@@ -165,7 +169,8 @@ everything else is testable modules:
 
 - Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`), each
   entry carrying `enqueuedAt` (WAIT) and `headCommit.statusCheckRollup.contexts`
-  check-run `startedAt` timestamps (BUILD = now − the earliest).
+  check-run `startedAt` timestamps (BUILD = now − the earliest), plus the
+  queue-level `nextEntryEstimatedTimeToMerge` (the header ETA).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
   `mergeStateStatus`, `mergeQueueEntry`, last commit `checkSuites { conclusion
   checkRuns { totalCount } }`, `updatedAt`.

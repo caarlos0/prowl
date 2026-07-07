@@ -33,6 +33,8 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) struct Sections {
     merged: Option<Vec<merged::MergedRow>>,
     queue: Option<Vec<queue::QueueRow>>,
+    /// Queue-level estimate: seconds until a newly added entry would merge.
+    queue_next_eta: Option<i64>,
     prs: Option<Vec<prs::PrRow>>,
     commits: Option<commits::CommitStats>,
     /// Reviews view: open PRs awaiting / under my review.
@@ -78,10 +80,11 @@ fn fetch(
     } else {
         None
     };
-    let queue = if want_mine && cli.show_queue() {
-        Some(queue::build_rows(model::fetch_queue(client, repo)?, me))
+    let (queue, queue_next_eta) = if want_mine && cli.show_queue() {
+        let (nodes, eta) = model::fetch_queue(client, repo)?;
+        (Some(queue::build_rows(nodes, me)), eta)
     } else {
-        None
+        (None, None)
     };
     let prs = if want_mine && cli.show_mine() {
         Some(prs::build_rows(model::fetch_my_prs(client, repo, me)?))
@@ -106,6 +109,7 @@ fn fetch(
     Ok(Sections {
         merged,
         queue,
+        queue_next_eta,
         prs,
         commits,
         reviews,
@@ -358,6 +362,7 @@ fn demo_sections() -> Sections {
     Sections {
         merged: Some(merged),
         queue: Some(queue),
+        queue_next_eta: Some(11 * 60),
         prs: Some(prs),
         commits: Some(commits),
         reviews: Some(reviews),
@@ -370,9 +375,9 @@ fn demo_sections() -> Sections {
 /// empty (empties are filtered out before alignment).
 fn section(
     f: &mut String,
-    title: &str,
-    accent: status::Rgb,
+    (title, accent): (&str, status::Rgb),
     count: usize,
+    note: Option<&str>,
     empty_msg: &str,
     table: Option<&render::Table>,
     styled: bool,
@@ -381,6 +386,7 @@ fn section(
         title,
         accent,
         Some(&count.to_string()),
+        note,
         styled,
     ));
     f.push('\n');
@@ -451,9 +457,9 @@ fn render_mine(f: &mut String, s: &Sections, cli: &Cli, changes: &Changes, style
     if let Some(rows) = &s.prs {
         section(
             f,
-            "My open PRs",
-            status::LAVENDER,
+            ("My open PRs", status::LAVENDER),
             rows.len(),
+            None,
             "No open PRs.",
             prs_table.as_ref(),
             styled,
@@ -461,11 +467,19 @@ fn render_mine(f: &mut String, s: &Sections, cli: &Cli, changes: &Changes, style
     }
 
     if let Some(rows) = &s.queue {
+        // The queue-level ETA (time until a newly added entry would merge) rides
+        // alongside the header as a dim note.
+        let eta = s.queue_next_eta.map(|secs| {
+            format!(
+                "~{} to merge",
+                timefmt::eta(std::time::Duration::from_secs(secs.max(0) as u64))
+            )
+        });
         section(
             f,
-            "Merge Queue",
-            status::BLUE,
+            ("Merge Queue", status::BLUE),
             rows.len(),
+            eta.as_deref(),
             "No merge queue.",
             queue_table.as_ref(),
             styled,
@@ -475,9 +489,9 @@ fn render_mine(f: &mut String, s: &Sections, cli: &Cli, changes: &Changes, style
     if let Some(rows) = &s.merged {
         section(
             f,
-            "My merged PRs",
-            status::MAUVE,
+            ("My merged PRs", status::MAUVE),
             rows.len(),
+            None,
             "No recent merged PRs.",
             merged_table.as_ref(),
             styled,
@@ -516,9 +530,9 @@ fn render_reviews(f: &mut String, s: &Sections, cli: &Cli, styled: bool) {
     if let Some(rows) = &s.reviews {
         section(
             f,
-            "Reviews",
-            status::LAVENDER,
+            ("Reviews", status::LAVENDER),
             rows.len(),
+            None,
             "No PRs to review.",
             open_table.as_ref(),
             styled,
@@ -528,9 +542,9 @@ fn render_reviews(f: &mut String, s: &Sections, cli: &Cli, styled: bool) {
     if let Some(rows) = &s.reviewed_merged {
         section(
             f,
-            "Reviewed & merged",
-            status::MAUVE,
+            ("Reviewed & merged", status::MAUVE),
             rows.len(),
+            None,
             "No reviewed PRs merged recently.",
             merged_table.as_ref(),
             styled,
@@ -600,6 +614,7 @@ fn render_commits(f: &mut String, stats: &commits::CommitStats, styled: bool) {
         "My Shipments",
         status::TEAL,
         Some(&total),
+        None,
         styled,
     ));
     f.push('\n');
@@ -921,6 +936,7 @@ mod tests {
         let sections = Sections {
             prs: Some(vec![]),
             queue: Some(vec![]),
+            queue_next_eta: None,
             merged: Some(vec![]),
             commits: None,
             reviews: None,
@@ -944,11 +960,29 @@ mod tests {
     }
 
     #[test]
+    fn queue_header_shows_next_eta() {
+        let cli = Cli::parse_from(["prowl"]);
+        let sections = Sections {
+            prs: None,
+            queue: Some(vec![]),
+            queue_next_eta: Some(11 * 60),
+            merged: None,
+            commits: None,
+            reviews: None,
+            reviewed_merged: None,
+        };
+        let body = render_body(&sections, &cli, View::Mine, &Changes::default(), false);
+        assert!(body.contains("Merge Queue (0)"));
+        assert!(body.contains("~11m to merge"));
+    }
+
+    #[test]
     fn reviews_view_renders_its_own_sections() {
         let cli = Cli::parse_from(["prowl"]);
         let sections = Sections {
             prs: None,
             queue: None,
+            queue_next_eta: None,
             merged: None,
             commits: None,
             reviews: Some(vec![]),

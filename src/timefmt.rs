@@ -17,9 +17,10 @@ pub fn now_hms() -> String {
     Local::now().format("%H:%M:%S").to_string()
 }
 
-/// Format a duration compactly (used for the footer's refresh interval):
-/// seconds under a minute (`45s`), otherwise minutes (`5m`), with hours rolled
-/// up for long intervals (`2h`, `1h30m`). Pure, so it is trivially testable.
+/// Format a duration compactly (the footer's refresh interval and the
+/// merge-queue ETA): seconds under a minute (`45s`), otherwise minutes (`5m`),
+/// with hours rolled up for long intervals (`2h`, `1h30m`). Pure, so it is
+/// trivially testable.
 pub fn eta(after: Duration) -> String {
     let secs = after.as_secs();
     if secs < 60 {

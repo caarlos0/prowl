@@ -13,6 +13,7 @@ use serde::Deserialize;
 pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     mergeQueue {
+      nextEntryEstimatedTimeToMerge
       entries(first: 100) {
         nodes {
           position
@@ -44,6 +45,9 @@ pub struct QueueRepo {
 
 #[derive(Debug, Deserialize)]
 pub struct MergeQueue {
+    /// Seconds until a newly added entry would merge; shown by the queue header.
+    #[serde(rename = "nextEntryEstimatedTimeToMerge")]
+    pub next_entry_estimated_time_to_merge: Option<i64>,
     pub entries: QueueEntries,
 }
 
@@ -136,13 +140,24 @@ pub fn queue_nodes(data: QueueData) -> Vec<QueueEntryNode> {
         .unwrap_or_default()
 }
 
-/// Fetch merge-queue entries. A null queue or empty queue both yield `[]`.
-pub fn fetch_queue(client: &Client, repo: &Repo) -> Result<Vec<QueueEntryNode>> {
+/// The queue-level estimate (seconds until a newly added entry would merge),
+/// or `None` when there is no queue or the API omits it.
+pub fn queue_next_eta(data: &QueueData) -> Option<i64> {
+    data.repository
+        .as_ref()
+        .and_then(|r| r.merge_queue.as_ref())
+        .and_then(|q| q.next_entry_estimated_time_to_merge)
+}
+
+/// Fetch the merge-queue entries and the queue-level ETA. A null or empty queue
+/// yields `([], None)`.
+pub fn fetch_queue(client: &Client, repo: &Repo) -> Result<(Vec<QueueEntryNode>, Option<i64>)> {
     let data: QueueData = client.graphql(
         QUEUE_QUERY,
         serde_json::json!({ "owner": repo.owner, "name": repo.name }),
     )?;
-    Ok(queue_nodes(data))
+    let eta = queue_next_eta(&data);
+    Ok((queue_nodes(data), eta))
 }
 
 // ----------------------------------------------------------------------------

@@ -236,25 +236,35 @@ pub fn render_cell(cell: &Cell, styled: bool) -> String {
 }
 
 /// A concise, non-figlet section header: a colored bold accent bar, the title,
-/// and an optional dim count badge (already formatted, e.g. `6` or `47+`).
-pub fn header(title: &str, accent: Rgb, count: Option<&str>, styled: bool) -> String {
+/// an optional dim count badge (already formatted, e.g. `6` or `47+`), and an
+/// optional dim trailing note (e.g. the merge-queue ETA).
+pub fn header(
+    title: &str,
+    accent: Rgb,
+    count: Option<&str>,
+    note: Option<&str>,
+    styled: bool,
+) -> String {
     if styled {
         let bar = status::fg(accent).bold();
         let dim = Style::new().dimmed();
-        let count_part = match count {
-            Some(c) => format!("  {}{}{}", dim.render(), c, dim.render_reset()),
-            None => String::new(),
-        };
+        let seg = |s: &str| format!("  {}{}{}", dim.render(), s, dim.render_reset());
+        let count_part = count.map(&seg).unwrap_or_default();
+        let note_part = note.map(seg).unwrap_or_default();
         format!(
-            "{}\u{258c} {title}{}{count_part}",
+            "{}\u{258c} {title}{}{count_part}{note_part}",
             bar.render(),
             bar.render_reset(),
         )
     } else {
-        match count {
+        let mut out = match count {
             Some(c) => format!("{title} ({c})"),
             None => title.to_string(),
+        };
+        if let Some(n) = note {
+            let _ = write!(out, "  {n}");
         }
+        out
     }
 }
 
@@ -288,7 +298,7 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
     let dim = Style::new().dimmed();
     let mut out = String::new();
 
-    out.push_str(&header("Help", status::OVERLAY, None, styled));
+    out.push_str(&header("Help", status::OVERLAY, None, None, styled));
     out.push('\n');
 
     // One "glyph  meaning" line: colored glyph, dim meaning (plain when unstyled).
@@ -464,6 +474,36 @@ pub fn ring_bell() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_appends_optional_note() {
+        // Plain: the note trails the count badge.
+        assert_eq!(
+            header(
+                "Merge Queue",
+                status::BLUE,
+                Some("3"),
+                Some("~11m to merge"),
+                false
+            ),
+            "Merge Queue (3)  ~11m to merge"
+        );
+        // No note behaves exactly as before.
+        assert_eq!(
+            header("Merge Queue", status::BLUE, Some("3"), None, false),
+            "Merge Queue (3)"
+        );
+        // Styled: the note is present and dim.
+        let styled = header(
+            "Merge Queue",
+            status::BLUE,
+            Some("3"),
+            Some("~11m to merge"),
+            true,
+        );
+        assert!(styled.contains("~11m to merge"));
+        assert!(styled.contains("\x1b[2m"));
+    }
 
     #[test]
     fn footer_is_plain_or_styled_key_hints() {

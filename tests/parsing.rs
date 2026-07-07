@@ -43,6 +43,17 @@ fn queue_null_and_empty_both_yield_no_rows() {
 }
 
 #[test]
+fn queue_next_eta_parses_and_defaults_to_none() {
+    let populated: QueueData = parse(include_str!("fixtures/queue_populated.json"));
+    assert_eq!(prowl::model::queue_next_eta(&populated), Some(660));
+    // A null queue or one without the field yields no estimate.
+    let null: QueueData = parse(include_str!("fixtures/queue_null.json"));
+    let empty: QueueData = parse(include_str!("fixtures/queue_empty.json"));
+    assert_eq!(prowl::model::queue_next_eta(&null), None);
+    assert_eq!(prowl::model::queue_next_eta(&empty), None);
+}
+
+#[test]
 fn queue_styled_render_uses_palette_and_links() {
     let data: QueueData = parse(include_str!("fixtures/queue_populated.json"));
     let rows = queue::build_rows(model_queue_nodes(data), "caarlos0");
