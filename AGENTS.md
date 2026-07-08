@@ -15,8 +15,8 @@ output with `--view`):
 - **Reviews**: **Reviews** (open PRs awaiting / under my review, each with a
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 
-Below the active view is a `r refresh (every 5m) - tab switch view - o open - ?
-help` footer (which also shows the refresh interval, and reads `r refreshing`
+Below the active view is a `r refresh (every 5m) - tab switch view - enter open -
+? help` footer (which also shows the refresh interval, and reads `r refreshing`
 while a fetch is in flight) and an optional help legend last
 at the bottom. While watching, the very top shows a `my PRs / reviews` tab strip
 with the active view accented. It rings the terminal bell when one of your PRs
@@ -76,7 +76,7 @@ everything else is testable modules:
   view-switcher strip, the leading-column markers (`change_marker`, and the
   `select_marker` navigation caret that overrides it on the selected row), the
   key-hint footer (`footer`, carrying the refresh
-  interval and an `o open` hint), help
+  interval and an `enter open` hint), help
   legend (`help(view, …)` — a movement-keys line then, contextual: status glyphs
   + every `STATE` value for
   Mine, review glyphs + the merged glyph for Reviews; last at the very bottom),
@@ -125,7 +125,7 @@ everything else is testable modules:
 - `term.rs` — Unix terminal helper: while watching, quiet stdin (drop echo +
   line buffering, keep `ISIG` so signal keys work) and turn the interval wait
   into a poll returning a `Wait` for each recognized key — `r` refresh, `Tab`
-  switch view, `?` help, `o` open, and the movement keys (`j`/`k`, the arrows,
+  switch view, `?` help, Enter open, and the movement keys (`j`/`k`, the arrows,
   `g`/`G`, `Ctrl-D`/`Ctrl-U`); every other key is discarded. `height()`
   (`TIOCGWINSZ`) sizes the half-page jump. Restored on every exit path; a no-op
   on non-Unix.
@@ -163,7 +163,7 @@ everything else is testable modules:
   until the first movement key, then a `select_marker` caret on the chosen row
   (it overrides the change marker, and works in the custom shipments renderer
   too). `j`/`k` (or the arrows) move one row, `g`/`G` jump to first/last,
-  `Ctrl-D`/`Ctrl-U` half a page (sized from `term::height`); `o` opens the
+  `Ctrl-D`/`Ctrl-U` half a page (sized from `term::height`); Enter opens the
   selected row — the PR, or a shipments release / the upcoming compare log — via
   `open::url`. Every row across all sections of the active view is one target
   (`nav::targets`, in render order); switching views drops the cursor and a
@@ -180,9 +180,10 @@ everything else is testable modules:
   review glyphs for Reviews — hidden by default, rendered last at the very
   bottom; `--no-help` only affects one-shot/piped output). The movement keys
   (`j`/`k`, arrows, `g`/`G`, `Ctrl-D`/`Ctrl-U`) drive the selection cursor and
-  `o` opens it. The only persistent
+  Enter opens it. The only persistent
   bottom line is the footer
-  (`r refresh (every 5m) - tab switch view - o open - ? help`), which carries the
+  (`r refresh (every 5m) - tab switch view - enter open - ? help`), which carries
+  the
   refresh
   interval; a failed refresh adds a dim `error: …` line above it. While a fetch
   is in flight the footer reads `r refreshing` with the `r` glyph dimmed and `r`

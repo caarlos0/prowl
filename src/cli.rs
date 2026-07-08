@@ -13,7 +13,7 @@ Keys (while watching):
   j / k            move the selection (also Down / Up arrows)
   g / G            jump to the first / last row
   Ctrl-D / Ctrl-U  move the selection half a page
-  o                open the selected PR or release in your browser
+  Enter            open the selected PR or release in your browser
   r                refresh now
   Tab              switch view (your PRs / your reviews)
   ?                toggle the help legend

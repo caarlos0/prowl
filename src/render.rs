@@ -312,7 +312,7 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
     // Navigation keys — the footer only lists the action keys, so document the
     // movement cursor here.
     let sep = if ascii { " | " } else { "  \u{b7}  " };
-    let keys = format!("j/k move{sep}g/G first/last{sep}^D/^U half page{sep}o open");
+    let keys = format!("j/k move{sep}g/G first/last{sep}^D/^U half page{sep}enter open");
     if styled {
         let _ = writeln!(out, "  {}{keys}{}", dim.render(), dim.render_reset());
     } else {
@@ -408,7 +408,7 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
 }
 
 /// The watch-mode key hints shown at the very bottom, with the refresh interval
-/// folded into the refresh hint: `r refresh (every 5m) - tab switch view - o
+/// folded into the refresh hint: `r refresh (every 5m) - tab switch view - enter
 /// open - ? help`. While a refresh is in flight the first hint becomes `r
 /// refreshing` (the interval is dropped and the `r` glyph is dimmed, since `r`
 /// is inert until the fetch finishes). Each key glyph is a bold muted accent,
@@ -420,7 +420,7 @@ pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
         format!("refresh (every {interval})")
     };
     if !styled {
-        return format!("r {refresh} - tab switch view - o open - ? help");
+        return format!("r {refresh} - tab switch view - enter open - ? help");
     }
     let key = status::fg(status::OVERLAY).bold();
     let dim = Style::new().dimmed();
@@ -442,7 +442,7 @@ pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
         "{}{sep}{}{sep}{}{sep}{}",
         hint(r_style, "r", &refresh),
         hint(key, "tab", "switch view"),
-        hint(key, "o", "open"),
+        hint(key, "enter", "open"),
         hint(key, "?", "help")
     )
 }
@@ -539,7 +539,7 @@ mod tests {
     fn footer_is_plain_or_styled_key_hints() {
         assert_eq!(
             footer("5m", false, false),
-            "r refresh (every 5m) - tab switch view - o open - ? help"
+            "r refresh (every 5m) - tab switch view - enter open - ? help"
         );
         let styled = footer("5m", false, true);
         // Visible text is preserved...
@@ -558,7 +558,7 @@ mod tests {
         // other hints are untouched.
         assert_eq!(
             footer("5m", true, false),
-            "r refreshing - tab switch view - o open - ? help"
+            "r refreshing - tab switch view - enter open - ? help"
         );
         let styled = footer("5m", true, true);
         assert!(styled.contains("refreshing"));

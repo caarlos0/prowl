@@ -26,7 +26,7 @@ pub enum Wait {
     HalfUp,
     /// Ctrl-D: move the selection down half a page.
     HalfDown,
-    /// `o`/`O`: open the selected row in the browser.
+    /// `Enter`: open the selected row in the browser.
     Open,
 }
 
@@ -175,8 +175,8 @@ mod imp {
     }
 
     /// Wait up to `deadline` for the next scheduled refresh, returning early on
-    /// a recognized keypress: `r`/`R` refresh, Tab switch view, `?` help,
-    /// `o`/`O` open, and the movement keys (`j`/`k`/`g`/`G`, the arrows, and
+    /// a recognized keypress: `r`/`R` refresh, Tab switch view, `?` help, Enter
+    /// open, and the movement keys (`j`/`k`/`g`/`G`, the arrows, and
     /// Ctrl-D/Ctrl-U for half a page). Every other keystroke is discarded. Falls
     /// back to a plain sleep when stdin isn't a quieted terminal.
     pub fn wait(deadline: Instant) -> Wait {
@@ -226,12 +226,12 @@ mod imp {
 
     /// Map a burst of input bytes to the highest-priority recognized action, if
     /// any. Action keys (open/refresh/switch/help) win over movement so a stray
-    /// arrow in the same read can't shadow them; arrows are the 3-byte escape
-    /// sequences `ESC [ A` / `ESC [ B`.
+    /// arrow in the same read can't shadow them. Enter arrives as CR or (after
+    /// ICRNL) LF; arrows are the 3-byte escape sequences `ESC [ A` / `ESC [ B`.
     fn classify(bytes: &[u8]) -> Option<Wait> {
         let has = |b: u8| bytes.contains(&b);
         let seq = |s: &[u8]| bytes.windows(s.len()).any(|w| w == s);
-        if has(b'o') || has(b'O') {
+        if has(b'\r') || has(b'\n') {
             Some(Wait::Open)
         } else if has(b'r') || has(b'R') {
             Some(Wait::Refresh)
@@ -266,6 +266,37 @@ mod imp {
         let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
         let ok = unsafe { libc::ioctl(stdout.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) } == 0;
         (ok && ws.ws_row > 0).then_some(ws.ws_row)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Wait, classify};
+
+        #[test]
+        fn classify_maps_keys_to_actions() {
+            // Enter (CR, or LF after ICRNL) opens; `o` no longer does.
+            assert_eq!(classify(b"\r"), Some(Wait::Open));
+            assert_eq!(classify(b"\n"), Some(Wait::Open));
+            assert_eq!(classify(b"o"), None);
+            assert_eq!(classify(b"O"), None);
+
+            assert_eq!(classify(b"r"), Some(Wait::Refresh));
+            assert_eq!(classify(b"\t"), Some(Wait::SwitchView));
+            assert_eq!(classify(b"?"), Some(Wait::ToggleHelp));
+            assert_eq!(classify(b"g"), Some(Wait::Top));
+            assert_eq!(classify(b"G"), Some(Wait::Bottom));
+            assert_eq!(classify(b"\x04"), Some(Wait::HalfDown)); // Ctrl-D
+            assert_eq!(classify(b"\x15"), Some(Wait::HalfUp)); // Ctrl-U
+
+            // Movement: letters and the arrow escape sequences.
+            assert_eq!(classify(b"k"), Some(Wait::Up));
+            assert_eq!(classify(b"j"), Some(Wait::Down));
+            assert_eq!(classify(b"\x1b[A"), Some(Wait::Up));
+            assert_eq!(classify(b"\x1b[B"), Some(Wait::Down));
+
+            // Unrecognized keys are ignored.
+            assert_eq!(classify(b"x"), None);
+        }
     }
 }
 
