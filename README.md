@@ -56,9 +56,9 @@ prowl --once              # render once and exit
 
 While watching, press `r` to refresh now, `Tab` to switch between your PRs and
 your reviews, `?` to toggle the help legend, and `Ctrl-C` to quit. A footer at
-the bottom (`r refresh (every 5m) - tab switch view - enter open - ? help`) shows
-the keys and the refresh interval. While a refresh is in flight the hint reads
-`r refreshing` and `r` presses are ignored until it finishes.
+the bottom (`r refresh (every 5m) - tab switch view - enter open - / search - ?
+help`) shows the keys and the refresh interval. While a refresh is in flight the
+hint reads `r refreshing` and `r` presses are ignored until it finishes.
 The legend is contextual to the active view: status glyphs and `STATE` values
 for your PRs, review glyphs for your reviews.
 
@@ -66,6 +66,10 @@ Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 `↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a
 page; press `Enter` to open the highlighted PR (or release) in your browser. The
 cursor only appears once you start moving it.
+
+Press `/` to search: type to filter the rows live by number, title, author, or
+release tag; `Enter` applies the filter and drops you back to the list (so the
+cursor and `Enter` work on the matches), and `Esc` clears it.
 
 Run `prowl --help` for all flags (interval, `--only`, `--view`,
 `--review-scope`, merged window, etc.) and the full watch-mode key list.

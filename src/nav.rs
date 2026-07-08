@@ -4,42 +4,156 @@
 
 use crate::Sections;
 use crate::cli::View;
+use crate::commits::CommitStats;
+use crate::merged::MergedRow;
+use crate::prs::PrRow;
+use crate::queue::QueueRow;
+use crate::reviews::{ReviewRow, ReviewedMergedRow};
 use crate::term::Wait;
 
-/// The open URL of every navigable row in `view`, in the exact top-to-bottom
-/// order the dashboard renders them, so a selection index lines up with the
-/// rendered rows. Rows without a URL (an "upcoming" shipments row with no
-/// commits) are skipped, matching the caret placement in `render`.
-pub(crate) fn targets(view: View, s: &Sections) -> Vec<&str> {
+/// A row the search can match (its `haystack`) and the cursor can open (`url`).
+trait Searchable {
+    /// PR number, title, and (where present) author or release tag, joined for a
+    /// single case-insensitive substring test.
+    fn haystack(&self) -> String;
+    fn url(&self) -> &str;
+}
+
+impl Searchable for PrRow {
+    fn haystack(&self) -> String {
+        format!("#{} {}", self.number, self.title)
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+impl Searchable for QueueRow {
+    fn haystack(&self) -> String {
+        format!("#{} {} {}", self.number, self.title, self.author)
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+impl Searchable for MergedRow {
+    fn haystack(&self) -> String {
+        let tag = self.release.as_ref().map_or("", |x| x.tag.as_str());
+        format!("#{} {} {}", self.number, self.title, tag)
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+impl Searchable for ReviewRow {
+    fn haystack(&self) -> String {
+        format!("#{} {} {}", self.number, self.title, self.author)
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+impl Searchable for ReviewedMergedRow {
+    fn haystack(&self) -> String {
+        format!("#{} {} {}", self.number, self.title, self.author)
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+/// Whether `hay` matches the (already-lowercased) query; an empty query matches
+/// everything.
+fn hit(hay: &str, query_lower: &str) -> bool {
+    query_lower.is_empty() || hay.to_lowercase().contains(query_lower)
+}
+
+/// Push, in order, the URLs of the rows in `rows` (if present) that match the
+/// already-lowercased `query`.
+fn push_matches<'a, T: Searchable>(urls: &mut Vec<&'a str>, rows: Option<&'a [T]>, query: &str) {
+    if let Some(rows) = rows {
+        urls.extend(
+            rows.iter()
+                .filter(|r| hit(&r.haystack(), query))
+                .map(Searchable::url),
+        );
+    }
+}
+
+/// The open URL of every navigable row in `view` that matches `query`, in the
+/// exact top-to-bottom order the dashboard renders them, so a selection index
+/// lines up with the rendered (and identically filtered) rows. Rows without a
+/// URL (an "upcoming" shipments row with no commits) are skipped. An empty
+/// `query` yields every row.
+pub(crate) fn targets<'a>(view: View, s: &'a Sections, query: &str) -> Vec<&'a str> {
+    let q = query.to_lowercase();
     let mut urls: Vec<&str> = Vec::new();
     match view {
         View::Mine => {
-            if let Some(rows) = &s.prs {
-                urls.extend(rows.iter().map(|r| r.url.as_str()));
-            }
-            if let Some(rows) = &s.queue {
-                urls.extend(rows.iter().map(|r| r.url.as_str()));
-            }
-            if let Some(rows) = &s.merged {
-                urls.extend(rows.iter().map(|r| r.url.as_str()));
-            }
+            push_matches(&mut urls, s.prs.as_deref(), &q);
+            push_matches(&mut urls, s.queue.as_deref(), &q);
+            push_matches(&mut urls, s.merged.as_deref(), &q);
             if let Some(stats) = &s.commits
                 && stats.available
             {
-                urls.extend(stats.upcoming.iter().map(|b| b.url.as_str()));
-                urls.extend(stats.releases.iter().map(|r| r.bucket.url.as_str()));
+                if let Some(b) = &stats.upcoming
+                    && hit("upcoming", &q)
+                {
+                    urls.push(b.url.as_str());
+                }
+                urls.extend(
+                    stats
+                        .releases
+                        .iter()
+                        .filter(|r| hit(&r.tag, &q))
+                        .map(|r| r.bucket.url.as_str()),
+                );
             }
         }
         View::Reviews => {
-            if let Some(rows) = &s.reviews {
-                urls.extend(rows.iter().map(|r| r.url.as_str()));
-            }
-            if let Some(rows) = &s.reviewed_merged {
-                urls.extend(rows.iter().map(|r| r.url.as_str()));
-            }
+            push_matches(&mut urls, s.reviews.as_deref(), &q);
+            push_matches(&mut urls, s.reviewed_merged.as_deref(), &q);
         }
     }
     urls
+}
+
+/// A copy of `s` keeping only the rows that match `query` (every section, both
+/// views), for rendering the filtered dashboard. Uses the same per-row haystack
+/// as `targets`, so the rendered rows and the navigable targets stay in lockstep.
+pub(crate) fn filter(s: &Sections, query: &str) -> Sections {
+    let q = query.to_lowercase();
+    Sections {
+        prs: s.prs.as_deref().map(|r| matching(r, &q)),
+        queue: s.queue.as_deref().map(|r| matching(r, &q)),
+        queue_next_eta: s.queue_next_eta,
+        merged: s.merged.as_deref().map(|r| matching(r, &q)),
+        commits: s.commits.as_ref().map(|c| filter_commits(c, &q)),
+        reviews: s.reviews.as_deref().map(|r| matching(r, &q)),
+        reviewed_merged: s.reviewed_merged.as_deref().map(|r| matching(r, &q)),
+    }
+}
+
+/// Clone the rows whose haystack matches the already-lowercased `query`.
+fn matching<T: Searchable + Clone>(rows: &[T], query: &str) -> Vec<T> {
+    retain(rows, |x| hit(&x.haystack(), query))
+}
+
+/// Clone the elements of `rows` that satisfy `keep`.
+fn retain<T: Clone>(rows: &[T], keep: impl Fn(&T) -> bool) -> Vec<T> {
+    rows.iter().filter(|x| keep(x)).cloned().collect()
+}
+
+/// Filter the shipments: releases by tag, the "upcoming" bucket by the literal
+/// "upcoming" (so it drops out of a tag search).
+fn filter_commits(stats: &CommitStats, query_lower: &str) -> CommitStats {
+    CommitStats {
+        available: stats.available,
+        upcoming: stats
+            .upcoming
+            .clone()
+            .filter(|_| hit("upcoming", query_lower)),
+        releases: retain(&stats.releases, |r| hit(&r.tag, query_lower)),
+    }
 }
 
 /// The new selection after a movement key against a `len`-row list (`half` is
@@ -158,7 +272,7 @@ mod tests {
             }],
         });
         assert_eq!(
-            targets(View::Mine, &s),
+            targets(View::Mine, &s, ""),
             vec![
                 "https://pr/1",
                 "https://pr/2",
@@ -180,7 +294,7 @@ mod tests {
             upcoming: None,
             releases: vec![],
         });
-        assert_eq!(targets(View::Mine, &s), vec!["https://pr/1"]);
+        assert_eq!(targets(View::Mine, &s, ""), vec!["https://pr/1"]);
     }
 
     #[test]
@@ -203,9 +317,48 @@ mod tests {
             merged_at: None,
         }]);
         assert_eq!(
-            targets(View::Reviews, &s),
+            targets(View::Reviews, &s, ""),
             vec!["https://rev/1", "https://revm/2"]
         );
+    }
+
+    #[test]
+    fn query_filters_targets_by_number_title_author_and_tag() {
+        let mut s = empty();
+        s.prs = Some(vec![pr(1), pr(2)]); // titles "pr 1" / "pr 2"
+        s.queue = Some(vec![queued(3)]); // author "me"
+        s.merged = Some(vec![merged(4)]);
+        s.commits = Some(CommitStats {
+            available: true,
+            upcoming: Some(bucket("https://up")),
+            releases: vec![Release {
+                tag: "v1.5.0".into(),
+                bucket: bucket("https://rel/v1"),
+                published_at: None,
+            }],
+        });
+        // Number substring hits the matching PR only.
+        assert_eq!(targets(View::Mine, &s, "#2"), vec!["https://pr/2"]);
+        // Author (case-insensitive) hits the queue row.
+        assert_eq!(targets(View::Mine, &s, "ME"), vec!["https://q/3"]);
+        // Release tag hits the release; "upcoming" hits the upcoming bucket.
+        assert_eq!(targets(View::Mine, &s, "v1.5"), vec!["https://rel/v1"]);
+        assert_eq!(targets(View::Mine, &s, "upcoming"), vec!["https://up"]);
+        // No match -> empty.
+        assert!(targets(View::Mine, &s, "zzz").is_empty());
+    }
+
+    #[test]
+    fn filter_keeps_matching_rows_in_lockstep_with_targets() {
+        let mut s = empty();
+        s.prs = Some(vec![pr(1), pr(2)]);
+        s.merged = Some(vec![merged(4)]);
+        let f = filter(&s, "#2");
+        assert_eq!(f.prs.as_ref().unwrap().len(), 1);
+        assert_eq!(f.prs.as_ref().unwrap()[0].number, 2);
+        assert!(f.merged.as_ref().unwrap().is_empty());
+        // The filtered sections' targets equal the query-filtered targets.
+        assert_eq!(targets(View::Mine, &f, ""), targets(View::Mine, &s, "#2"));
     }
 
     #[test]

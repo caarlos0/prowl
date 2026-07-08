@@ -14,6 +14,8 @@ Keys (while watching):
   g / G            jump to the first / last row
   Ctrl-D / Ctrl-U  move the selection half a page
   Enter            open the selected PR or release in your browser
+  /                filter by number / title / author / release tag
+  Esc              clear the filter
   r                refresh now
   Tab              switch view (your PRs / your reviews)
   ?                toggle the help legend

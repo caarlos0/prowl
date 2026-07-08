@@ -466,12 +466,16 @@ struct Ui {
     view: View,
     /// Whether the `?` help legend is shown (starts hidden).
     show_help: bool,
-    /// Navigation cursor into the active view's rows — lazy (`None` until the
-    /// user moves it), reset when switching views, clamped when a refresh shrinks
-    /// the list.
+    /// Navigation cursor into the active view's (filtered) rows — lazy (`None`
+    /// until the user moves it), reset when switching views or changing the
+    /// search, clamped when a refresh shrinks the list.
     selected: Option<usize>,
     /// The trailing status line, empty unless a refresh or an open failed.
     last_status: String,
+    /// The active search query; empty means no filter is applied.
+    search: String,
+    /// Whether the search prompt is open and capturing text.
+    searching: bool,
 }
 
 /// What the watch loop should do after a keypress.
@@ -485,9 +489,9 @@ enum Act {
 }
 
 impl Ui {
-    /// Classify a keypress into the loop's next `Act`, applying its state change
-    /// (help, view switch, `o` open, or a movement). Shared by the idle wait and
-    /// the mid-fetch poll so both react to keys identically.
+    /// Classify a normal-mode keypress into the loop's next `Act`, applying its
+    /// state change (help, view switch, search, open, movement). Shared by the
+    /// idle wait and the mid-fetch poll so both react to keys identically.
     fn on_key(&mut self, action: term::Wait, last_good: Option<&Sections>, styled: bool) -> Act {
         match action {
             term::Wait::Tick | term::Wait::Refresh => Act::Refresh,
@@ -501,6 +505,20 @@ impl Ui {
                 self.selected = None;
                 Act::Repaint
             }
+            term::Wait::Search => {
+                self.searching = true;
+                Act::Repaint
+            }
+            term::Wait::Cancel => {
+                // Esc clears an applied filter; otherwise it's a no-op.
+                if self.search.is_empty() {
+                    Act::Idle
+                } else {
+                    self.search.clear();
+                    self.selected = None;
+                    Act::Repaint
+                }
+            }
             term::Wait::Open => {
                 if self.open_selected(last_good, styled) {
                     Act::Repaint
@@ -509,7 +527,7 @@ impl Ui {
                 }
             }
             _ => {
-                let len = last_good.map_or(0, |s| nav::targets(self.view, s).len());
+                let len = last_good.map_or(0, |s| nav::targets(self.view, s, &self.search).len());
                 let half = term::height().map_or(10, |h| usize::from(h / 2).max(1));
                 let next = nav::moved(action, self.selected, len, half);
                 if next == self.selected {
@@ -522,6 +540,34 @@ impl Ui {
         }
     }
 
+    /// Apply a search-prompt keystroke while the prompt is open. Typing filters
+    /// live (resetting the cursor), Enter applies the filter and closes the
+    /// prompt, Esc clears the filter and closes it.
+    fn on_search_key(&mut self, key: term::SearchKey) -> Act {
+        match key {
+            term::SearchKey::Tick => Act::Refresh,
+            term::SearchKey::Char(c) => {
+                self.search.push(c);
+                self.selected = None;
+                Act::Repaint
+            }
+            term::SearchKey::Backspace => {
+                self.search.pop();
+                self.selected = None;
+                Act::Repaint
+            }
+            term::SearchKey::Enter => {
+                self.searching = false;
+                Act::Repaint
+            }
+            term::SearchKey::Esc => {
+                self.search.clear();
+                self.searching = false;
+                Act::Repaint
+            }
+        }
+    }
+
     /// Open the selected row's URL in the browser. Returns whether the frame
     /// should be repainted — only when opening failed (a dim error line is set);
     /// a no-op (no selection / no data / success) leaves the screen as is.
@@ -530,7 +576,10 @@ impl Ui {
             return false;
         };
         let Some(good) = last_good else { return false };
-        let Some(url) = nav::targets(self.view, good).get(sel).copied() else {
+        let Some(url) = nav::targets(self.view, good, &self.search)
+            .get(sel)
+            .copied()
+        else {
             return false;
         };
         if let Err(e) = open::url(url) {
@@ -538,6 +587,29 @@ impl Ui {
             return true;
         }
         false
+    }
+}
+
+/// Wait for input (or the deadline) and apply it, returning what the loop should
+/// do. Reads search-prompt text when the prompt is open, else normal-mode keys.
+fn poll(
+    ui: &mut Ui,
+    deadline: std::time::Instant,
+    last_good: Option<&Sections>,
+    styled: bool,
+) -> Act {
+    if ui.searching {
+        let mut act = Act::Idle;
+        for key in term::read_search(deadline) {
+            match ui.on_search_key(key) {
+                Act::Refresh => return Act::Refresh,
+                Act::Repaint => act = Act::Repaint,
+                Act::Idle => {}
+            }
+        }
+        act
+    } else {
+        ui.on_key(term::wait(deadline), last_good, styled)
     }
 }
 
@@ -723,14 +795,14 @@ fn help_block(cli: &Cli, view: View, show_help: bool, styled: bool) -> String {
     render::help(view, ascii, styled)
 }
 
-/// Compose the bottom of the frame in order: an optional error line (empty
-/// unless a refresh failed), then (watch only) the `r refresh (every 5m) - ?
-/// help` footer, then the help legend last. Any part may be empty to omit it;
-/// present parts are separated by a single blank line. The render body already
-/// ends with a blank line, so the first part is not prefixed with one.
-fn bottom(status: &str, footer: &str, help: &str) -> String {
+/// Compose the bottom of the frame in order: the search prompt (empty unless a
+/// search is active), an error line (empty unless a refresh failed), then (watch
+/// only) the key-hint footer, then the help legend last. Any part may be empty
+/// to omit it; present parts are separated by a single blank line. The render
+/// body already ends with a blank line, so the first part is not prefixed.
+fn bottom(search: &str, status: &str, footer: &str, help: &str) -> String {
     let mut out = String::new();
-    for part in [status, footer, help] {
+    for part in [search, status, footer, help] {
         if part.is_empty() {
             continue;
         }
@@ -743,6 +815,27 @@ fn bottom(status: &str, footer: &str, help: &str) -> String {
         }
     }
     out
+}
+
+/// The sections to render for `ui`: `good` filtered by the active search, or
+/// `good` itself when there's no query. `buf` owns the filtered copy if one is
+/// made, so the returned reference stays valid for the caller.
+fn shown<'a>(good: &'a Sections, ui: &Ui, buf: &'a mut Option<Sections>) -> &'a Sections {
+    if ui.search.is_empty() {
+        good
+    } else {
+        buf.insert(nav::filter(good, &ui.search))
+    }
+}
+
+/// The search prompt line for `ui` (empty when no search is active). `shown` is
+/// the already-filtered sections, so its target count is the match count.
+fn search_line(ui: &Ui, shown: &Sections, styled: bool) -> String {
+    if ui.search.is_empty() && !ui.searching {
+        return String::new();
+    }
+    let matches = nav::targets(ui.view, shown, "").len();
+    render::search_prompt(&ui.search, ui.searching, matches, styled)
 }
 
 /// Render the "My Shipments" section: my commit counts for the next
@@ -912,6 +1005,7 @@ pub fn run() -> Result<()> {
         let body = render_body(&sections, &cli, cli.view, &changes, interactive, None)
             + &bottom(
                 "",
+                "",
                 &render::footer(&interval, false, interactive),
                 &help_block(&cli, cli.view, !cli.no_help, interactive),
             );
@@ -952,14 +1046,17 @@ pub fn run() -> Result<()> {
     // Used for the cached-start paint and every key repaint while idling or
     // mid-refresh, so those stay in lockstep.
     let idle_frame = |good: &Sections, ui: &Ui, footer: &str| {
+        let mut buf = None;
+        let shown = shown(good, ui, &mut buf);
         render_body(
-            good,
+            shown,
             &cli,
             ui.view,
             &Changes::default(),
             styled,
             ui.selected,
         ) + &bottom(
+            &search_line(ui, shown, styled),
             &ui.last_status,
             footer,
             &help_block(&cli, ui.view, ui.show_help, styled),
@@ -977,6 +1074,8 @@ pub fn run() -> Result<()> {
         show_help: false,
         selected: None,
         last_status: String::new(),
+        search: String::new(),
+        searching: false,
     };
 
     // In watch mode, hide the cursor and quiet stdin (no echo / no line
@@ -1032,7 +1131,12 @@ pub fn run() -> Result<()> {
             cache::save(&repo, &sections);
         }
         let frame = render_body(&sections, &cli, cli.view, &Changes::default(), styled, None)
-            + &bottom("", "", &help_block(&cli, cli.view, !cli.no_help, styled));
+            + &bottom(
+                "",
+                "",
+                "",
+                &help_block(&cli, cli.view, !cli.no_help, styled),
+            );
         print!("{frame}");
         std::io::stdout().flush()?;
         return Ok(());
@@ -1066,7 +1170,7 @@ pub fn run() -> Result<()> {
                 scope.spawn(|| fetch(&cli, &client, &repo, &me, &default_branch, true, true));
             while !handle.is_finished() {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(60);
-                if let Act::Repaint = ui.on_key(term::wait(deadline), last_good.as_ref(), styled) {
+                if let Act::Repaint = poll(&mut ui, deadline, last_good.as_ref(), styled) {
                     paint_refreshing(&ui);
                 }
             }
@@ -1079,11 +1183,17 @@ pub fn run() -> Result<()> {
                 let bell = changes.any();
 
                 ui.last_status = String::new();
-                // The refreshed list may be shorter than before; keep the cursor
-                // in range (or drop it if the view emptied).
-                ui.selected = nav::clamp(ui.selected, nav::targets(ui.view, &sections).len());
-                let body = render_body(&sections, &cli, ui.view, &changes, styled, ui.selected)
+                // The refreshed (and filtered) list may be shorter than before;
+                // keep the cursor in range (or drop it if it emptied).
+                ui.selected = nav::clamp(
+                    ui.selected,
+                    nav::targets(ui.view, &sections, &ui.search).len(),
+                );
+                let mut buf = None;
+                let shown = shown(&sections, &ui, &mut buf);
+                let body = render_body(shown, &cli, ui.view, &changes, styled, ui.selected)
                     + &bottom(
+                        &search_line(&ui, shown, styled),
                         "",
                         &footer,
                         &help_block(&cli, ui.view, ui.show_help, styled),
@@ -1102,30 +1212,35 @@ pub fn run() -> Result<()> {
             }
             Err(e) => {
                 ui.last_status = error_trailing(&short_error(&e), styled);
-                let (main, help) = match &last_good {
-                    Some(good) => (
-                        render_body(
-                            good,
-                            &cli,
-                            ui.view,
-                            &Changes::default(),
-                            styled,
-                            ui.selected,
-                        ),
-                        help_block(&cli, ui.view, ui.show_help, styled),
-                    ),
-                    None => (String::new(), String::new()),
+                let (main, search, help) = match &last_good {
+                    Some(good) => {
+                        let mut buf = None;
+                        let shown = shown(good, &ui, &mut buf);
+                        (
+                            render_body(
+                                shown,
+                                &cli,
+                                ui.view,
+                                &Changes::default(),
+                                styled,
+                                ui.selected,
+                            ),
+                            search_line(&ui, shown, styled),
+                            help_block(&cli, ui.view, ui.show_help, styled),
+                        )
+                    }
+                    None => (String::new(), String::new(), String::new()),
                 };
-                let body = main + &bottom(&ui.last_status, &footer, &help);
+                let body = main + &bottom(&search, &ui.last_status, &footer, &help);
                 repaint(&body)?;
             }
         }
         // Wait for the interval, but let the user act now: `r` forces a refresh,
-        // the movement keys drive the selection cursor, `o` opens it, `?` toggles
-        // help, Tab switches view; all in place. Any other key is discarded.
+        // the movement keys drive the selection cursor, Enter opens it, `/`
+        // searches, `?` toggles help, Tab switches view; all in place.
         let deadline = std::time::Instant::now() + cli.interval.dur;
         loop {
-            match ui.on_key(term::wait(deadline), last_good.as_ref(), styled) {
+            match poll(&mut ui, deadline, last_good.as_ref(), styled) {
                 Act::Refresh => break,
                 Act::Repaint => {
                     if let Some(good) = &last_good {

@@ -28,6 +28,26 @@ pub enum Wait {
     HalfDown,
     /// `Enter`: open the selected row in the browser.
     Open,
+    /// `/`: open the search prompt to filter rows.
+    Search,
+    /// A lone `Esc`: clear an applied search filter.
+    Cancel,
+}
+
+/// A keystroke while the search prompt is open (raw text input, unlike the
+/// semantic `Wait` actions of normal mode).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SearchKey {
+    /// A printable character to append to the query.
+    Char(char),
+    /// Backspace: drop the last query character.
+    Backspace,
+    /// Enter: apply the filter and leave the prompt.
+    Enter,
+    /// Esc: clear the filter and leave the prompt.
+    Esc,
+    /// The interval elapsed with no input: do a scheduled refresh.
+    Tick,
 }
 
 #[cfg(unix)]
@@ -38,7 +58,7 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
-    use super::Wait;
+    use super::{SearchKey, Wait};
 
     use crate::render::{HIDE_CURSOR, SHOW_CURSOR};
 
@@ -174,21 +194,21 @@ mod imp {
         }
     }
 
-    /// Wait up to `deadline` for the next scheduled refresh, returning early on
-    /// a recognized keypress: `r`/`R` refresh, Tab switch view, `?` help, Enter
-    /// open, and the movement keys (`j`/`k`/`g`/`G`, the arrows, and
-    /// Ctrl-D/Ctrl-U for half a page). Every other keystroke is discarded. Falls
-    /// back to a plain sleep when stdin isn't a quieted terminal.
-    pub fn wait(deadline: Instant) -> Wait {
+    /// Poll stdin until it's readable or `deadline` elapses, then read once.
+    /// `Some(n)` = n bytes in `buf`; `None` = timeout / EOF / stdin isn't a
+    /// quieted terminal — in the can't-read cases it first sleeps out the
+    /// interval so the caller (which treats `None` as a tick) doesn't busy-loop.
+    /// Retries on `EINTR` (e.g. SIGCONT after Ctrl-Z).
+    fn poll_bytes(deadline: Instant, buf: &mut [u8]) -> Option<usize> {
+        let sleep_out = || std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         let Some((fd, _)) = *SAVED.lock().unwrap() else {
-            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-            return Wait::Tick;
+            sleep_out();
+            return None;
         };
-        let mut buf = [0u8; 256];
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Wait::Tick;
+                return None;
             }
             let ms = remaining.as_millis().min(i32::MAX as u128) as i32;
             let mut pfd = libc::pollfd {
@@ -197,31 +217,88 @@ mod imp {
                 revents: 0,
             };
             match unsafe { libc::poll(&mut pfd, 1, ms) }.cmp(&0) {
-                // Interrupted (e.g. SIGCONT after Ctrl-Z) — retry; any other
-                // error: wait the interval out rather than spin.
                 Ordering::Less => {
                     if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                         continue;
                     }
-                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-                    return Wait::Tick;
+                    sleep_out();
+                    return None;
                 }
-                Ordering::Equal => return Wait::Tick, // timed out: scheduled refresh
+                Ordering::Equal => return None, // timed out
                 Ordering::Greater => {}
             }
             let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
-                // EOF/error on stdin: stop polling, just wait out the interval.
-                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-                return Wait::Tick;
+                sleep_out(); // EOF/error on stdin
+                return None;
             }
-            let Some(action) = classify(&buf[..n as usize]) else {
+            return Some(n as usize);
+        }
+    }
+
+    /// Discard any input still buffered (collapses key-repeat / an escape burst).
+    fn drain() {
+        if let Some((fd, _)) = *SAVED.lock().unwrap() {
+            let mut buf = [0u8; 256];
+            while unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+        }
+    }
+
+    /// Wait up to `deadline` for the next scheduled refresh, returning early on
+    /// a recognized keypress: `r`/`R` refresh, Tab switch view, `?` help, `/`
+    /// search, Enter open, and the movement keys (`j`/`k`/`g`/`G`, the arrows,
+    /// and Ctrl-D/Ctrl-U for half a page). Every other keystroke is discarded.
+    /// Falls back to a plain sleep when stdin isn't a quieted terminal.
+    pub fn wait(deadline: Instant) -> Wait {
+        let mut buf = [0u8; 256];
+        loop {
+            let Some(n) = poll_bytes(deadline, &mut buf) else {
+                return Wait::Tick;
+            };
+            let Some(action) = classify(&buf[..n]) else {
                 continue; // unrecognized keys keep us waiting
             };
-            // Collapse key-repeat (and the rest of an escape burst) into one action.
-            while unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+            drain(); // collapse key-repeat into a single action
             return action;
         }
+    }
+
+    /// Read a burst of search-prompt input, or a tick if the interval elapsed.
+    /// Unlike `wait`, keystrokes are not collapsed — every typed character is
+    /// returned so live filtering keeps up with fast typing.
+    pub fn read_search(deadline: Instant) -> Vec<SearchKey> {
+        let mut buf = [0u8; 256];
+        match poll_bytes(deadline, &mut buf) {
+            Some(n) => parse_search(&buf[..n]),
+            None => vec![SearchKey::Tick],
+        }
+    }
+
+    /// Parse raw input bytes into search keystrokes: printable ASCII becomes
+    /// `Char`, CR/LF `Enter`, DEL/BS `Backspace`, a lone ESC `Esc`. CSI/SS3
+    /// escape sequences (arrows) and other control/non-ASCII bytes are ignored.
+    fn parse_search(bytes: &[u8]) -> Vec<SearchKey> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                0x1b => {
+                    // A 3-byte CSI/SS3 escape (`ESC [ x` / `ESC O x`, e.g. an
+                    // arrow) is swallowed; a lone ESC cancels the search.
+                    if matches!(bytes.get(i + 1), Some(b'[' | b'O')) {
+                        i += 3;
+                        continue;
+                    }
+                    out.push(SearchKey::Esc);
+                }
+                b'\r' | b'\n' => out.push(SearchKey::Enter),
+                0x7f | 0x08 => out.push(SearchKey::Backspace),
+                0x20..=0x7e => out.push(SearchKey::Char(bytes[i] as char)),
+                _ => {}
+            }
+            i += 1;
+        }
+        out
     }
 
     /// Map a burst of input bytes to the highest-priority recognized action, if
@@ -239,6 +316,8 @@ mod imp {
             Some(Wait::SwitchView)
         } else if has(b'?') {
             Some(Wait::ToggleHelp)
+        } else if has(b'/') {
+            Some(Wait::Search)
         } else if has(b'g') {
             Some(Wait::Top)
         } else if has(b'G') {
@@ -251,6 +330,8 @@ mod imp {
             Some(Wait::Up)
         } else if has(b'j') || seq(b"\x1b[B") {
             Some(Wait::Down)
+        } else if bytes.len() == 1 && bytes[0] == 0x1b {
+            Some(Wait::Cancel) // a lone Esc (arrow escapes are longer)
         } else {
             None
         }
@@ -270,7 +351,8 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{Wait, classify};
+        use super::super::SearchKey;
+        use super::{Wait, classify, parse_search};
 
         #[test]
         fn classify_maps_keys_to_actions() {
@@ -283,6 +365,7 @@ mod imp {
             assert_eq!(classify(b"r"), Some(Wait::Refresh));
             assert_eq!(classify(b"\t"), Some(Wait::SwitchView));
             assert_eq!(classify(b"?"), Some(Wait::ToggleHelp));
+            assert_eq!(classify(b"/"), Some(Wait::Search));
             assert_eq!(classify(b"g"), Some(Wait::Top));
             assert_eq!(classify(b"G"), Some(Wait::Bottom));
             assert_eq!(classify(b"\x04"), Some(Wait::HalfDown)); // Ctrl-D
@@ -294,15 +377,34 @@ mod imp {
             assert_eq!(classify(b"\x1b[A"), Some(Wait::Up));
             assert_eq!(classify(b"\x1b[B"), Some(Wait::Down));
 
+            // A lone Esc cancels (clears a filter); an arrow escape does not.
+            assert_eq!(classify(b"\x1b"), Some(Wait::Cancel));
+            assert_eq!(classify(b"\x1b[C"), None);
+
             // Unrecognized keys are ignored.
             assert_eq!(classify(b"x"), None);
+        }
+
+        #[test]
+        fn parse_search_reads_text_and_edits() {
+            use SearchKey::{Backspace, Char, Enter, Esc};
+            // A typed word yields one Char per byte.
+            assert_eq!(parse_search(b"foo"), vec![Char('f'), Char('o'), Char('o')]);
+            // Editing keys.
+            assert_eq!(
+                parse_search(b"a\x7fb\r"),
+                vec![Char('a'), Backspace, Char('b'), Enter]
+            );
+            // A lone ESC cancels; an arrow escape sequence is swallowed.
+            assert_eq!(parse_search(b"\x1b"), vec![Esc]);
+            assert_eq!(parse_search(b"a\x1b[Bb"), vec![Char('a'), Char('b')]);
         }
     }
 }
 
 #[cfg(not(unix))]
 mod imp {
-    use super::Wait;
+    use super::{SearchKey, Wait};
     use std::time::Instant;
 
     pub struct QuietInput;
@@ -315,9 +417,13 @@ mod imp {
         std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         Wait::Tick
     }
+    pub fn read_search(deadline: Instant) -> Vec<SearchKey> {
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        vec![SearchKey::Tick]
+    }
     pub fn height() -> Option<u16> {
         None
     }
 }
 
-pub use imp::{QuietInput, height, quiet, restore, wait};
+pub use imp::{QuietInput, height, quiet, read_search, restore, wait};

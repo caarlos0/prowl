@@ -312,7 +312,8 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
     // Navigation keys — the footer only lists the action keys, so document the
     // movement cursor here.
     let sep = if ascii { " | " } else { "  \u{b7}  " };
-    let keys = format!("j/k move{sep}g/G first/last{sep}^D/^U half page{sep}enter open");
+    let keys =
+        format!("j/k move{sep}g/G first/last{sep}^D/^U half page{sep}enter open{sep}/ filter");
     if styled {
         let _ = writeln!(out, "  {}{keys}{}", dim.render(), dim.render_reset());
     } else {
@@ -409,10 +410,10 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
 
 /// The watch-mode key hints shown at the very bottom, with the refresh interval
 /// folded into the refresh hint: `r refresh (every 5m) - tab switch view - enter
-/// open - ? help`. While a refresh is in flight the first hint becomes `r
-/// refreshing` (the interval is dropped and the `r` glyph is dimmed, since `r`
-/// is inert until the fetch finishes). Each key glyph is a bold muted accent,
-/// its labels dim; plain when unstyled.
+/// open - / search - ? help`. While a refresh is in flight the first hint
+/// becomes `r refreshing` (the interval is dropped and the `r` glyph is dimmed,
+/// since `r` is inert until the fetch finishes). Each key glyph is a bold muted
+/// accent, its labels dim; plain when unstyled.
 pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
     let refresh = if refreshing {
         "refreshing".to_string()
@@ -420,7 +421,7 @@ pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
         format!("refresh (every {interval})")
     };
     if !styled {
-        return format!("r {refresh} - tab switch view - enter open - ? help");
+        return format!("r {refresh} - tab switch view - enter open - / search - ? help");
     }
     let key = status::fg(status::OVERLAY).bold();
     let dim = Style::new().dimmed();
@@ -439,10 +440,11 @@ pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
     let r_style = if refreshing { dim } else { key };
     let sep = format!("{} - {}", dim.render(), dim.render_reset());
     format!(
-        "{}{sep}{}{sep}{}{sep}{}",
+        "{}{sep}{}{sep}{}{sep}{}{sep}{}",
         hint(r_style, "r", &refresh),
         hint(key, "tab", "switch view"),
         hint(key, "enter", "open"),
+        hint(key, "/", "search"),
         hint(key, "?", "help")
     )
 }
@@ -501,6 +503,31 @@ pub fn ring_bell() {
     let _ = std::io::stdout().flush();
 }
 
+/// The search prompt line: an accented `/`, the query (with a block cursor while
+/// typing), and a dim match count. Plain when unstyled.
+pub fn search_prompt(query: &str, searching: bool, matches: usize, styled: bool) -> String {
+    let count = if matches == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{matches} matches")
+    };
+    if !styled {
+        let cursor = if searching { "_" } else { "" };
+        return format!("/{query}{cursor}  ({count})");
+    }
+    let slash = status::fg(status::PEACH).bold();
+    let dim = Style::new().dimmed();
+    // A reverse-video space is the block cursor while the prompt is capturing.
+    let cursor = if searching { "\x1b[7m \x1b[27m" } else { "" };
+    format!(
+        "{}/{}{query}{cursor}  {}({count}){}",
+        slash.render(),
+        slash.render_reset(),
+        dim.render(),
+        dim.render_reset(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,7 +566,7 @@ mod tests {
     fn footer_is_plain_or_styled_key_hints() {
         assert_eq!(
             footer("5m", false, false),
-            "r refresh (every 5m) - tab switch view - enter open - ? help"
+            "r refresh (every 5m) - tab switch view - enter open - / search - ? help"
         );
         let styled = footer("5m", false, true);
         // Visible text is preserved...
@@ -558,7 +585,7 @@ mod tests {
         // other hints are untouched.
         assert_eq!(
             footer("5m", true, false),
-            "r refreshing - tab switch view - enter open - ? help"
+            "r refreshing - tab switch view - enter open - / search - ? help"
         );
         let styled = footer("5m", true, true);
         assert!(styled.contains("refreshing"));
