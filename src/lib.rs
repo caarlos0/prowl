@@ -110,7 +110,16 @@ fn fetch(
         (None, None)
     };
     let prs = if want_mine && cli.show_mine() {
-        Some(prs::build_rows(model::fetch_my_prs(client, repo, me)?))
+        let rows = prs::build_rows(model::fetch_my_prs(client, repo, me)?);
+        // A queued PR is shown in the Merge Queue section; drop it from the
+        // open-PRs list so it isn't listed twice. Keep it when the queue is
+        // hidden (e.g. `--only mine`) so it doesn't disappear entirely.
+        let rows = if cli.show_queue() {
+            prs::without_queued(rows)
+        } else {
+            rows
+        };
+        Some(rows)
     } else {
         None
     };
@@ -148,18 +157,17 @@ fn demo_sections() -> Sections {
     let ago = |secs: i64| {
         (Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339_opts(SecondsFormat::Secs, true)
     };
-    let pr =
-        |number, is_draft, title: &str, status, merge_state: &str, queue, fail, secs| prs::PrRow {
-            number,
-            is_draft,
-            title: title.to_string(),
-            status,
-            merge_state: Some(merge_state.to_string()),
-            queue,
-            fail,
-            url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
-            updated_at: Some(ago(secs)),
-        };
+    let pr = |number, is_draft, title: &str, status, merge_state: &str, fail, secs| prs::PrRow {
+        number,
+        is_draft,
+        title: title.to_string(),
+        status,
+        merge_state: Some(merge_state.to_string()),
+        queue: None,
+        fail,
+        url: format!("https://github.com/caarlos0/prowl/pull/{number}"),
+        updated_at: Some(ago(secs)),
+    };
     use status::Status::*;
     let prs = vec![
         pr(
@@ -168,7 +176,6 @@ fn demo_sections() -> Sections {
             "feat(render): truecolor status palette",
             Some(Pass),
             "CLEAN",
-            None,
             0,
             300,
         ),
@@ -178,7 +185,6 @@ fn demo_sections() -> Sections {
             "fix(term): restore cursor on SIGTSTP",
             Some(Fail),
             "BLOCKED",
-            None,
             2,
             1080,
         ),
@@ -188,7 +194,6 @@ fn demo_sections() -> Sections {
             "perf(cache): paint from disk on startup",
             Some(Pending),
             "UNSTABLE",
-            None,
             0,
             2400,
         ),
@@ -198,7 +203,6 @@ fn demo_sections() -> Sections {
             "wip: nix flake + home-manager module",
             None,
             "DRAFT",
-            None,
             0,
             7200,
         ),
@@ -208,19 +212,8 @@ fn demo_sections() -> Sections {
             "chore(deps): bump ureq to 3.x",
             Some(Conflicts),
             "DIRTY",
-            None,
             0,
             10800,
-        ),
-        pr(
-            118,
-            false,
-            "feat(queue): inline merge-queue position",
-            Some(Pass),
-            "CLEAN",
-            Some((1, "QUEUED".to_string())),
-            0,
-            3600,
         ),
     ];
 

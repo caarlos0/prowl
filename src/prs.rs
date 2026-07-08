@@ -49,6 +49,15 @@ pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
     rows
 }
 
+/// Drop PRs that are in the merge queue: they're shown in the Merge Queue
+/// section, so listing them here too would be redundant. Kept separate from
+/// `build_rows` so the caller can skip it when the queue section is hidden (and
+/// the PR would otherwise vanish entirely).
+pub fn without_queued(mut rows: Vec<PrRow>) -> Vec<PrRow> {
+    rows.retain(|r| r.queue.is_none());
+    rows
+}
+
 pub fn to_table(rows: &[PrRow], ascii: bool, highlight: &HashSet<i64>) -> Table {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -162,6 +171,19 @@ mod tests {
         });
         let rows = build_rows(vec![p]);
         assert_eq!(rows[0].queue, Some((3, "QUEUED".to_string())));
+    }
+
+    #[test]
+    fn without_queued_drops_prs_in_the_merge_queue() {
+        let mut queued = pr(1, "MERGEABLE", "CLEAN", &[Some("SUCCESS")]);
+        queued.merge_queue_entry = Some(QueueEntry {
+            position: 1,
+            state: "QUEUED".to_string(),
+        });
+        let open = pr(2, "MERGEABLE", "CLEAN", &[Some("SUCCESS")]);
+        // #1 is queued, #2 isn't — only #2 remains in the open-PRs list.
+        let rows = without_queued(build_rows(vec![queued, open]));
+        assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [2]);
     }
 
     #[test]

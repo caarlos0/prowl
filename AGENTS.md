@@ -148,6 +148,9 @@ everything else is testable modules:
 - **Sorting:** open PRs by `updatedAt` desc, merged PRs by `mergedAt` desc;
   queue by `position` asc. Reviews by review-state rank (Awaiting → ReReview →
   Updated → Reviewed) then `updatedAt` desc; reviewed-and-merged by `mergedAt` desc.
+- **Queue dedup:** a PR of mine that's in the merge queue is shown only in the
+  Merge Queue section, not the open-PRs list (`prs::without_queued`, applied when
+  the queue section is shown so `--only mine` still lists it).
 - **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
   one-shot output with `--view` and toggled live with `Tab`. While watching,
   prowl fetches **both** views every refresh so Tab switches instantly from

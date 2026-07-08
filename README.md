@@ -9,7 +9,8 @@ A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
 shipped** per release. It refreshes on an interval and **rings the terminal
 bell** the moment one of your PRs merges or an open PR's CI/merge status
 changes — and flags whatever changed. On startup it paints instantly from a
-local cache, then refreshes in the background.
+local cache, then refreshes in the background. A PR that's in the merge queue is
+listed only there, not also under your open PRs.
 
 Press **Tab** to switch to a **reviews** view: the PRs awaiting (or under) your
 review — each flagged with a glyph for whether you still owe a first review, the
