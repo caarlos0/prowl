@@ -289,6 +289,14 @@ pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     }
 }
 
+/// The selection caret for the row the navigation cursor is on. It sits in the
+/// same leading column as the change marker, overriding it when a row is both
+/// changed and selected.
+pub fn select_marker(ascii: bool) -> Cell {
+    let m = if ascii { ">" } else { "\u{276f}" };
+    Cell::styled(m, status::fg(status::PEACH).bold())
+}
+
 /// The help legend for `view`: only the glyphs and values that view actually
 /// uses, so a glyph the other view reuses for something else can't muddy it. The
 /// Mine view lists the status glyphs + every `mergeStateStatus` value; the
@@ -300,6 +308,16 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
 
     out.push_str(&header("Help", status::OVERLAY, None, None, styled));
     out.push('\n');
+
+    // Navigation keys — the footer only lists the action keys, so document the
+    // movement cursor here.
+    let sep = if ascii { " | " } else { "  \u{b7}  " };
+    let keys = format!("j/k move{sep}g/G first/last{sep}^D/^U half page{sep}o open");
+    if styled {
+        let _ = writeln!(out, "  {}{keys}{}", dim.render(), dim.render_reset());
+    } else {
+        let _ = writeln!(out, "  {keys}");
+    }
 
     // One "glyph  meaning" line: colored glyph, dim meaning (plain when unstyled).
     let line = |out: &mut String, ch: char, color: Rgb, meaning: &str| {
@@ -390,11 +408,11 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
 }
 
 /// The watch-mode key hints shown at the very bottom, with the refresh interval
-/// folded into the refresh hint: `r refresh (every 5m) - tab switch view - ?
-/// help`. While a refresh is in flight the first hint becomes `r refreshing`
-/// (the interval is dropped and the `r` glyph is dimmed, since `r` is inert
-/// until the fetch finishes). Each key glyph is a bold muted accent, its labels
-/// dim; plain when unstyled.
+/// folded into the refresh hint: `r refresh (every 5m) - tab switch view - o
+/// open - ? help`. While a refresh is in flight the first hint becomes `r
+/// refreshing` (the interval is dropped and the `r` glyph is dimmed, since `r`
+/// is inert until the fetch finishes). Each key glyph is a bold muted accent,
+/// its labels dim; plain when unstyled.
 pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
     let refresh = if refreshing {
         "refreshing".to_string()
@@ -402,7 +420,7 @@ pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
         format!("refresh (every {interval})")
     };
     if !styled {
-        return format!("r {refresh} - tab switch view - ? help");
+        return format!("r {refresh} - tab switch view - o open - ? help");
     }
     let key = status::fg(status::OVERLAY).bold();
     let dim = Style::new().dimmed();
@@ -421,9 +439,10 @@ pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
     let r_style = if refreshing { dim } else { key };
     let sep = format!("{} - {}", dim.render(), dim.render_reset());
     format!(
-        "{}{sep}{}{sep}{}",
+        "{}{sep}{}{sep}{}{sep}{}",
         hint(r_style, "r", &refresh),
         hint(key, "tab", "switch view"),
+        hint(key, "o", "open"),
         hint(key, "?", "help")
     )
 }
@@ -520,12 +539,13 @@ mod tests {
     fn footer_is_plain_or_styled_key_hints() {
         assert_eq!(
             footer("5m", false, false),
-            "r refresh (every 5m) - tab switch view - ? help"
+            "r refresh (every 5m) - tab switch view - o open - ? help"
         );
         let styled = footer("5m", false, true);
         // Visible text is preserved...
         assert!(styled.contains("refresh (every 5m)"));
         assert!(styled.contains("switch view"));
+        assert!(styled.contains("open"));
         assert!(styled.contains("help"));
         // ...with a bold key accent and a dim label.
         assert!(styled.contains("\x1b[1m"));
@@ -538,7 +558,7 @@ mod tests {
         // other hints are untouched.
         assert_eq!(
             footer("5m", true, false),
-            "r refreshing - tab switch view - ? help"
+            "r refreshing - tab switch view - o open - ? help"
         );
         let styled = footer("5m", true, true);
         assert!(styled.contains("refreshing"));

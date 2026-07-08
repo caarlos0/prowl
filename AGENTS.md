@@ -15,9 +15,9 @@ output with `--view`):
 - **Reviews**: **Reviews** (open PRs awaiting / under my review, each with a
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 
-Below the active view is a `r refresh (every 5m) - tab switch view - ? help`
-footer (which also shows the refresh interval, and reads `r refreshing` while a
-fetch is in flight) and an optional help legend last
+Below the active view is a `r refresh (every 5m) - tab switch view - o open - ?
+help` footer (which also shows the refresh interval, and reads `r refreshing`
+while a fetch is in flight) and an optional help legend last
 at the bottom. While watching, the very top shows a `my PRs / reviews` tab strip
 with the active view accented. It rings the terminal bell when one of your PRs
 merges or an open PR's status changes, and flags the changed rows (the bell and
@@ -52,7 +52,8 @@ everything else is testable modules:
 
 - `cli.rs` — clap derive CLI, `Section` enum, `View` (Mine/Reviews, `--view`,
   `.toggle()`), `ReviewScope` (Direct/All, `--review-scope`, `.qualifier()`),
-  duration parser (`s/m/h/d/w`).
+  duration parser (`s/m/h/d/w`), and the `WATCH_KEYS` `after_help` block
+  documenting the interactive watch-mode keys.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
   `parse_graphql()`.
@@ -72,9 +73,12 @@ everything else is testable modules:
   (cap/align the shared `TITLE` column so every table lines up and the whole
   view stays within `MAX_WIDTH` = 120 columns), headers (`header`, with an
   optional dim count badge and trailing note — the queue ETA), the `tabs`
-  view-switcher strip, the key-hint footer (`footer`, carrying the refresh
-  interval), help
-  legend (`help(view, …)` — contextual: status glyphs + every `STATE` value for
+  view-switcher strip, the leading-column markers (`change_marker`, and the
+  `select_marker` navigation caret that overrides it on the selected row), the
+  key-hint footer (`footer`, carrying the refresh
+  interval and an `o open` hint), help
+  legend (`help(view, …)` — a movement-keys line then, contextual: status glyphs
+  + every `STATE` value for
   Mine, review glyphs + the merged glyph for Reviews; last at the very bottom),
   loading screen, bell, clear.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
@@ -109,13 +113,22 @@ everything else is testable modules:
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
+- `nav.rs` — watch-mode row navigation: `targets(view, &Sections)` is the open
+  URL of every navigable row in render order (PR rows → the PR; shipments → the
+  release / compare log; url-less rows skipped), `moved` advances the selection
+  cursor (lazy: `None` until first move, `Bottom` enters at the last row), and
+  `clamp` keeps it in range after a refresh.
+- `open.rs` — `open::url` opens a URL in the default browser via the platform
+  opener (`open` / `xdg-open` / `cmd /C start`), spawned detached; no new dep.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
 - `term.rs` — Unix terminal helper: while watching, quiet stdin (drop echo +
   line buffering, keep `ISIG` so signal keys work) and turn the interval wait
-  into a poll, so `r` refreshes now, `Tab` switches view, and `?` toggles the
-  help legend, while every other key is discarded; restored on every exit path.
-  A no-op on non-Unix.
+  into a poll returning a `Wait` for each recognized key — `r` refresh, `Tab`
+  switch view, `?` help, `o` open, and the movement keys (`j`/`k`, the arrows,
+  `g`/`G`, `Ctrl-D`/`Ctrl-U`); every other key is discarded. `height()`
+  (`TIOCGWINSZ`) sizes the half-page jump. Restored on every exit path; a no-op
+  on non-Unix.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 ## Key behaviors
@@ -146,6 +159,15 @@ everything else is testable modules:
   state through its per-row glyph instead).
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
+- **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
+  until the first movement key, then a `select_marker` caret on the chosen row
+  (it overrides the change marker, and works in the custom shipments renderer
+  too). `j`/`k` (or the arrows) move one row, `g`/`G` jump to first/last,
+  `Ctrl-D`/`Ctrl-U` half a page (sized from `term::height`); `o` opens the
+  selected row — the PR, or a shipments release / the upcoming compare log — via
+  `open::url`. Every row across all sections of the active view is one target
+  (`nav::targets`, in render order); switching views drops the cursor and a
+  refresh `clamp`s it. `--once`/piped output has no selection.
 - **Cache:** on a watch start, prowl paints the cached `Sections` immediately,
   seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
@@ -156,15 +178,19 @@ everything else is testable modules:
   refresh now; `Tab` switches view; `?` toggles the help legend
   (contextual to the active view — status glyphs + `STATE` values for Mine,
   review glyphs for Reviews — hidden by default, rendered last at the very
-  bottom; `--no-help` only affects one-shot/piped output). The only persistent
+  bottom; `--no-help` only affects one-shot/piped output). The movement keys
+  (`j`/`k`, arrows, `g`/`G`, `Ctrl-D`/`Ctrl-U`) drive the selection cursor and
+  `o` opens it. The only persistent
   bottom line is the footer
-  (`r refresh (every 5m) - tab switch view - ? help`), which carries the refresh
+  (`r refresh (every 5m) - tab switch view - o open - ? help`), which carries the
+  refresh
   interval; a failed refresh adds a dim `error: …` line above it. While a fetch
   is in flight the footer reads `r refreshing` with the `r` glyph dimmed and `r`
-  presses discarded (Tab and `?` stay live); it reverts to `r refresh (every
-  5m)` once the fetch finishes. The blocking
+  presses discarded (navigation, Tab and `?` stay live); it reverts to `r
+  refresh (every 5m)` once the fetch finishes. The blocking
   fetch runs on a worker thread (`std::thread::scope`) while the main thread
-  keeps polling input, so `?` and `Tab` stay responsive even mid-refresh. Both
+  keeps polling input, so navigation, `?` and `Tab` stay responsive even
+  mid-refresh. Both
   the cursor and terminal mode are
   restored on every normal or early (`?`-operator) return (Drop guards) and on
   SIGINT (the Ctrl-C handler).

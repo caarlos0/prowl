@@ -4,6 +4,7 @@
 //! only drop local echo and line buffering, then discard whatever was typed.
 
 /// The outcome of waiting for the next refresh while watching.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Wait {
     /// The interval elapsed: do a scheduled refresh.
     Tick,
@@ -13,6 +14,20 @@ pub enum Wait {
     ToggleHelp,
     /// The user pressed Tab: switch to the other view.
     SwitchView,
+    /// `k` / Up arrow: move the selection up one row.
+    Up,
+    /// `j` / Down arrow: move the selection down one row.
+    Down,
+    /// `g`: move the selection to the first row.
+    Top,
+    /// `G`: move the selection to the last row.
+    Bottom,
+    /// Ctrl-U: move the selection up half a page.
+    HalfUp,
+    /// Ctrl-D: move the selection down half a page.
+    HalfDown,
+    /// `o`/`O`: open the selected row in the browser.
+    Open,
 }
 
 #[cfg(unix)]
@@ -160,9 +175,10 @@ mod imp {
     }
 
     /// Wait up to `deadline` for the next scheduled refresh, returning early on
-    /// a recognized keypress: `r`/`R` to refresh now, Tab to switch view, `?` to
-    /// toggle the help legend. Every other keystroke is discarded. Falls back to
-    /// a plain sleep when stdin isn't a quieted terminal.
+    /// a recognized keypress: `r`/`R` refresh, Tab switch view, `?` help,
+    /// `o`/`O` open, and the movement keys (`j`/`k`/`g`/`G`, the arrows, and
+    /// Ctrl-D/Ctrl-U for half a page). Every other keystroke is discarded. Falls
+    /// back to a plain sleep when stdin isn't a quieted terminal.
     pub fn wait(deadline: Instant) -> Wait {
         let Some((fd, _)) = *SAVED.lock().unwrap() else {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
@@ -199,23 +215,57 @@ mod imp {
                 std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 return Wait::Tick;
             }
-            let bytes = &buf[..n as usize];
-            // `r` (refresh) takes precedence, then Tab (switch view), then `?`
-            // (help toggle) if several were typed in the same burst; other keys
-            // keep us waiting.
-            let action = if bytes.iter().any(|&b| b == b'r' || b == b'R') {
-                Wait::Refresh
-            } else if bytes.contains(&b'\t') {
-                Wait::SwitchView
-            } else if bytes.contains(&b'?') {
-                Wait::ToggleHelp
-            } else {
-                continue;
+            let Some(action) = classify(&buf[..n as usize]) else {
+                continue; // unrecognized keys keep us waiting
             };
-            // Collapse key-repeat into a single action.
+            // Collapse key-repeat (and the rest of an escape burst) into one action.
             while unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
             return action;
         }
+    }
+
+    /// Map a burst of input bytes to the highest-priority recognized action, if
+    /// any. Action keys (open/refresh/switch/help) win over movement so a stray
+    /// arrow in the same read can't shadow them; arrows are the 3-byte escape
+    /// sequences `ESC [ A` / `ESC [ B`.
+    fn classify(bytes: &[u8]) -> Option<Wait> {
+        let has = |b: u8| bytes.contains(&b);
+        let seq = |s: &[u8]| bytes.windows(s.len()).any(|w| w == s);
+        if has(b'o') || has(b'O') {
+            Some(Wait::Open)
+        } else if has(b'r') || has(b'R') {
+            Some(Wait::Refresh)
+        } else if has(b'\t') {
+            Some(Wait::SwitchView)
+        } else if has(b'?') {
+            Some(Wait::ToggleHelp)
+        } else if has(b'g') {
+            Some(Wait::Top)
+        } else if has(b'G') {
+            Some(Wait::Bottom)
+        } else if has(0x04) {
+            Some(Wait::HalfDown) // Ctrl-D
+        } else if has(0x15) {
+            Some(Wait::HalfUp) // Ctrl-U
+        } else if has(b'k') || seq(b"\x1b[A") {
+            Some(Wait::Up)
+        } else if has(b'j') || seq(b"\x1b[B") {
+            Some(Wait::Down)
+        } else {
+            None
+        }
+    }
+
+    /// The terminal's height in rows (for the half-page jump), or `None` when
+    /// stdout isn't a terminal or the size can't be read.
+    pub fn height() -> Option<u16> {
+        let stdout = std::io::stdout();
+        if !stdout.is_terminal() {
+            return None;
+        }
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::ioctl(stdout.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) } == 0;
+        (ok && ws.ws_row > 0).then_some(ws.ws_row)
     }
 }
 
@@ -234,6 +284,9 @@ mod imp {
         std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         Wait::Tick
     }
+    pub fn height() -> Option<u16> {
+        None
+    }
 }
 
-pub use imp::{QuietInput, quiet, restore, wait};
+pub use imp::{QuietInput, height, quiet, restore, wait};

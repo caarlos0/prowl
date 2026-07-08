@@ -5,11 +5,26 @@ use clap::{Parser, ValueEnum};
 use std::str::FromStr;
 use std::time::Duration;
 
+/// The interactive watch-mode key bindings, appended to `--help`. They aren't
+/// flags, so clap wouldn't list them otherwise; the running dashboard shows the
+/// same keys in its footer and `?` legend.
+const WATCH_KEYS: &str = "\
+Keys (while watching):
+  j / k            move the selection (also Down / Up arrows)
+  g / G            jump to the first / last row
+  Ctrl-D / Ctrl-U  move the selection half a page
+  o                open the selected PR or release in your browser
+  r                refresh now
+  Tab              switch view (your PRs / your reviews)
+  ?                toggle the help legend
+  Ctrl-C           quit";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "prowl",
     version,
-    about = "A tiny terminal radar for your GitHub pull requests."
+    about = "A tiny terminal radar for your GitHub pull requests.",
+    after_help = WATCH_KEYS
 )]
 pub struct Cli {
     /// Repository to watch, as owner/name. Auto-detected from the cwd if omitted.
