@@ -16,7 +16,8 @@ output with `--view`):
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 
 Below the active view is a `r refresh (every 5m) - tab switch view - ? help`
-footer (which also shows the refresh interval) and an optional help legend last
+footer (which also shows the refresh interval, and reads `r refreshing` while a
+fetch is in flight) and an optional help legend last
 at the bottom. While watching, the very top shows a `my PRs / reviews` tab strip
 with the active view accented. It rings the terminal bell when one of your PRs
 merges or an open PR's status changes, and flags the changed rows (the bell and
@@ -158,7 +159,10 @@ everything else is testable modules:
   bottom; `--no-help` only affects one-shot/piped output). The only persistent
   bottom line is the footer
   (`r refresh (every 5m) - tab switch view - ? help`), which carries the refresh
-  interval; a failed refresh adds a dim `error: …` line above it. The blocking
+  interval; a failed refresh adds a dim `error: …` line above it. While a fetch
+  is in flight the footer reads `r refreshing` with the `r` glyph dimmed and `r`
+  presses discarded (Tab and `?` stay live); it reverts to `r refresh (every
+  5m)` once the fetch finishes. The blocking
   fetch runs on a worker thread (`std::thread::scope`) while the main thread
   keeps polling input, so `?` and `Tab` stay responsive even mid-refresh. Both
   the cursor and terminal mode are

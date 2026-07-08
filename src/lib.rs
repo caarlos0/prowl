@@ -752,7 +752,7 @@ pub fn run() -> Result<()> {
         let body = render_body(&sections, &cli, cli.view, &changes, interactive)
             + &bottom(
                 "",
-                &render::footer(&interval, interactive),
+                &render::footer(&interval, false, interactive),
                 &help_block(&cli, cli.view, !cli.no_help, interactive),
             );
         repaint(&body)?;
@@ -778,22 +778,28 @@ pub fn run() -> Result<()> {
     // `styled` already implies `!cli.once`, so watch mode is just `styled`.
     let watch = styled;
 
-    // The refresh interval is constant, so the key-hint footer that carries it
-    // (`r refresh (every 5m) - tab switch view - ? help`) is built once.
-    let footer = render::footer(&timefmt::eta(cli.interval.dur), styled);
+    // The refresh interval is constant, so both key-hint footers that carry it
+    // are built once: `footer` (`r refresh (every 5m) - tab switch view - ?
+    // help`) for the idle dashboard, and `footer_refreshing` (`r refreshing -
+    // …`) shown while a fetch is in flight — when `r` is inert.
+    let interval = timefmt::eta(cli.interval.dur);
+    let footer = render::footer(&interval, false, styled);
+    let footer_refreshing = render::footer(&interval, true, styled);
 
     // Build a frame from already-fetched data (no new fetch): the active view of
-    // `good` plus the current help/status and the footer. Used for the
+    // `good` plus the current help/status and the given footer (the `refreshing`
+    // variant while a fetch is in flight, else the idle one). Used for the
     // cached-start paint and for every `?`/Tab repaint while idling or
     // mid-refresh, so those stay in lockstep.
-    let idle_frame = |good: &Sections, view: View, show_help: bool, last_status: &str| {
-        render_body(good, &cli, view, &Changes::default(), styled)
-            + &bottom(
-                last_status,
-                &footer,
-                &help_block(&cli, view, show_help, styled),
-            )
-    };
+    let idle_frame =
+        |good: &Sections, view: View, show_help: bool, last_status: &str, footer: &str| {
+            render_body(good, &cli, view, &Changes::default(), styled)
+                + &bottom(
+                    last_status,
+                    footer,
+                    &help_block(&cli, view, show_help, styled),
+                )
+        };
 
     // Change-detection / last-good state, seeded from the cache below so the
     // first refresh can highlight what changed while prowl wasn't running.
@@ -822,7 +828,7 @@ pub fn run() -> Result<()> {
             std::process::exit(130);
         });
         if let Some(c) = (!cli.no_cache).then(|| cache::load(&repo)).flatten() {
-            repaint(&idle_frame(&c.sections, view, show_help, ""))?;
+            repaint(&idle_frame(&c.sections, view, show_help, "", &footer))?;
             prev = Some(Tracker::build(
                 c.sections.prs.as_deref(),
                 c.sections.merged.as_deref(),
@@ -873,10 +879,26 @@ pub fn run() -> Result<()> {
     // refresh after a cached start from ringing (it still highlights changes).
     let mut armed = false;
     loop {
+        // Repaint the last-good dashboard with the `r refreshing` footer (the
+        // `r` glyph dimmed): once as the fetch starts, then on every `?`/Tab
+        // while it runs. A no-op until there's data to show.
+        let paint_refreshing = |view: View, show_help: bool| {
+            if let Some(good) = &last_good {
+                let _ = repaint(&idle_frame(
+                    good,
+                    view,
+                    show_help,
+                    &last_status,
+                    &footer_refreshing,
+                ));
+            }
+        };
+        paint_refreshing(view, show_help);
         // Run the blocking fetch on a worker thread and poll input while it
         // runs, so `?` (help) and Tab (switch view) stay responsive mid-refresh.
         // Both views are fetched every refresh so Tab can switch instantly.
-        // Ticks and `r` are ignored here — a refresh is already in flight.
+        // Ticks and `r` are ignored here — a refresh is already in flight, so
+        // `?`/Tab repaints keep the `r refreshing` footer too.
         let result = std::thread::scope(|scope| {
             let handle =
                 scope.spawn(|| fetch(&cli, &client, &repo, &me, &default_branch, true, true));
@@ -887,9 +909,7 @@ pub fn run() -> Result<()> {
                     term::Wait::SwitchView => view = view.toggle(),
                     _ => continue,
                 }
-                if let Some(good) = &last_good {
-                    let _ = repaint(&idle_frame(good, view, show_help, &last_status));
-                }
+                paint_refreshing(view, show_help);
             }
             handle.join().expect("fetch thread panicked")
         });
@@ -939,7 +959,7 @@ pub fn run() -> Result<()> {
                 term::Wait::SwitchView => view = view.toggle(),
             }
             if let Some(good) = &last_good {
-                repaint(&idle_frame(good, view, show_help, &last_status))?;
+                repaint(&idle_frame(good, view, show_help, &last_status, &footer))?;
             }
         }
     }

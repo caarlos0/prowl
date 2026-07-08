@@ -391,29 +391,40 @@ pub fn help(view: View, ascii: bool, styled: bool) -> String {
 
 /// The watch-mode key hints shown at the very bottom, with the refresh interval
 /// folded into the refresh hint: `r refresh (every 5m) - tab switch view - ?
-/// help`. Each key glyph is a bold muted accent, its labels dim; plain when
-/// unstyled.
-pub fn footer(interval: &str, styled: bool) -> String {
+/// help`. While a refresh is in flight the first hint becomes `r refreshing`
+/// (the interval is dropped and the `r` glyph is dimmed, since `r` is inert
+/// until the fetch finishes). Each key glyph is a bold muted accent, its labels
+/// dim; plain when unstyled.
+pub fn footer(interval: &str, refreshing: bool, styled: bool) -> String {
+    let refresh = if refreshing {
+        "refreshing".to_string()
+    } else {
+        format!("refresh (every {interval})")
+    };
     if !styled {
-        return format!("r refresh (every {interval}) - tab switch view - ? help");
+        return format!("r {refresh} - tab switch view - ? help");
     }
     let key = status::fg(status::OVERLAY).bold();
     let dim = Style::new().dimmed();
-    let hint = |k: &str, label: &str| {
+    // Each hint is `<key> <label>`: the key glyph a bold accent, the label dim.
+    // While refreshing, `r` is inert, so its glyph is dimmed too and the whole
+    // hint reads as disabled.
+    let hint = |k_style: Style, k: &str, label: &str| {
         format!(
             "{}{k}{} {}{label}{}",
-            key.render(),
-            key.render_reset(),
+            k_style.render(),
+            k_style.render_reset(),
             dim.render(),
             dim.render_reset(),
         )
     };
+    let r_style = if refreshing { dim } else { key };
     let sep = format!("{} - {}", dim.render(), dim.render_reset());
     format!(
         "{}{sep}{}{sep}{}",
-        hint("r", &format!("refresh (every {interval})")),
-        hint("tab", "switch view"),
-        hint("?", "help")
+        hint(r_style, "r", &refresh),
+        hint(key, "tab", "switch view"),
+        hint(key, "?", "help")
     )
 }
 
@@ -508,10 +519,10 @@ mod tests {
     #[test]
     fn footer_is_plain_or_styled_key_hints() {
         assert_eq!(
-            footer("5m", false),
+            footer("5m", false, false),
             "r refresh (every 5m) - tab switch view - ? help"
         );
-        let styled = footer("5m", true);
+        let styled = footer("5m", false, true);
         // Visible text is preserved...
         assert!(styled.contains("refresh (every 5m)"));
         assert!(styled.contains("switch view"));
@@ -519,6 +530,29 @@ mod tests {
         // ...with a bold key accent and a dim label.
         assert!(styled.contains("\x1b[1m"));
         assert!(styled.contains("\x1b[2m"));
+    }
+
+    #[test]
+    fn footer_shows_refreshing_while_in_flight() {
+        // The refresh hint becomes "refreshing" (the interval is dropped); the
+        // other hints are untouched.
+        assert_eq!(
+            footer("5m", true, false),
+            "r refreshing - tab switch view - ? help"
+        );
+        let styled = footer("5m", true, true);
+        assert!(styled.contains("refreshing"));
+        assert!(!styled.contains("every 5m"));
+        assert!(styled.contains("switch view"));
+        // The `r` glyph is faded (dim) to signal it's disabled, unlike the
+        // bold-accented `r` in the idle footer.
+        let key = status::fg(status::OVERLAY).bold();
+        let dim = Style::new().dimmed();
+        let disabled_r = format!("{}r{}", dim.render(), dim.render_reset());
+        let active_r = format!("{}r{}", key.render(), key.render_reset());
+        assert!(styled.contains(&disabled_r));
+        assert!(!styled.contains(&active_r));
+        assert!(footer("5m", false, true).contains(&active_r));
     }
 
     #[test]

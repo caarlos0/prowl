@@ -57,7 +57,8 @@ prowl --once              # render once and exit
 While watching, press `r` to refresh now, `Tab` to switch between your PRs and
 your reviews, `?` to toggle the help legend, and `Ctrl-C` to quit. A footer at
 the bottom (`r refresh (every 5m) - tab switch view - ? help`) shows the keys
-and the refresh interval.
+and the refresh interval. While a refresh is in flight the hint reads
+`r refreshing` and `r` presses are ignored until it finishes.
 The legend is contextual to the active view: status glyphs and `STATE` values
 for your PRs, review glyphs for your reviews.
 
