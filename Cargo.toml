@@ -17,7 +17,7 @@ ctrlc = { version = "3.5.2", features = ["termination"] }
 keyring = { version = "^3", default-features = false, features = ["apple-native", "windows-native"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-uncurses = "0.0.3"
+uncurses = "0.0.5"
 ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
 
 # On Linux the default keyring backend is the in-process `mock`, which doesn't

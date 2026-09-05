@@ -246,11 +246,11 @@ every path — a clean quit, a `?`-operator error, or a failed first paint (`sta
 calls `stop` itself before bailing). Each frame is painted by `redraw` →
 `render_dashboard`, which pins the frame once `in_alt` is set: `paint_body` and
 `paint_bottom` each paint into their own `TextBuffer`, and `render::compose`
-places them. Entering the alternate screen disables only the renderer's
-CSR/SU-SD/IL-DL line-scroll capabilities: those operations move full rows,
-including the pinned bottom block, and can expose stale intermediate cells when
-synchronized output is unavailable; all cell-diff optimizations remain on. The
-managed area is **never** refitted per frame — that would
+places them. The renderer's line-scroll capabilities (CSR/SU-SD/IL-DL) need no
+stripping: uncurses gates scroll detection on `scroll_optimize && sync_output &&
+fullscreen`, so a scroll — which moves full rows, including the pinned bottom
+block — is only ever emitted inside a frame the terminal confirmed it presents
+atomically. The managed area is **never** refitted per frame — that would
 re-query the terminal on every redraw (and, before uncurses 0.0.2, forced a
 clear + full repaint: the screen erased and rewrote itself every frame instead
 of the renderer emitting a diff, which is what flicker looks like). It is sized
@@ -259,11 +259,11 @@ only call that queries the terminal for its row count, which is needed right
 after the inline frame is collapsed to zero rows, and it fits the area to the
 whole window — correct precisely because we just took the alt screen. A resize
 event instead carries its own dimensions, so `Action::Resize` / `SearchAction::
-Resize` call `Screen::resize` with them and skip the query, then invalidate the
-alternate-screen renderer so even a same-cell-size resize fully clears stale
-column positions; inline (the loading frame, before `in_alt`) the reported
-height is the *window's*, so the managed area keeps its own height and follows
-only the width. `Program::init` does not
+Resize` call `Screen::resize` with them and skip the query; `Screen::resize`
+re-establishes the area whatever the size, so even a same-cell-size resize
+fully clears stale column positions; inline (the loading frame, before `in_alt`)
+the reported height is the *window's*, so the managed area keeps its own height
+and follows only the width. `Program::init` does not
 probe the terminal, so `start` calls **`query_capabilities`**: reading an event
 records the reply as it passes through, and the DECRPM 2026 answer is what
 enables **synchronized output**, so a frame that clears first (a resize) is
