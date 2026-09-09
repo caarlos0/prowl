@@ -2143,7 +2143,6 @@ impl<'a> App<'a> {
             Ok(()) => format!("copied {n} link{plural}"),
             Err(e) => format!("error: copy failed: {e}"),
         };
-        self.ui.selected = None;
         self.repaint_last()
     }
 

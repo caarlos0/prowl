@@ -353,7 +353,9 @@ still performs all teardown through `finish`.
   trailing newline). Both honor the active search filter, so `Y` copies only the
   visible matches; with no cursor yet `Y` takes the first non-empty section. The
   outcome ("copied N links", or a `copy failed:` error) lands on the same dim
-  trailing line as a refresh error and is cleared by the next refresh. Watch mode
+  trailing line as a refresh error and is cleared by the next refresh. Copying
+  leaves the selection where it is, so the copied row stays highlighted and the
+  cursor is ready for the next move. Watch mode
   only — `--once`/piped output has no keys.
 - **Search / filter:** `/` opens a search prompt (`Ui.searching`); typing filters
   the rows live (case-insensitive substring over number/title/author/release
