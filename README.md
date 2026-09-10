@@ -84,8 +84,11 @@ until it finishes. On narrow screens the footer removes low-priority labels and
 hints instead of clipping. When height is limited, prowl first hides the help legend,
 then lower-priority sections. In the PR view it hides shipments, then trims the
 merged list from the oldest rows down to the newest row plus a `+N hidden`
-line. The merge queue next narrows to building and own PRs, then building PRs,
-each with a hidden count, before disappearing. In the reviews view it hides
+line. The merge queue then removes only as many rows as needed, keeping
+building PRs first, then your PRs, then other entries. Within each group,
+entries nearer the front of the queue stay visible first. The displayed rows
+remain in queue order, with a hidden count, and use the available height
+before the section disappears. In the reviews view it hides
 reviewed-and-merged PRs. The open PR section is always kept whole. If that
 section or the minimum useful columns do not fit, prowl shows
 `Terminal too small` with the minimum required dimensions. The legend is contextual to the active view:

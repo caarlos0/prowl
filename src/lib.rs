@@ -113,7 +113,7 @@ impl Visibility {
     pub(crate) fn all(sections: &Sections) -> Self {
         Self {
             prs: sections.prs.is_some(),
-            queue: sections.queue.as_ref().map(|_| queue::VisibleRows::All),
+            queue: sections.queue.as_ref().map(|_| queue::VisibleRows::ALL),
             merged: sections.merged.as_ref().map(Vec::len),
             shipments: sections.commits.is_some(),
             reviews: sections.reviews.is_some(),
@@ -280,18 +280,10 @@ fn responsive_layout(
                 if !fits(visible, show_help)
                     && let (Some(rows), Some(_)) = (sections.queue.as_deref(), visible.queue)
                 {
-                    let mut count = rows.len();
-                    for mode in [
-                        queue::VisibleRows::BuildingAndMine,
-                        queue::VisibleRows::Building,
-                    ] {
-                        let next = mode.count(rows);
-                        if next < count {
-                            visible.queue = Some(mode);
-                            count = next;
-                            if fits(visible, show_help) {
-                                break;
-                            }
+                    for keep in (0..rows.len()).rev() {
+                        visible.queue = Some(queue::VisibleRows::limited(rows, keep));
+                        if fits(visible, show_help) {
+                            break;
                         }
                     }
                     if !fits(visible, show_help) {
@@ -523,7 +515,7 @@ fn paint_mine(
         .as_deref()
         .zip(visible.queue)
         .map(|(rows, mode)| {
-            if mode == queue::VisibleRows::All {
+            if mode == queue::VisibleRows::ALL {
                 Cow::Borrowed(rows)
             } else {
                 Cow::Owned(mode.iter(rows).cloned().collect())
@@ -2483,7 +2475,7 @@ mod tests {
             layout.visible,
             Visibility {
                 prs: true,
-                queue: Some(queue::VisibleRows::All),
+                queue: Some(queue::VisibleRows::ALL),
                 merged: None,
                 shipments: false,
                 reviews: false,
@@ -2545,6 +2537,225 @@ mod tests {
     }
 
     #[test]
+    fn responsive_height_fills_queue_space_before_hiding_rows() {
+        let sections = Sections {
+            prs: Some(
+                (101..=110)
+                    .map(|n| {
+                        let mut row = queued_open_row(n);
+                        row.queue = None;
+                        row
+                    })
+                    .collect(),
+            ),
+            queue: Some(
+                (1..=47)
+                    .map(|n| queue_row(n, [8, 15, 22, 24, 29, 43, 46].contains(&n), n <= 4))
+                    .collect(),
+            ),
+            ..Sections::EMPTY
+        };
+        let layout = mine_layout(&sections, 60);
+        let expected: Vec<_> = (1..=38)
+            .chain([43, 46])
+            .map(|n| format!("https://queue/{n}"))
+            .collect();
+        assert_eq!(
+            nav::section_at_visible(View::Mine, &sections, "", 10, layout.visible),
+            expected,
+            "use every available queue row, keep building and own PRs, and retain queue order"
+        );
+        assert_eq!(layout.required_height, 60);
+        assert!(!layout.too_small);
+        let mut canvas = TextBuffer::new(120, 60);
+        let (used, _, _, _) = paint_body(
+            &mut canvas,
+            &sections,
+            &ui(View::Mine),
+            &Changes::default(),
+            true,
+            true,
+            layout.visible,
+            0,
+        );
+        assert_eq!(used, 59, "leave only the footer row below the body");
+        let text = canvas.display_with(Profile::Disabled).to_string();
+        assert!(text.lines().nth(57).unwrap().contains("+7 hidden"));
+    }
+
+    #[test]
+    fn responsive_height_fills_single_priority_queues() {
+        for (mine, building) in [(false, false), (true, false), (false, true), (true, true)] {
+            let sections = Sections {
+                prs: Some(vec![]),
+                queue: Some((1..=40).map(|n| queue_row(n, mine, building)).collect()),
+                ..Sections::EMPTY
+            };
+            let layout = mine_layout(&sections, 20);
+            let expected: Vec<_> = (1..=10).map(|n| format!("https://queue/{n}")).collect();
+            assert_eq!(
+                nav::targets_visible(View::Mine, &sections, "", layout.visible),
+                expected,
+                "queue rows should fill the available height: mine={mine}, building={building}"
+            );
+            assert_eq!(layout.required_height, 20);
+            assert!(!layout.too_small);
+            assert!(visible_body(&sections, layout.visible).contains("+30 hidden"));
+        }
+    }
+
+    #[test]
+    fn responsive_height_grows_queue_by_priority_in_position_order() {
+        let sections = Sections {
+            prs: Some(vec![]),
+            queue: Some(vec![
+                queue_row(1, false, false),
+                queue_row(2, true, false),
+                queue_row(3, false, true),
+                queue_row(4, false, false),
+                queue_row(5, true, false),
+                queue_row(6, true, true),
+                queue_row(7, true, false),
+                queue_row(8, false, false),
+            ]),
+            ..Sections::EMPTY
+        };
+        for (height, numbers) in [
+            (11, vec![3]),
+            (12, vec![3, 6]),
+            (13, vec![2, 3, 6]),
+            (14, vec![2, 3, 5, 6]),
+            (15, vec![2, 3, 5, 6, 7]),
+            (16, vec![1, 2, 3, 5, 6, 7]),
+            (17, vec![1, 2, 3, 4, 5, 6, 7, 8]),
+        ] {
+            let layout = mine_layout(&sections, height);
+            let expected: Vec<_> = numbers
+                .iter()
+                .map(|n| format!("https://queue/{n}"))
+                .collect();
+            assert_eq!(
+                nav::targets_visible(View::Mine, &sections, "", layout.visible),
+                expected,
+                "wrong queue rows at height {height}"
+            );
+            assert_eq!(layout.required_height, height);
+            let body = visible_body(&sections, layout.visible);
+            if numbers.len() == 8 {
+                assert!(!body.contains("hidden"));
+                assert!(!layout.constrained);
+            } else {
+                assert!(body.contains(&format!("+{} hidden", 8 - numbers.len())));
+                assert!(layout.constrained);
+            }
+        }
+    }
+
+    #[test]
+    fn partial_queue_accounts_for_search_status_and_selection() {
+        let sections = Sections {
+            queue: Some((0..=40).map(|n| queue_row(n, n == 0, n == 0)).collect()),
+            ..Sections::EMPTY
+        };
+        let ui = Ui {
+            search: "other".into(),
+            searching: true,
+            selected: Some(5),
+            ..ui(View::Mine)
+        };
+        let mut filtered = None;
+        let shown = ui.shown(&sections, &mut filtered);
+        let footer = Some(("5m", true));
+        let status = "error: offline";
+        let layout = responsive_layout(120, 17, shown, &ui, status, footer, true, true);
+        let expected: Vec<_> = (1..=6).map(|n| format!("https://queue/{n}")).collect();
+        assert_eq!(
+            nav::targets_visible(View::Mine, shown, &ui.search, layout.visible),
+            expected
+        );
+        assert_eq!(
+            nav::section_at_visible(View::Mine, shown, &ui.search, 5, layout.visible),
+            expected
+        );
+        assert_eq!(
+            nav::target_index(
+                View::Mine,
+                shown,
+                &ui.search,
+                layout.visible,
+                "https://queue/6"
+            ),
+            Some(5)
+        );
+        assert_eq!(
+            nav::target_index(
+                View::Mine,
+                shown,
+                &ui.search,
+                layout.visible,
+                "https://queue/7"
+            ),
+            None
+        );
+
+        let mut body = TextBuffer::new(120, 17);
+        let (body_h, selected, _, _) = paint_body(
+            &mut body,
+            shown,
+            &ui,
+            &Changes::default(),
+            true,
+            true,
+            layout.visible,
+            0,
+        );
+        assert_eq!(body_h, 12);
+        let selected = selected.unwrap();
+        let text = body.display_with(Profile::Disabled).to_string();
+        assert!(
+            text.lines()
+                .nth(usize::from(selected))
+                .unwrap()
+                .contains("queue-6")
+        );
+        assert_eq!(
+            body.cell(Position::new(0, selected)).unwrap().style.bg,
+            Some(status::SURFACE)
+        );
+
+        let mut bottom = TextBuffer::new(120, 5);
+        let (bottom_h, _) = paint_bottom(
+            &mut bottom,
+            shown,
+            &ui,
+            status,
+            footer,
+            true,
+            layout.show_help,
+            layout.visible,
+            layout.constrained,
+            0,
+        );
+        assert_eq!(bottom_h, 5);
+        let mut screen = TextBuffer::new(120, 17);
+        render::compose(
+            &mut screen,
+            &mut body,
+            body_h,
+            &mut bottom,
+            bottom_h,
+            17,
+            Some(selected),
+        );
+        let text = screen.display_with(Profile::Disabled).to_string();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 17);
+        assert!(lines[12].contains("/other  (6 matches)"));
+        assert!(lines[14].contains(status));
+        assert!(lines[16].contains("r refreshing"));
+    }
+
+    #[test]
     fn responsive_height_prioritizes_building_and_mine_queue_rows() {
         let sections = Sections {
             prs: Some(vec![]),
@@ -2560,8 +2771,8 @@ mod tests {
 
         let mine_and_building = mine_layout(&sections, 13);
         assert_eq!(
-            mine_and_building.visible.queue,
-            Some(queue::VisibleRows::BuildingAndMine)
+            nav::targets_visible(View::Mine, &sections, "", mine_and_building.visible),
+            ["https://queue/1", "https://queue/2", "https://queue/3"]
         );
         let body = visible_body(&sections, mine_and_building.visible);
         for title in ["queue-1", "queue-2", "queue-3"] {
@@ -2573,7 +2784,10 @@ mod tests {
         assert!(body.contains("+2 hidden"), "hidden count should be shown");
 
         let building = mine_layout(&sections, 12);
-        assert_eq!(building.visible.queue, Some(queue::VisibleRows::Building));
+        assert_eq!(
+            nav::targets_visible(View::Mine, &sections, "", building.visible),
+            ["https://queue/1", "https://queue/3"]
+        );
         let body = visible_body(&sections, building.visible);
         for title in ["queue-1", "queue-3"] {
             assert!(body.contains(title), "{title} should be visible");
@@ -2584,7 +2798,14 @@ mod tests {
         );
         assert!(body.contains("+3 hidden"), "hidden count should be shown");
 
-        let none = mine_layout(&sections, 11);
+        let one = mine_layout(&sections, 11);
+        assert_eq!(
+            nav::targets_visible(View::Mine, &sections, "", one.visible),
+            ["https://queue/1"]
+        );
+        assert!(visible_body(&sections, one.visible).contains("+4 hidden"));
+
+        let none = mine_layout(&sections, 8);
         assert_eq!(none.visible.queue, None);
     }
 
@@ -2597,7 +2818,7 @@ mod tests {
         };
         let layout = mine_layout(&sections, 9);
 
-        assert_eq!(layout.visible.queue, Some(queue::VisibleRows::Building));
+        assert!(layout.visible.queue.is_some());
         assert!(!layout.too_small);
         let body = visible_body(&sections, layout.visible);
         assert!(body.contains("Merge Queue (4)"));

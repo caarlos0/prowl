@@ -477,7 +477,10 @@ mod tests {
         s.queue = Some(vec![building, mine, other]);
         s.merged = Some(vec![merged(4), merged(5)]);
         let mut visible = Visibility::all(&s);
-        visible.queue = Some(crate::queue::VisibleRows::BuildingAndMine);
+        visible.queue = Some(crate::queue::VisibleRows::limited(
+            s.queue.as_deref().unwrap(),
+            2,
+        ));
         visible.merged = Some(1);
 
         assert_eq!(
@@ -493,7 +496,10 @@ mod tests {
             vec!["https://m/4"]
         );
 
-        visible.queue = Some(crate::queue::VisibleRows::Building);
+        visible.queue = Some(crate::queue::VisibleRows::limited(
+            s.queue.as_deref().unwrap(),
+            1,
+        ));
         assert_eq!(
             targets_visible(View::Mine, &s, "", visible),
             vec!["https://q/1", "https://m/4"]
@@ -510,10 +516,17 @@ mod tests {
         let mut s = empty();
         s.queue = Some(vec![building, mine_b, mine_c]);
         let mut visible = Visibility::all(&s);
-        visible.queue = Some(crate::queue::VisibleRows::BuildingAndMine);
+        visible.queue = Some(crate::queue::VisibleRows::limited(
+            s.queue.as_deref().unwrap(),
+            2,
+        ));
 
         let selected = targets_visible(View::Mine, &s, "", visible)[1].to_string();
         s.queue.as_mut().unwrap()[0].checks.running = 0;
+        visible.queue = Some(crate::queue::VisibleRows::limited(
+            s.queue.as_deref().unwrap(),
+            2,
+        ));
 
         assert_eq!(
             target_index(View::Mine, &s, "", visible, &selected),

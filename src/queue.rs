@@ -29,18 +29,34 @@ pub struct QueueRow {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum VisibleRows {
-    All,
-    BuildingAndMine,
-    Building,
+pub(crate) struct VisibleRows {
+    building: usize,
+    mine: usize,
+    other: usize,
 }
 
 impl VisibleRows {
-    pub(crate) fn includes(self, row: &QueueRow) -> bool {
-        match self {
-            Self::All => true,
-            Self::BuildingAndMine => row.checks.running > 0 || row.mine,
-            Self::Building => row.checks.running > 0,
+    pub(crate) const ALL: Self = Self {
+        building: usize::MAX,
+        mine: usize::MAX,
+        other: usize::MAX,
+    };
+
+    pub(crate) fn limited(rows: &[QueueRow], limit: usize) -> Self {
+        let building = rows
+            .iter()
+            .filter(|row| row.checks.running > 0)
+            .count()
+            .min(limit);
+        let mine = rows
+            .iter()
+            .filter(|row| row.mine && row.checks.running == 0)
+            .count()
+            .min(limit - building);
+        Self {
+            building,
+            mine,
+            other: limit - building - mine,
         }
     }
 
@@ -48,8 +64,21 @@ impl VisibleRows {
         self.iter(rows).count()
     }
 
-    pub(crate) fn iter(self, rows: &[QueueRow]) -> impl Iterator<Item = &QueueRow> {
-        rows.iter().filter(move |row| self.includes(row))
+    pub(crate) fn iter(mut self, rows: &[QueueRow]) -> impl Iterator<Item = &QueueRow> {
+        rows.iter().filter(move |row| {
+            let remaining = if row.checks.running > 0 {
+                &mut self.building
+            } else if row.mine {
+                &mut self.mine
+            } else {
+                &mut self.other
+            };
+            if *remaining == 0 {
+                return false;
+            }
+            *remaining -= 1;
+            true
+        })
     }
 }
 

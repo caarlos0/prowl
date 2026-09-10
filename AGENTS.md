@@ -132,8 +132,11 @@ watch event loop); everything else is testable modules:
   caret)` fills exactly `rows` rows — as much of the body as fits at the top,
   blank padding, then the bottom block glued to the last rows — and returns the
   row that block starts on. Before composition, `responsive_layout` hides help,
-  then Shipments; progressively trims Merged to the newest row; narrows Queue
-  to building + own rows, then building rows; and finally hides each section.
+  then Shipments; progressively trims Merged to the newest row; trims Queue
+  one row at a time, retaining building rows first, then own rows, then other
+  entries (earliest queue positions first within each priority); and finally
+  hides each section. Queue rows stay in position order and fill the available
+  height through `queue::VisibleRows`' per-priority row limits.
   Each partial section ends with `+N hidden`. The Reviews view still hides
   Reviewed & merged as one section. Navigation, search counts, open, and copy
   use the same `Visibility`, including its row limits. If the protected open-PR
@@ -391,8 +394,11 @@ still performs all teardown through `finish`.
   suspends/resumes. The bottom block — help legend, search prompt, error line,
   footer — is **pinned** to the last rows of the screen (`render::compose`).
   Height pressure hides help and Shipments, trims Merged oldest-first to one
-  row, then narrows Queue to building + own rows and building-only before hiding
-  it. Partial sections show `+N hidden`. The Reviews view hides Reviewed & merged
+  row, then trims Queue to the available height one row at a time, retaining
+  building PRs first, then own PRs, then other entries. Within each priority,
+  earlier queue positions stay visible first; displayed rows remain in queue
+  order. The queue disappears only when its header and hidden count cannot fit.
+  Partial sections show `+N hidden`. The Reviews view hides Reviewed & merged
   as one section. Open PRs remain whole; if they cannot fit, the frame says
   `Terminal too small — need W×H.` The only persistent
   bottom line is the footer
