@@ -12,15 +12,15 @@ use crate::{Sections, Visibility};
 
 /// A row the search can match (its `haystack`) and the cursor can open (`url`).
 trait Searchable {
-    /// PR number, title, and (where present) author or release tag, joined for a
-    /// single case-insensitive substring test.
+    /// PR number, title, branch, and (where present) author or release tag,
+    /// joined for a single case-insensitive substring test.
     fn haystack(&self) -> String;
     fn url(&self) -> &str;
 }
 
 impl Searchable for PrRow {
     fn haystack(&self) -> String {
-        format!("#{} {}", self.number, self.title)
+        format!("#{} {} {}", self.number, self.title, self.branch)
     }
     fn url(&self) -> &str {
         &self.url
@@ -28,7 +28,10 @@ impl Searchable for PrRow {
 }
 impl Searchable for QueueRow {
     fn haystack(&self) -> String {
-        format!("#{} {} {}", self.number, self.title, self.author)
+        format!(
+            "#{} {} {} {}",
+            self.number, self.title, self.branch, self.author
+        )
     }
     fn url(&self) -> &str {
         &self.url
@@ -37,7 +40,7 @@ impl Searchable for QueueRow {
 impl Searchable for MergedRow {
     fn haystack(&self) -> String {
         let tag = self.release.as_ref().map_or("", |x| x.tag.as_str());
-        format!("#{} {} {}", self.number, self.title, tag)
+        format!("#{} {} {} {}", self.number, self.title, self.branch, tag)
     }
     fn url(&self) -> &str {
         &self.url
@@ -45,7 +48,10 @@ impl Searchable for MergedRow {
 }
 impl Searchable for ReviewRow {
     fn haystack(&self) -> String {
-        format!("#{} {} {}", self.number, self.title, self.author)
+        format!(
+            "#{} {} {} {}",
+            self.number, self.title, self.branch, self.author
+        )
     }
     fn url(&self) -> &str {
         &self.url
@@ -53,7 +59,10 @@ impl Searchable for ReviewRow {
 }
 impl Searchable for ReviewedMergedRow {
     fn haystack(&self) -> String {
-        format!("#{} {} {}", self.number, self.title, self.author)
+        format!(
+            "#{} {} {} {}",
+            self.number, self.title, self.branch, self.author
+        )
     }
     fn url(&self) -> &str {
         &self.url
@@ -574,6 +583,12 @@ mod tests {
         assert_eq!(targets(View::Mine, &s, "#2"), vec!["https://pr/2"]);
         // Author (case-insensitive) hits the queue row.
         assert_eq!(targets(View::Mine, &s, "ME"), vec!["https://q/3"]);
+        // Branch hits the matching PR in every section.
+        assert_eq!(targets(View::Mine, &s, "B/2"), vec!["https://pr/2"]);
+        assert_eq!(
+            targets(View::Mine, &s, "b/"),
+            vec!["https://pr/1", "https://pr/2", "https://q/3", "https://m/4"]
+        );
         // Release tag hits the release; "upcoming" hits the upcoming bucket.
         assert_eq!(targets(View::Mine, &s, "v1.5"), vec!["https://rel/v1"]);
         assert_eq!(targets(View::Mine, &s, "upcoming"), vec!["https://up"]);

@@ -197,7 +197,7 @@ watch event loop); everything else is testable modules:
   `section_at(…, index)` is the one group holding `index` (what `Y` copies; an
   empty section holds no index, so index 0 means the first non-empty one),
   `filter(&Sections, query)` clones the matching rows for rendering
-  (same per-row haystack — number/title/author/tag — so rows and targets stay in
+  (same per-row haystack — number/title/branch/author/tag — so rows and targets stay in
   lockstep), `moved` advances the selection cursor by a `nav::Move` (the
   input-agnostic movement type — `lib.rs::classify` maps keys onto it; lazy:
   `None` until the first move, `Bottom` enters at the last row). Refreshes and
@@ -361,7 +361,7 @@ still performs all teardown through `finish`.
   cursor is ready for the next move. Watch mode
   only — `--once`/piped output has no keys.
 - **Search / filter:** `/` opens a search prompt (`Ui.searching`); typing filters
-  the rows live (case-insensitive substring over number/title/author/release
+  the rows live (case-insensitive substring over number/title/branch/author/release
   tag), Enter applies the filter and returns to the list, Esc (or a lone Esc from
   the list) clears it — and with no filter to clear, Esc quits. While the prompt
   is open every keystroke is text (`classify_search`), else keys are normal-mode

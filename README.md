@@ -115,8 +115,8 @@ applied, it copies only the matching rows. Copying uses the OSC 52 escape, so it
 sets the clipboard of the terminal you're looking at even over SSH — as long as
 that terminal supports it (in tmux, `set -g set-clipboard on`).
 
-Press `/` to search: type to filter the rows live by number, title, author, or
-release tag; `Enter` applies the filter and drops you back to the list (so the
+Press `/` to search: type to filter the rows live by number, title, branch,
+author, or release tag; `Enter` applies the filter and drops you back to the list (so the
 cursor and `Enter` work on the matches), and `Esc` clears it (with no
 filter to clear, `Esc` quits).
 
