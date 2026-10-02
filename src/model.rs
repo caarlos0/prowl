@@ -238,6 +238,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
     nodes {
       ... on PullRequest {
         number title url mergeable mergeStateStatus isDraft updatedAt createdAt headRefName
+        reviewDecision
         latestOpinionatedReviews(first: 100) { nodes { state } }
         mergeQueueEntry { position state }
         reviewThreads(first: 100) { totalCount nodes { isResolved } }
@@ -277,6 +278,9 @@ pub struct PrNode {
     /// The PR's head branch.
     #[serde(rename = "headRefName")]
     pub head_ref_name: Option<String>,
+    /// Whether the PR satisfies GitHub's required review rules; null without them.
+    #[serde(rename = "reviewDecision")]
+    pub review_decision: Option<String>,
     /// The latest `APPROVED` / `CHANGES_REQUESTED` review of each reviewer.
     #[serde(rename = "latestOpinionatedReviews", default)]
     pub latest_opinionated_reviews: OpinionatedReviews,
@@ -403,9 +407,10 @@ impl PrNode {
         )
     }
 
-    /// Whether a reviewer approved the PR.
+    /// Whether the PR has any approval or all required approvals.
     pub fn approval(&self) -> Approval {
         status::approval_of(
+            self.review_decision.as_deref(),
             self.latest_opinionated_reviews
                 .nodes
                 .iter()
@@ -865,6 +870,15 @@ mod tests {
         }
         assert!(MINE_QUERY.contains("createdAt"), "{MINE_QUERY}");
         assert!(MINE_QUERY.contains("updatedAt"), "{MINE_QUERY}");
+    }
+
+    #[test]
+    fn mine_query_requests_required_and_individual_approvals() {
+        assert!(MINE_QUERY.contains("reviewDecision"), "{MINE_QUERY}");
+        assert!(
+            MINE_QUERY.contains("latestOpinionatedReviews"),
+            "{MINE_QUERY}"
+        );
     }
 
     #[test]

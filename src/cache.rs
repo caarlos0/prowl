@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bump when the cached data model changes; older files are then ignored.
-const VERSION: u32 = 13;
+const VERSION: u32 = 14;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]
@@ -152,7 +152,30 @@ mod tests {
     }
 
     #[test]
-    fn caches_without_creation_timestamps_are_invalidated() {
+    fn cached_approval_states_round_trip() {
+        let data: crate::model::MineData =
+            crate::github::parse_graphql(include_bytes!("../tests/fixtures/mine.json")).unwrap();
+        let mut rows = prs::build_rows(data.search.nodes, OpenSort::Updated);
+        for (row, approval) in rows.iter_mut().zip(crate::status::APPROVAL_ORDER) {
+            row.approval = approval;
+        }
+        let sections = Sections {
+            prs: Some(rows),
+            ..Sections::EMPTY
+        };
+        let encoded = serde_json::to_vec(&CacheRef {
+            version: VERSION,
+            required: false,
+            saved_at: "12:00:00",
+            sections: &sections,
+        })
+        .unwrap();
+        let cached = parse(&encoded, false, OpenSort::Updated).unwrap();
+        assert_eq!(cached.sections.prs, sections.prs);
+    }
+
+    #[test]
+    fn older_cache_versions_are_invalidated() {
         let encoded = serde_json::to_vec(&CacheRef {
             version: VERSION - 1,
             required: false,

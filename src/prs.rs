@@ -21,7 +21,7 @@ pub struct PrRow {
     /// Head branch.
     #[serde(default)]
     pub branch: String,
-    /// The leading glyph: whether a human approved it.
+    /// The leading glyph: any approval or all required approvals.
     pub approval: Approval,
     /// Whether it conflicts with its base branch — marks the title.
     pub conflicts: bool,
@@ -171,6 +171,7 @@ mod tests {
             updated_at: None,
             created_at: None,
             head_ref_name: Some(format!("branch-{number}")),
+            review_decision: None,
             latest_opinionated_reviews: OpinionatedReviews::default(),
             merge_queue_entry: None,
             review_threads: ReviewThreads {

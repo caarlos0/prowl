@@ -96,8 +96,9 @@ watch event loop); everything else is testable modules:
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
   two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
   (reuses `merged_query`, now carrying `author`).
-- `status.rs` — **the** palette: `Approval` (Approved/Pending) with
-  `approval_of` (any `latestOpinionatedReviews` state is `APPROVED`),
+- `status.rs` — **the** palette: `Approval` (RequiredApproved/Approved/Pending)
+  with `approval_of` (`reviewDecision: APPROVED` means all required reviews are
+  approved; otherwise any `latestOpinionatedReviews` approval means Approved),
   `approval_style`/`approval_glyph`/`approval_ascii`/`approval_meaning` and
   `APPROVAL_ORDER`; the conflict marker — `conflicts_of` (true when `mergeable`
   or `mergeStateStatus` reports a conflict; every other reason a merge waits has
@@ -239,8 +240,8 @@ watch event loop); everything else is testable modules:
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
   Loading re-sorts My open PRs using the current `--sort-open` value rather
-  than the order saved by a previous run. Caches from before creation timestamps
-  were stored are invalidated.
+  than the order saved by a previous run. Caches from before the required-approval
+  state was stored are invalidated.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 `run()` loads CLI/config settings, then creates a
@@ -323,13 +324,14 @@ still performs all teardown through `finish`.
 
 ## Key behaviors
 
-- **Approval glyph:** approved when any reviewer's latest opinionated review is
-  `APPROVED`, and nothing else feeds it — a later change request does not undo
-  it, because `THREADS` already reports what is still open. GitHub's own
-  `reviewDecision` is deliberately unused: it is null wherever no branch rule
-  requires a review, and it answers "may this merge?", not "did anyone
-  approve?". Across 189 real PRs it never reported `APPROVED` without an
-  approving review, so it adds nothing here.
+- **Approval glyph:** a double check (`nf-fa-check_double`, `U+EE29`; ASCII `Y`)
+  when GitHub's `reviewDecision` is `APPROVED`, meaning all required reviews are
+  approved. Otherwise a single check (ASCII `y`) when any reviewer's latest
+  opinionated review is `APPROVED`, even if more approvals are required or another
+  reviewer requests changes. With no approval, show the pending glyph (ASCII `n`).
+  A null or missing decision, including repos without required reviews, never
+  upgrades a single check. CI, unresolved threads, conflicts, and the bell's
+  coarse status key remain separate.
 - **Conflict marker:** a conflicting PR (`mergeable: CONFLICTING` or
   `mergeStateStatus: DIRTY` — the two are computed by the same job and one can
   land first) prefixes its title with a red marker; nothing else marks the
@@ -497,7 +499,8 @@ still performs all teardown through `finish`.
   (the FAIL/RUN/PASS semaphore), plus the queue-level
   `nextEntryEstimatedTimeToMerge` (the header ETA).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
-  `mergeStateStatus`, `latestOpinionatedReviews(first: 100) { nodes { state } }`,
+  `mergeStateStatus`, `reviewDecision`,
+  `latestOpinionatedReviews(first: 100) { nodes { state } }`,
   `mergeQueueEntry`, `headRefName`, `updatedAt`, `createdAt`,
   `reviewThreads(first: 100) { totalCount nodes { isResolved } }` (no unresolved
   aggregate exists, hence the page + a `+` when capped), and the last commit's

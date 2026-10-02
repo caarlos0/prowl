@@ -221,6 +221,53 @@ fn mine_creation_timestamps_drive_render_order() {
 }
 
 #[test]
+fn mine_distinguishes_required_approvals_from_any_approval() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/mine.json")).unwrap();
+    for (decision, reviews, ascii, glyph) in [
+        (Some("APPROVED"), vec!["APPROVED"], "Y", "\u{ee29}"),
+        (Some("REVIEW_REQUIRED"), vec!["APPROVED"], "y", "\u{f00c}"),
+        (
+            Some("CHANGES_REQUESTED"),
+            vec!["APPROVED", "CHANGES_REQUESTED"],
+            "y",
+            "\u{f00c}",
+        ),
+        (None, vec!["APPROVED"], "y", "\u{f00c}"),
+        (Some("REVIEW_REQUIRED"), vec![], "n", "\u{f05e}"),
+        (
+            Some("CHANGES_REQUESTED"),
+            vec!["CHANGES_REQUESTED"],
+            "n",
+            "\u{f05e}",
+        ),
+        (None, vec![], "n", "\u{f05e}"),
+    ] {
+        let mut node = fixture["data"]["search"]["nodes"][0].clone();
+        node["reviewDecision"] = serde_json::json!(decision);
+        node["latestOpinionatedReviews"] = serde_json::json!({
+            "nodes": reviews.iter().map(|state| serde_json::json!({ "state": state }))
+                .collect::<Vec<_>>()
+        });
+        let response = serde_json::json!({ "data": { "search": { "nodes": [node] } } });
+        let data: MineData = parse(&response.to_string());
+        let rows = prs::build_rows(data.search.nodes, OpenSort::Updated);
+        for (use_ascii, expected) in [(true, ascii), (false, glyph)] {
+            let table = prs::to_table(&rows, use_ascii, &HashSet::new(), false);
+            assert_eq!(
+                table.rows[0][1].text, expected,
+                "decision={decision:?}, reviews={reviews:?}, ascii={use_ascii}"
+            );
+            let text = render::render_table(&table, false);
+            assert!(text.contains(expected), "{text}");
+        }
+        // Approval requirements are independent of CI and merge conflicts.
+        assert_eq!(rows[0].status, Some(Status::Conflicts));
+        assert_eq!(rows[0].checks.fail, 4);
+    }
+}
+
+#[test]
 fn mine_ascii_approval_letters_and_conflict_titles() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
     let rows = prs::build_rows(data.search.nodes, OpenSort::Updated);

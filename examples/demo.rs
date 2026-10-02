@@ -111,6 +111,7 @@ fn sections() -> prowl::Sections {
     prowl::Sections {
         prs: Some(vec![
             PrRow {
+                approval: Approval::RequiredApproved,
                 updated_at: ago(7),
                 ..open_pr(
                     412,

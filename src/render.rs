@@ -1087,6 +1087,24 @@ mod tests {
     }
 
     #[test]
+    fn help_distinguishes_required_approvals_from_any_approval() {
+        for (ascii, required, any) in [(true, "Y", "y"), (false, "\u{ee29}", "\u{f00c}")] {
+            let height = help_height(View::Mine) as u16;
+            let text = encode(120, height, Profile::Disabled, |b| {
+                assert_eq!(paint_help(b, View::Mine, ascii, 0), height);
+            });
+            assert!(
+                text.contains(&format!("{required}  all required reviews approved")),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!("{any}  a reviewer approved it")),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn truncate_marks_cut_with_ellipsis() {
         assert_eq!(truncate("short", 10, false), "short");
         assert_eq!(truncate("hello world", 8, false), "hello w\u{22ef}");

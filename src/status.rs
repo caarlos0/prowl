@@ -29,12 +29,12 @@ pub enum Status {
     Pass,
 }
 
-/// Whether a PR has an approval — the leading glyph of the "My open PRs"
-/// table. Deliberately binary: it answers only "did a human say yes?", and
-/// nothing else feeds it. Checks, unresolved threads, and conflicts each have
-/// their own place in the row.
+/// A PR's approvals — the leading glyph of the "My open PRs" table.
+/// Checks, unresolved threads, and conflicts each have their own place.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Approval {
+    /// GitHub reports that all required reviews are approved.
+    RequiredApproved,
     /// A reviewer approved it.
     Approved,
     /// Nobody has approved it yet.
@@ -42,15 +42,22 @@ pub enum Approval {
 }
 
 /// Approval states in legend order.
-pub const APPROVAL_ORDER: [Approval; 2] = [Approval::Approved, Approval::Pending];
+pub const APPROVAL_ORDER: [Approval; 3] = [
+    Approval::RequiredApproved,
+    Approval::Approved,
+    Approval::Pending,
+];
 
-/// Whether any reviewer's latest opinionated review is an approval. A later
-/// change request does not undo it — the `THREADS` column reports what is still
-/// open, so the glyph stays on its one question. GitHub's own `reviewDecision`
-/// is deliberately not used: it is null wherever no branch rule requires a
-/// review, and it answers "may this merge?", not "did anyone approve?".
-pub fn approval_of<'a>(latest_reviews: impl IntoIterator<Item = &'a str>) -> Approval {
-    if latest_reviews.into_iter().any(|state| state == "APPROVED") {
+/// GitHub's review decision determines whether required approvals are met.
+/// Otherwise, keep showing any approval, including when no reviews are required
+/// (`reviewDecision` is null) or another reviewer has requested changes.
+pub fn approval_of<'a>(
+    review_decision: Option<&str>,
+    latest_reviews: impl IntoIterator<Item = &'a str>,
+) -> Approval {
+    if review_decision == Some("APPROVED") {
+        Approval::RequiredApproved
+    } else if latest_reviews.into_iter().any(|state| state == "APPROVED") {
         Approval::Approved
     } else {
         Approval::Pending
@@ -60,14 +67,16 @@ pub fn approval_of<'a>(latest_reviews: impl IntoIterator<Item = &'a str>) -> App
 /// Glyph + truecolor for an approval state.
 pub fn approval_style(a: Approval) -> (char, Color) {
     match a {
-        Approval::Approved => ('\u{f00c}', GREEN), // check
-        Approval::Pending => ('\u{f05e}', YELLOW), // ban
+        Approval::RequiredApproved => ('\u{ee29}', GREEN), // check-double
+        Approval::Approved => ('\u{f00c}', GREEN),         // check
+        Approval::Pending => ('\u{f05e}', YELLOW),         // ban
     }
 }
 
 /// ASCII fallback letter for an approval state.
 pub fn approval_ascii(a: Approval) -> char {
     match a {
+        Approval::RequiredApproved => 'Y',
         Approval::Approved => 'y',
         Approval::Pending => 'n',
     }
@@ -85,6 +94,7 @@ pub fn approval_glyph(a: Approval, ascii: bool) -> char {
 /// One-line meaning of an approval state (for the help legend).
 pub fn approval_meaning(a: Approval) -> &'static str {
     match a {
+        Approval::RequiredApproved => "all required reviews approved",
         Approval::Approved => "a reviewer approved it",
         Approval::Pending => "nobody has approved it yet",
     }
@@ -320,30 +330,55 @@ mod tests {
 
     #[test]
     fn approval_palette_glyphs_colors_and_letters() {
+        assert_eq!(
+            approval_style(Approval::RequiredApproved),
+            ('\u{ee29}', GREEN)
+        );
         assert_eq!(approval_style(Approval::Approved), ('\u{f00c}', GREEN));
         assert_eq!(approval_style(Approval::Pending), ('\u{f05e}', YELLOW));
+        assert_eq!(approval_ascii(Approval::RequiredApproved), 'Y');
         assert_eq!(approval_ascii(Approval::Approved), 'y');
         assert_eq!(approval_ascii(Approval::Pending), 'n');
         // The ASCII toggle picks the letter; otherwise the glyph.
+        assert_eq!(approval_glyph(Approval::RequiredApproved, true), 'Y');
+        assert_eq!(
+            approval_glyph(Approval::RequiredApproved, false),
+            '\u{ee29}'
+        );
         assert_eq!(approval_glyph(Approval::Approved, true), 'y');
         assert_eq!(approval_glyph(Approval::Approved, false), '\u{f00c}');
     }
 
     #[test]
     fn one_approval_is_enough_and_a_change_request_does_not_undo_it() {
-        assert_eq!(approval_of([]), Approval::Pending);
-        assert_eq!(approval_of(["APPROVED"]), Approval::Approved);
-        assert_eq!(approval_of(["CHANGES_REQUESTED"]), Approval::Pending);
+        assert_eq!(approval_of(None, []), Approval::Pending);
+        assert_eq!(approval_of(None, ["APPROVED"]), Approval::Approved);
+        assert_eq!(approval_of(None, ["CHANGES_REQUESTED"]), Approval::Pending);
         // A change request leaves the approval standing: the THREADS column
         // reports what is still open, so the glyph keeps its one meaning.
         assert_eq!(
-            approval_of(["APPROVED", "CHANGES_REQUESTED"]),
+            approval_of(None, ["APPROVED", "CHANGES_REQUESTED"]),
             Approval::Approved
         );
         assert_eq!(
-            approval_of(["CHANGES_REQUESTED", "APPROVED"]),
+            approval_of(None, ["CHANGES_REQUESTED", "APPROVED"]),
             Approval::Approved
         );
+    }
+
+    #[test]
+    fn required_approval_uses_the_decision_not_the_review_page() {
+        assert_eq!(
+            approval_of(Some("APPROVED"), []),
+            Approval::RequiredApproved
+        );
+        for decision in [None, Some("REVIEW_REQUIRED"), Some("CHANGES_REQUESTED")] {
+            assert_eq!(
+                approval_of(decision, ["APPROVED", "APPROVED"]),
+                Approval::Approved,
+                "{decision:?}"
+            );
+        }
     }
 
     #[test]

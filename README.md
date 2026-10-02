@@ -21,9 +21,11 @@ list includes only PRs that request you directly or also your teams'.
 It talks to the GitHub API directly. On first run it walks you through a
 one-time browser **device login** (or set `GITHUB_TOKEN`).
 
-Each open PR leads with **one** Catppuccin-colored glyph answering one question:
-did a reviewer **approve** it? Nothing else feeds that glyph — a later change
-request does not undo the approval, since the thread count is right there. A PR
+Each open PR leads with a Catppuccin-colored approval glyph: a **single check**
+means a reviewer approved it, and a **double check** means GitHub reports that
+**all required reviews are approved**. Without required reviews, approvals keep
+the single check. If more reviews are required or another reviewer requests
+changes, an existing approval still earns a single check. A PR
 that **conflicts** with its base branch marks its own title in red, so it costs
 no column. Everything else that could hold a PR back is broken out to the right:
 a red/yellow/green **check semaphore** (`FAIL` / `RUN` / `PASS` check-run
@@ -36,7 +38,8 @@ Use `--required` to count only checks required to merge each pull request; in
 the merge queue, `BUILD` then starts at the first required job.
 
 On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) approval
-falls back to `y` approved and `n` not approved, and the conflict marker to `!`.
+falls back to `Y` all required reviews approved, `y` a reviewer approved it, and
+`n` nobody approved it. The conflict marker falls back to `!`.
 `--branch` adds the head branch to every PR table, and `--no-draft`
 hides drafts. Each PR number is a clickable link to the PR. Tables use the full
 terminal width, giving most space to the title and then the optional branch. As
