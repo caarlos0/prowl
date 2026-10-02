@@ -70,6 +70,7 @@ watch event loop); everything else is testable modules:
 
 - `cli.rs` — clap derive CLI, `Section` enum, `View` (Mine/Reviews, `--view`,
   `.toggle()`), `ReviewScope` (Direct/All, `--review-scope`, `.qualifier()`),
+  `OpenSort` (Updated/Created, `--sort-open`, newest first, My open PRs only),
   `--required` for required-only CI counts, `--link-format` for copied links
   (default `{url}`; supports `{title}` and `{url}`),
   `--bell=true/false` (default true, with `--no-bell` retained as an alias),
@@ -161,6 +162,8 @@ watch event loop); everything else is testable modules:
   a `uncurses::buffer::View`, which clips without translating, so blitting it maps
   the first visible body row onto the top of the screen.
 - `queue.rs` / `prs.rs` / `merged.rs` — per-section rows, sorting, `to_table`.
+  `prs::build_rows(nodes, sort)` retains both `updated_at` and `created_at`;
+  `prs::sort_rows` applies `OpenSort` and is shared with cache loading.
   Each row's PR number is the OSC-8 link (no separate URL column). The open-PRs
   columns are `[mark] [A] PR TITLE [BRANCH] THREADS FAIL RUN PASS`: `A` is the
   approval glyph, a conflicting PR prefixes its own `TITLE` with the red conflict
@@ -235,6 +238,9 @@ watch event loop); everything else is testable modules:
   otherwise, hence the "copied N links" wording.
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
+  Loading re-sorts My open PRs using the current `--sort-open` value rather
+  than the order saved by a previous run. Caches from before creation timestamps
+  were stored are invalidated.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 `run()` loads CLI/config settings, then creates a
@@ -339,7 +345,12 @@ still performs all teardown through `finish`.
   `STALE` lights no lamp (it neither blocks nor runs).
 - **Status precedence** (the bell key only): `conflicts > fail > running > pass
   > none`.
-- **Sorting:** open PRs by `updatedAt` desc, merged PRs by `mergedAt` desc;
+- **Sorting:** My open PRs by `updatedAt` desc by default; `--sort-open created`
+  (or `sort-open created` in config) uses `createdAt` desc instead. Both use PR
+  number desc for ties and put missing timestamps last. The chosen order is
+  also sent in the GitHub search, before its 50-result limit, and reapplied to
+  cached rows at startup. It does not affect any other section:
+  merged PRs by `mergedAt` desc;
   queue by `position` asc. Reviews by review-state rank (Awaiting → ReReview →
   Updated → Reviewed) then `updatedAt` desc; reviewed-and-merged by `mergedAt` desc.
 - **Queue dedup:** a PR of mine that's in the merge queue is shown only in the
@@ -487,7 +498,7 @@ still performs all teardown through `finish`.
   `nextEntryEstimatedTimeToMerge` (the header ETA).
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
   `mergeStateStatus`, `latestOpinionatedReviews(first: 100) { nodes { state } }`,
-  `mergeQueueEntry`, `headRefName`, `updatedAt`,
+  `mergeQueueEntry`, `headRefName`, `updatedAt`, `createdAt`,
   `reviewThreads(first: 100) { totalCount nodes { isResolved } }` (no unresolved
   aggregate exists, hence the page + a `+` when capped), and the last commit's
   `statusCheckRollup { contexts(first: 1) { checkRunCountsByState

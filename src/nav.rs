@@ -384,6 +384,7 @@ mod tests {
             queue: None,
             url: format!("https://pr/{n}"),
             updated_at: None,
+            created_at: None,
         }
     }
 

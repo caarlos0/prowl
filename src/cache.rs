@@ -3,13 +3,15 @@
 //! dir (`$XDG_CACHE_HOME/prowl`, `%LOCALAPPDATA%\prowl`, or `~/.cache/prowl`).
 
 use crate::Sections;
+use crate::cli::OpenSort;
 use crate::github::Repo;
+use crate::prs;
 use crate::timefmt;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Bump when the cached layout changes; older files are then ignored.
-const VERSION: u32 = 12;
+/// Bump when the cached data model changes; older files are then ignored.
+const VERSION: u32 = 13;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]
@@ -44,10 +46,20 @@ fn cache_file(repo: &Repo) -> Option<PathBuf> {
 }
 
 /// Load the cached sections for `repo`, if any (and matching the layout).
-pub(crate) fn load(repo: &Repo, required: bool) -> Option<Cached> {
+pub(crate) fn load(repo: &Repo, required: bool, sort_open: OpenSort) -> Option<Cached> {
     let bytes = std::fs::read(cache_file(repo)?).ok()?;
-    let cached: Cached = serde_json::from_slice(&bytes).ok()?;
-    compatible(&cached, required).then_some(cached)
+    parse(&bytes, required, sort_open)
+}
+
+fn parse(bytes: &[u8], required: bool, sort_open: OpenSort) -> Option<Cached> {
+    let mut cached: Cached = serde_json::from_slice(bytes).ok()?;
+    if !compatible(&cached, required) {
+        return None;
+    }
+    if let Some(rows) = &mut cached.sections.prs {
+        prs::sort_rows(rows, sort_open);
+    }
+    Some(cached)
 }
 
 fn compatible(cached: &Cached, required: bool) -> bool {
@@ -95,5 +107,61 @@ mod tests {
         };
         assert!(compatible(&cached, true));
         assert!(!compatible(&cached, false));
+    }
+
+    #[test]
+    fn cached_open_prs_follow_the_current_sort_not_the_saved_order() {
+        let mut data: crate::model::MineData =
+            crate::github::parse_graphql(include_bytes!("../tests/fixtures/mine.json")).unwrap();
+        for (node, created) in data.search.nodes.iter_mut().zip([
+            "2026-01-01T00:00:00Z",
+            "2026-01-03T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+        ]) {
+            node.created_at = Some(created.into());
+        }
+        let sections = Sections {
+            prs: Some(prs::build_rows(data.search.nodes, OpenSort::Updated)),
+            ..Sections::EMPTY
+        };
+        let encoded = serde_json::to_vec(&CacheRef {
+            version: VERSION,
+            required: false,
+            saved_at: "12:00:00",
+            sections: &sections,
+        })
+        .unwrap();
+
+        let created = parse(&encoded, false, OpenSort::Created).unwrap();
+        let rows = created.sections.prs.as_ref().unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+            [5323, 6656, 6475]
+        );
+        assert_eq!(rows[0].created_at.as_deref(), Some("2026-01-03T00:00:00Z"));
+        let encoded = serde_json::to_vec(&CacheRef {
+            version: VERSION,
+            required: false,
+            saved_at: "12:00:00",
+            sections: &created.sections,
+        })
+        .unwrap();
+        let updated = parse(&encoded, false, OpenSort::Updated).unwrap();
+        assert_eq!(updated.sections.prs, sections.prs);
+        assert!(parse(&encoded, true, OpenSort::Created).is_none());
+    }
+
+    #[test]
+    fn caches_without_creation_timestamps_are_invalidated() {
+        let encoded = serde_json::to_vec(&CacheRef {
+            version: VERSION - 1,
+            required: false,
+            saved_at: "12:00:00",
+            sections: &Sections::EMPTY,
+        })
+        .unwrap();
+        for sort in [OpenSort::Updated, OpenSort::Created] {
+            assert!(parse(&encoded, false, sort).is_none());
+        }
     }
 }

@@ -343,7 +343,8 @@ fn fetch(
         (None, None)
     };
     let prs = if want_mine && cli.show_mine() {
-        let rows = prs::build_rows(model::fetch_my_prs(client, repo, me, cli.required)?);
+        let nodes = model::fetch_my_prs(client, repo, me, cli.sort_open, cli.required)?;
+        let rows = prs::build_rows(nodes, cli.sort_open);
         let rows = if cli.no_draft {
             prs::without_drafts(rows)
         } else {
@@ -1766,7 +1767,7 @@ impl<'a> App<'a> {
     /// so the first live refresh highlights what changed while prowl was away.
     fn paint_startup(&mut self) -> Result<()> {
         match (!self.cli.no_cache)
-            .then(|| cache::load(self.repo, self.cli.required))
+            .then(|| cache::load(self.repo, self.cli.required, self.cli.sort_open))
             .flatten()
         {
             Some(c) => {
@@ -2439,6 +2440,7 @@ mod tests {
             queue: Some((n, "QUEUED".into())),
             url: format!("https://open/{n}"),
             updated_at: None,
+            created_at: None,
         }
     }
 
@@ -3381,6 +3383,7 @@ mod tests {
                 queue: Some((1, "QUEUED".into())),
                 url: "https://pr/1".into(),
                 updated_at: None,
+                created_at: None,
             }]),
             queue: Some(vec![]),
             ..Sections::EMPTY
@@ -3459,6 +3462,7 @@ mod tests {
             queue: None,
             url: format!("https://pr/{n}"),
             updated_at: None,
+            created_at: None,
         };
         let sections = Sections {
             prs: Some(vec![pr(1), pr(2)]),

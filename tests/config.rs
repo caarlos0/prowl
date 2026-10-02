@@ -79,11 +79,16 @@ fn startup_uses_saved_defaults_and_cli_overrides() {
 #[test]
 fn config_errors_report_path_and_line_even_when_cli_overrides_the_value() {
     let dir = ConfigDir::new();
-    let path = dir.write("prowl/config", "# settings\nbell maybe\n");
-    let output = dir.command().arg("--bell=true").output().unwrap();
-    let error = failure(&output, 1);
-    assert!(error.contains(&format!("{}:2", path.display())), "{error}");
-    assert!(error.contains("invalid value 'maybe'"), "{error}");
+    for (setting, override_arg) in [
+        ("bell maybe", "--bell=true"),
+        ("sort-open maybe", "--sort-open=updated"),
+    ] {
+        let path = dir.write("prowl/config", format!("# settings\n{setting}\n"));
+        let output = dir.command().arg(override_arg).output().unwrap();
+        let error = failure(&output, 1);
+        assert!(error.contains(&format!("{}:2", path.display())), "{error}");
+        assert!(error.contains("invalid value 'maybe'"), "{error}");
+    }
 }
 
 #[test]
@@ -97,15 +102,18 @@ fn help_version_and_cli_errors_do_not_read_config() {
         let stdout = String::from_utf8(output.stdout).unwrap();
         if arg == "--help" {
             assert!(stdout.contains("--bell <BELL>"), "{stdout}");
+            assert!(stdout.contains("--sort-open <ORDER>"), "{stdout}");
             assert!(stdout.contains("~/.config/prowl/config"), "{stdout}");
         } else {
             assert!(stdout.starts_with("prowl "), "{stdout}");
         }
     }
-    let output = dir.command().arg("--bell=maybe").output().unwrap();
-    let error = failure(&output, 2);
-    assert!(error.contains("invalid value 'maybe'"), "{error}");
-    assert!(!error.contains("reading "), "{error}");
+    for arg in ["--bell=maybe", "--sort-open=maybe"] {
+        let output = dir.command().arg(arg).output().unwrap();
+        let error = failure(&output, 2);
+        assert!(error.contains("invalid value 'maybe'"), "{error}");
+        assert!(!error.contains("reading "), "{error}");
+    }
 }
 
 #[test]

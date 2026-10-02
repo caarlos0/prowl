@@ -62,7 +62,7 @@ fn apply_line(mut command: Command, line: &str) -> Result<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{Cli, ReviewScope, Section, View};
+    use crate::cli::{Cli, OpenSort, ReviewScope, Section, View};
     use clap::{CommandFactory, FromArgMatches, Parser};
 
     fn parse(text: &str, args: &[&str]) -> Cli {
@@ -80,6 +80,7 @@ mod tests {
         assert_eq!(actual.only, expected.only);
         assert_eq!(actual.view, expected.view);
         assert_eq!(actual.link_format, expected.link_format);
+        assert_eq!(actual.sort_open, expected.sort_open);
     }
 
     #[test]
@@ -132,6 +133,26 @@ mod tests {
     }
 
     #[test]
+    fn open_sort_uses_config_defaults_and_explicit_cli_overrides() {
+        assert_eq!(
+            parse("sort-open created", &["prowl"]).sort_open,
+            OpenSort::Created
+        );
+        assert_eq!(
+            parse("sort-open created", &["prowl", "--sort-open", "updated"]).sort_open,
+            OpenSort::Updated
+        );
+        assert_eq!(
+            parse("sort-open updated", &["prowl", "--sort-open", "created"]).sort_open,
+            OpenSort::Created
+        );
+        assert_eq!(
+            parse("sort-open created\nsort-open updated", &["prowl"]).sort_open,
+            OpenSort::Updated
+        );
+    }
+
+    #[test]
     fn whitespace_separates_names_but_not_words_in_values() {
         let cli = parse(
             "\tbranch\ttrue\n  link-format   {title} - {url}  \n",
@@ -168,6 +189,7 @@ mod tests {
             ("merged-limit nope", "invalid value"),
             ("only unknown", "invalid value"),
             ("view unknown", "invalid value"),
+            ("sort-open unknown", "invalid value"),
             ("unknown value", "unknown config flag"),
             ("--bell false", "unknown config flag"),
             ("help true", "unknown config flag"),

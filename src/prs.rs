@@ -6,6 +6,7 @@
 //! count. A conflicting PR marks its own title, so conflicts cost no column.
 //! Each column answers exactly one question, so nothing is reported twice.
 
+use crate::cli::OpenSort;
 use crate::model::PrNode;
 use crate::render::{self, Cell, Table};
 use crate::status::{self, Approval, BLUE, Checks, Lamp, PEACH, RED, Status};
@@ -35,10 +36,11 @@ pub struct PrRow {
     pub queue: Option<(i64, String)>,
     pub url: String,
     pub updated_at: Option<String>,
+    pub created_at: Option<String>,
 }
 
-/// Build rows sorted by last update time (most recent first).
-pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
+/// Build rows sorted by the chosen timestamp (most recent first).
+pub fn build_rows(nodes: Vec<PrNode>, sort: OpenSort) -> Vec<PrRow> {
     let mut rows: Vec<PrRow> = nodes
         .into_iter()
         .map(|pr| {
@@ -60,15 +62,22 @@ pub fn build_rows(nodes: Vec<PrNode>) -> Vec<PrRow> {
                 branch: pr.head_ref_name.unwrap_or_default(),
                 url: pr.url,
                 updated_at: pr.updated_at,
+                created_at: pr.created_at,
             }
         })
         .collect();
-    rows.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| b.number.cmp(&a.number))
-    });
+    sort_rows(&mut rows, sort);
     rows
+}
+
+pub(crate) fn sort_rows(rows: &mut [PrRow], sort: OpenSort) {
+    rows.sort_by(|a, b| {
+        let order = match sort {
+            OpenSort::Updated => b.updated_at.cmp(&a.updated_at),
+            OpenSort::Created => b.created_at.cmp(&a.created_at),
+        };
+        order.then_with(|| b.number.cmp(&a.number))
+    });
 }
 
 /// Drop PRs that are in the merge queue: they're shown in the Merge Queue
@@ -160,6 +169,7 @@ mod tests {
             merge_state_status: Some(state.to_string()),
             is_draft: false,
             updated_at: None,
+            created_at: None,
             head_ref_name: Some(format!("branch-{number}")),
             latest_opinionated_reviews: OpinionatedReviews::default(),
             merge_queue_entry: None,
@@ -203,7 +213,7 @@ mod tests {
         b.updated_at = Some("2026-06-19T09:00:00Z".to_string());
         // #10 was updated more recently than #42, so it sorts first despite the
         // lower number.
-        let rows = build_rows(vec![a, b]);
+        let rows = build_rows(vec![a, b], OpenSort::Updated);
         assert_eq!(rows[0].number, 10);
         assert!(!rows[0].conflicts);
         assert_eq!(
@@ -229,6 +239,57 @@ mod tests {
     }
 
     #[test]
+    fn created_sort_uses_creation_time_not_pr_number_or_updates() {
+        let mut older = pr(20, "MERGEABLE", "CLEAN", &[]);
+        older.created_at = Some("2026-01-01T00:00:00Z".into());
+        older.updated_at = Some("2026-03-02T00:00:00Z".into());
+        let mut newer = pr(10, "MERGEABLE", "CLEAN", &[]);
+        newer.created_at = Some("2026-01-02T00:00:00Z".into());
+        newer.updated_at = Some("2026-03-01T00:00:00Z".into());
+        let mut rows = build_rows(vec![older, newer], OpenSort::Created);
+        assert_eq!(
+            rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+            [10, 20]
+        );
+        assert_eq!(rows[0].created_at.as_deref(), Some("2026-01-02T00:00:00Z"));
+
+        rows[1].updated_at = Some("2026-04-01T00:00:00Z".into());
+        sort_rows(&mut rows, OpenSort::Created);
+        assert_eq!(
+            rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+            [10, 20]
+        );
+        sort_rows(&mut rows, OpenSort::Updated);
+        assert_eq!(
+            rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+            [20, 10]
+        );
+    }
+
+    #[test]
+    fn both_sorts_break_ties_by_number_and_put_missing_timestamps_last() {
+        for sort in [OpenSort::Updated, OpenSort::Created] {
+            let nodes = (1..=4)
+                .map(|number| {
+                    let mut node = pr(number, "MERGEABLE", "CLEAN", &[]);
+                    if number <= 2 {
+                        node.updated_at = Some("2026-01-01T00:00:00Z".into());
+                        node.created_at = node.updated_at.clone();
+                    }
+                    node
+                })
+                .collect();
+            let rows = build_rows(nodes, sort);
+            assert_eq!(
+                rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+                [2, 1, 4, 3],
+                "{sort:?}"
+            );
+            assert!(build_rows(vec![], sort).is_empty());
+        }
+    }
+
+    #[test]
     fn required_mode_uses_only_required_check_counts() {
         let mut p = pr(1, "MERGEABLE", "BLOCKED", &[("FAILURE", 2), ("SUCCESS", 8)]);
         p.required_checks = Some(Checks {
@@ -237,7 +298,7 @@ mod tests {
             pass: 2,
         });
 
-        let rows = build_rows(vec![p]);
+        let rows = build_rows(vec![p], OpenSort::Updated);
         assert_eq!(
             rows[0].checks,
             Checks {
@@ -265,14 +326,17 @@ mod tests {
 
     #[test]
     fn approval_comes_from_the_latest_reviews() {
-        let rows = build_rows(vec![
-            reviewed(1, &["APPROVED"]),
-            // A change request does not undo an approval: THREADS reports what
-            // is still open.
-            reviewed(2, &["APPROVED", "CHANGES_REQUESTED"]),
-            reviewed(3, &["CHANGES_REQUESTED"]),
-            reviewed(4, &[]),
-        ]);
+        let rows = build_rows(
+            vec![
+                reviewed(1, &["APPROVED"]),
+                // A change request does not undo an approval: THREADS reports what
+                // is still open.
+                reviewed(2, &["APPROVED", "CHANGES_REQUESTED"]),
+                reviewed(3, &["CHANGES_REQUESTED"]),
+                reviewed(4, &[]),
+            ],
+            OpenSort::Updated,
+        );
         let approval = |number: i64| {
             rows.iter()
                 .find(|r| r.number == number)
@@ -290,7 +354,7 @@ mod tests {
         let mut conflicted = reviewed(1, &["APPROVED"]);
         conflicted.mergeable = Some("CONFLICTING".to_string());
         conflicted.merge_state_status = Some("DIRTY".to_string());
-        let rows = build_rows(vec![conflicted]);
+        let rows = build_rows(vec![conflicted], OpenSort::Updated);
         let table = to_table(&rows, true, &HashSet::new(), false);
         // [mark] [approval] PR TITLE ...
         assert_eq!(table.rows[0][1].text, "y");
@@ -299,7 +363,7 @@ mod tests {
 
     #[test]
     fn a_clean_title_carries_no_marker() {
-        let rows = build_rows(vec![pr(1, "MERGEABLE", "CLEAN", &[])]);
+        let rows = build_rows(vec![pr(1, "MERGEABLE", "CLEAN", &[])], OpenSort::Updated);
         let table = to_table(&rows, true, &HashSet::new(), false);
         assert_eq!(table.rows[0][3].text, "PR 1");
     }
@@ -315,7 +379,7 @@ mod tests {
                 ReviewThread { is_resolved: false },
             ],
         };
-        let rows = build_rows(vec![p]);
+        let rows = build_rows(vec![p], OpenSort::Updated);
         assert_eq!(rows[0].unresolved, 2);
         assert!(!rows[0].unresolved_capped);
     }
@@ -330,7 +394,7 @@ mod tests {
                 .map(|_| ReviewThread { is_resolved: false })
                 .collect(),
         };
-        let rows = build_rows(vec![p]);
+        let rows = build_rows(vec![p], OpenSort::Updated);
         assert_eq!(rows[0].unresolved, 100);
         assert!(rows[0].unresolved_capped);
         let table = to_table(&rows, true, &HashSet::new(), false);
@@ -346,7 +410,7 @@ mod tests {
     fn a_commit_without_a_rollup_has_no_checks() {
         let mut p = pr(1, "MERGEABLE", "CLEAN", &[]);
         p.commits.nodes[0].commit.status_check_rollup = None;
-        let rows = build_rows(vec![p]);
+        let rows = build_rows(vec![p], OpenSort::Updated);
         assert!(rows[0].checks.is_empty());
         assert_eq!(rows[0].status, None);
     }
@@ -358,7 +422,7 @@ mod tests {
             position: 3,
             state: "QUEUED".to_string(),
         });
-        let rows = build_rows(vec![p]);
+        let rows = build_rows(vec![p], OpenSort::Updated);
         assert_eq!(rows[0].queue, Some((3, "QUEUED".to_string())));
     }
 
@@ -371,7 +435,7 @@ mod tests {
         });
         let open = pr(2, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
         // #1 is queued, #2 isn't — only #2 remains in the open-PRs list.
-        let rows = without_queued(build_rows(vec![queued, open]));
+        let rows = without_queued(build_rows(vec![queued, open], OpenSort::Updated));
         assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [2]);
     }
 
@@ -380,13 +444,16 @@ mod tests {
         let mut draft = pr(1, "MERGEABLE", "DRAFT", &[]);
         draft.is_draft = true;
         let ready = pr(2, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
-        let rows = without_drafts(build_rows(vec![draft, ready]));
+        let rows = without_drafts(build_rows(vec![draft, ready], OpenSort::Updated));
         assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [2]);
     }
 
     #[test]
     fn branch_column_is_opt_in() {
-        let rows = build_rows(vec![pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)])]);
+        let rows = build_rows(
+            vec![pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)])],
+            OpenSort::Updated,
+        );
         let table = to_table(&rows, true, &HashSet::new(), false);
         assert!(!table.header.contains(&"BRANCH"));
         let table = to_table(&rows, true, &HashSet::new(), true);
@@ -401,17 +468,20 @@ mod tests {
 
     #[test]
     fn semaphore_shows_all_three_counts() {
-        let rows = build_rows(vec![pr(
-            1,
-            "MERGEABLE",
-            "CLEAN",
-            &[
-                ("FAILURE", 2),
-                ("QUEUED", 1),
-                ("IN_PROGRESS", 2),
-                ("SUCCESS", 9),
-            ],
-        )]);
+        let rows = build_rows(
+            vec![pr(
+                1,
+                "MERGEABLE",
+                "CLEAN",
+                &[
+                    ("FAILURE", 2),
+                    ("QUEUED", 1),
+                    ("IN_PROGRESS", 2),
+                    ("SUCCESS", 9),
+                ],
+            )],
+            OpenSort::Updated,
+        );
         let table = to_table(&rows, true, &HashSet::new(), false);
         // ..., THREADS, FAIL, RUN, PASS
         let tail: Vec<&str> = table.rows[0][4..].iter().map(|c| c.text.as_str()).collect();

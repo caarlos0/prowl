@@ -89,6 +89,7 @@ mod tests {
             queue: None,
             url: format!("https://x/{number}"),
             updated_at: Some("2026-06-19T00:00:00Z".to_string()),
+            created_at: None,
         }
     }
 

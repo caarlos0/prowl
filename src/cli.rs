@@ -65,6 +65,10 @@ pub struct Cli {
     #[arg(long, value_enum, value_delimiter = ',', value_name = "SECTION")]
     pub only: Option<Vec<Section>>,
 
+    /// Sort My open PRs by update or creation time, newest first.
+    #[arg(long, value_enum, default_value_t = OpenSort::Updated, value_name = "ORDER")]
+    pub sort_open: OpenSort,
+
     /// How far back "recently merged" reaches, e.g. 7d, 48h, 2w.
     #[arg(long, default_value = "2d", value_name = "DUR")]
     pub merged_window: Dur,
@@ -124,6 +128,24 @@ pub enum Section {
     Mine,
     Merged,
     Shipments,
+}
+
+/// Sort order for My open PRs only.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OpenSort {
+    /// Most recently updated first.
+    Updated,
+    /// Most recently created first.
+    Created,
+}
+
+impl OpenSort {
+    pub(crate) fn qualifier(self) -> &'static str {
+        match self {
+            OpenSort::Updated => "sort:updated-desc",
+            OpenSort::Created => "sort:created-desc",
+        }
+    }
 }
 
 /// The two dashboard views, toggled with Tab while watching.
@@ -298,6 +320,27 @@ mod tests {
                 .unwrap()
                 .required
         );
+    }
+
+    #[test]
+    fn open_sort_defaults_to_updated_and_accepts_only_supported_orders() {
+        assert_eq!(
+            Cli::try_parse_from(["prowl"]).unwrap().sort_open,
+            OpenSort::Updated
+        );
+        for (value, expected) in [
+            ("updated", OpenSort::Updated),
+            ("created", OpenSort::Created),
+        ] {
+            let cli = Cli::try_parse_from(["prowl", "--sort-open", value]).unwrap();
+            assert_eq!(cli.sort_open, expected);
+        }
+        for args in [
+            vec!["prowl", "--sort-open"],
+            vec!["prowl", "--sort-open", "number"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

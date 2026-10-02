@@ -63,6 +63,7 @@ fn open_pr(number: i64, title: &str, branch: &str) -> PrRow {
         queue: None,
         url: url(number),
         updated_at: ago(0),
+        created_at: ago(24 * 60),
     }
 }
 

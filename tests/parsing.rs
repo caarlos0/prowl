@@ -2,6 +2,7 @@
 //! responses are parsed through the same path the binary uses, then turned into
 //! rows and rendered. No network access.
 
+use prowl::cli::OpenSort;
 use prowl::model::{MergedData, MineData, QueueData, ReviewsData, queue_nodes};
 use prowl::status::{Checks, ReviewState, Status};
 use prowl::{github, merged, prs, queue, render, reviews};
@@ -145,7 +146,7 @@ fn queue_build_time_is_earliest_check_run_start() {
 #[test]
 fn mine_parses_sorts_and_derives_mergeability_and_checks() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
-    let rows = prs::build_rows(data.search.nodes);
+    let rows = prs::build_rows(data.search.nodes, OpenSort::Updated);
 
     // Sorted by last update time (most recent first).
     assert_eq!(
@@ -187,9 +188,42 @@ fn mine_parses_sorts_and_derives_mergeability_and_checks() {
 }
 
 #[test]
+fn mine_creation_timestamps_drive_render_order() {
+    let mut fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/mine.json")).unwrap();
+    for (node, created) in fixture["data"]["search"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip([
+            "2026-01-01T00:00:00Z",
+            "2026-01-03T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+        ])
+    {
+        node["createdAt"] = created.into();
+    }
+    let data: MineData = parse(&serde_json::to_string(&fixture).unwrap());
+    let rows = prs::build_rows(data.search.nodes, OpenSort::Created);
+    assert_eq!(
+        rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+        [5323, 6656, 6475]
+    );
+    let table = prs::to_table(&rows, true, &HashSet::new(), false);
+    assert_eq!(
+        table
+            .rows
+            .iter()
+            .map(|row| row[2].text.as_str())
+            .collect::<Vec<_>>(),
+        ["#5323", "#6656", "#6475"]
+    );
+}
+
+#[test]
 fn mine_ascii_approval_letters_and_conflict_titles() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
-    let rows = prs::build_rows(data.search.nodes);
+    let rows = prs::build_rows(data.search.nodes, OpenSort::Updated);
     let table = prs::to_table(&rows, true, &HashSet::new(), false); // ascii, no highlights
     // Column 0 is the change marker, column 1 the approval glyph. Nobody
     // approved any of these three.
@@ -207,7 +241,7 @@ fn mine_ascii_approval_letters_and_conflict_titles() {
 #[test]
 fn mine_renders_the_check_semaphore_and_thread_count() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
-    let rows = prs::build_rows(data.search.nodes);
+    let rows = prs::build_rows(data.search.nodes, OpenSort::Updated);
     let table = prs::to_table(&rows, true, &HashSet::new(), false);
     assert_eq!(
         table.header,
@@ -224,7 +258,7 @@ fn mine_renders_the_check_semaphore_and_thread_count() {
 #[test]
 fn mine_changed_rows_get_a_marker() {
     let data: MineData = parse(include_str!("fixtures/mine.json"));
-    let rows = prs::build_rows(data.search.nodes);
+    let rows = prs::build_rows(data.search.nodes, OpenSort::Updated);
     let highlight = HashSet::from([5323]);
     let table = prs::to_table(&rows, true, &highlight, false);
     let marks: Vec<&str> = table.rows.iter().map(|r| r[0].text.as_str()).collect();
@@ -243,7 +277,7 @@ fn mine_tolerates_a_missing_rollup_and_partial_errors() {
     // attaches a top-level `errors` array. The response must still parse and
     // simply report an empty semaphore rather than failing the whole fetch.
     let data: MineData = parse(include_str!("fixtures/mine_no_rollup.json"));
-    let rows = prs::build_rows(data.search.nodes);
+    let rows = prs::build_rows(data.search.nodes, OpenSort::Updated);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].number, 123);
     assert!(rows[0].checks.is_empty());

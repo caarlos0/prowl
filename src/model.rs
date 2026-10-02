@@ -3,6 +3,7 @@
 //! interpolates its page size, and required-check queries batch one aliased
 //! commit lookup per pull request.
 
+use crate::cli::OpenSort;
 use crate::github::{Client, Repo};
 use crate::status::{self, Approval, Checks};
 use anyhow::{Context, Result};
@@ -236,7 +237,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
   search(type: ISSUE, first: 50, query: $q) {
     nodes {
       ... on PullRequest {
-        number title url mergeable mergeStateStatus isDraft updatedAt headRefName
+        number title url mergeable mergeStateStatus isDraft updatedAt createdAt headRefName
         latestOpinionatedReviews(first: 100) { nodes { state } }
         mergeQueueEntry { position state }
         reviewThreads(first: 100) { totalCount nodes { isResolved } }
@@ -271,6 +272,8 @@ pub struct PrNode {
     pub is_draft: bool,
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: Option<String>,
     /// The PR's head branch.
     #[serde(rename = "headRefName")]
     pub head_ref_name: Option<String>,
@@ -411,10 +414,13 @@ impl PrNode {
     }
 }
 
-pub fn mine_search(repo: &Repo, me: &str) -> String {
+pub fn mine_search(repo: &Repo, me: &str, sort: OpenSort) -> String {
     format!(
-        "repo:{}/{} is:pr is:open author:{} archived:false sort:updated-desc",
-        repo.owner, repo.name, me
+        "repo:{}/{} is:pr is:open author:{} archived:false {}",
+        repo.owner,
+        repo.name,
+        me,
+        sort.qualifier()
     )
 }
 
@@ -422,9 +428,10 @@ pub fn fetch_my_prs(
     client: &Client,
     repo: &Repo,
     me: &str,
+    sort: OpenSort,
     required_only: bool,
 ) -> Result<Vec<PrNode>> {
-    let q = mine_search(repo, me);
+    let q = mine_search(repo, me, sort);
     let data: MineData = client.graphql(MINE_QUERY, serde_json::json!({ "q": q }))?;
     let mut nodes = data.search.nodes;
     if required_only {
@@ -843,6 +850,22 @@ pub fn fetch_reviews(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mine_search_sorts_before_the_api_page_limit() {
+        let repo = Repo::parse("owner/repo").unwrap();
+        for (sort, qualifier) in [
+            (OpenSort::Updated, "sort:updated-desc"),
+            (OpenSort::Created, "sort:created-desc"),
+        ] {
+            assert_eq!(
+                mine_search(&repo, "me", sort),
+                format!("repo:owner/repo is:pr is:open author:me archived:false {qualifier}")
+            );
+        }
+        assert!(MINE_QUERY.contains("createdAt"), "{MINE_QUERY}");
+        assert!(MINE_QUERY.contains("updatedAt"), "{MINE_QUERY}");
+    }
 
     #[test]
     fn every_pr_query_requests_the_head_branch() {

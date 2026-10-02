@@ -77,6 +77,7 @@ Use a long flag name without `--`, a space, and its value on each line:
 interval 30s
 bell false
 branch true
+sort-open created
 only mine,queue,merged
 link-format [{title}]({url})
 ```
@@ -98,7 +99,14 @@ startup with an error. `--help` and `--version` do not read the file.
 prowl                     # watch the repo in the current directory
 prowl --repo owner/name   # watch a specific repo
 prowl --once              # render once and exit
+prowl --sort-open created # newest-created open PRs first
 ```
+
+**My open PRs** sorts by last update time, newest first, by default.
+`--sort-open created` sorts by creation time instead, also newest first.
+Set `sort-open created` in the config file to make it the default;
+`--sort-open updated` overrides that setting for one run. This option changes
+only My open PRs, not the merge queue, merged PRs, or either reviews list.
 
 While watching, press `Ctrl-R` to refresh now, `Tab` to switch between your PRs and
 your reviews, `?` to toggle the help legend, and `q` (or `Ctrl-C`) to quit;
