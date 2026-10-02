@@ -214,8 +214,8 @@ watch event loop); everything else is testable modules:
   `targets_visible` is that flattened (PR rows → the PR; shipments → the release /
   compare log; url-less rows skipped) so a selection index lines up with the
   rendered rows. `section_at_visible(…, index, visible)` is the one group holding
-  `index` (what `Y` copies; an empty section holds no index, so index 0 means the
-  first non-empty one),
+  `index` (what `Y` copies and `Shift+Enter` opens; an empty section holds no
+  index, so index 0 means the first non-empty one),
   `filter(&Sections, query)` clones the matching rows for rendering
   (same per-row haystack — number/title/branch/author/tag — so rows and targets stay in
   lockstep), `moved` advances the selection cursor by a `nav::Move` (the
@@ -294,14 +294,20 @@ probe the terminal, so `start` calls **`query_capabilities`**: reading an event
 records the reply as it passes through, and the DECRPM 2026 answer is what
 enables **synchronized output**, so a frame that clears first (a resize) is
 presented atomically rather than seen half-drawn. The same query also adopts
-grapheme clustering and in-band resize where the terminal supports them. The
+grapheme clustering and in-band resize where the terminal supports them.
+In watch mode, a `KittyKeyboardEnhancements` reply makes `handle_event` enable
+`DISAMBIGUATE_ESCAPE_CODES` through `Program::set_kitty_keyboard`, so terminals
+that support it report `Shift+Enter` separately. `Program` reapplies those flags
+across screen switches and suspend/resume and clears them during teardown.
+Terminals without modified-Enter support retain ordinary Enter behavior. The
 loop uses `poll_event` with
 the interval as the timeout. Keys are classified into an `Action` (or, while the
 search prompt is open, a `SearchAction`) with `Key::matches`, which is
 **case-sensitive** — case-insensitive bindings must list both cases (`["q", "Q"]`).
 `Ctrl-R` refreshes now; `r` marks the selected PR as read and `R` marks all as read.
 `Tab` switches view, `?` toggles help, `/` opens search, `Enter`
-opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
+opens the selected row, `Shift+Enter` opens its section, `y`/`Y` copy links,
+the movement keys drive the cursor,
 `q`/`Q`/`Ctrl-C` quit (`Esc` clears the filter, or quits when there is none),
 `Ctrl-Z` suspends/resumes, `Resize` repaints. Watch interaction state lives in
 `Ui` (view, help, selection, search, `--branch`); unread markers live in
@@ -386,6 +392,13 @@ still performs all teardown through `finish`.
   target (`nav::targets_visible`, in render order); switching views drops the cursor and
   a refresh preserves its URL when that row remains visible. `--once`/piped
   output has no selection.
+  `Shift+Enter` opens the selected section, or the first non-empty section with
+  no selection. `Ui::targets` shares the row/section selection with `y`/`Y`,
+  including search and responsive row limits. `Ui::open_links` opens in display
+  order through the platform opener; the first failure stops the remaining
+  opens and names the failed URL in the status line. Success leaves selection
+  and unread markers unchanged. In the search prompt, `Shift+Enter` only applies
+  the filter, like Enter.
 - **Copy:** `y` copies the selected row's link, `Y` every link of the section the
   cursor is in (`nav::section_at_visible`) as a markdown list (`- <link>` per line, no
   trailing newline). `--link-format` controls each link, defaulting to `{url}`;
@@ -428,7 +441,8 @@ still performs all teardown through `finish`.
   default, rendered at the top of the bottom block, above the search prompt and
   footer whose keys it documents; `--no-help` only affects
   one-shot/piped output). The movement keys (`j`/`k`, arrows, `g`/`G`,
-  `Ctrl-D`/`Ctrl-U`) drive the selection cursor, Enter opens it, `y`/`Y` copy it
+  `Ctrl-D`/`Ctrl-U`) drive the selection cursor, Enter opens it, `Shift+Enter`
+  opens its section, `y`/`Y` copy it
   (row / whole section), and `/` filters.
   `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
   suspends/resumes. The bottom block — help legend, search prompt, error line,

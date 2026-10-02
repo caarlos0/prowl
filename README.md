@@ -128,6 +128,16 @@ page; press `Enter` to open the highlighted PR (or release) in your browser. The
 cursor only appears once you start moving it, and stays on the same URL when the
 terminal is resized if that row remains visible.
 
+Press `Shift+Enter` to open every visible link in the selected section, like
+`Y` does for copying. It uses the first non-empty section when nothing is
+selected and honors the current filter and hidden-row limits. Links open in
+display order; if an opener fails, prowl stops opening the remaining links
+and shows the failed link.
+This shortcut requires a terminal that can report `Shift+Enter` separately
+from `Enter`. Prowl enables the Kitty keyboard protocol when supported; if the
+terminal sends plain `Enter` instead, only the selected link opens. While
+typing a search, either key applies the filter without opening links.
+
 Changed PRs keep their `▸` marker (`>` in ASCII mode) until you press `r` to
 mark the selected PR as read, or `R` to mark all PRs as read, including hidden
 and filtered rows. Refreshing, moving the selection, opening a PR, switching

@@ -752,7 +752,8 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
     s.set_str((2, y), &keys, &dim);
     y += 1;
 
-    let keys = format!("r mark read{sep}R mark all read{sep}^R refresh");
+    let keys =
+        format!("r mark read{sep}R mark all read{sep}^R refresh{sep}shift+enter open section");
     s.set_str((2, y), &keys, &dim);
     y += 1;
 
@@ -1081,6 +1082,7 @@ mod tests {
                 text.contains("r mark read | R mark all read | ^R refresh"),
                 "{text}"
             );
+            assert!(text.contains("shift+enter open section"), "{text}");
         }
     }
 

@@ -53,6 +53,7 @@ use std::borrow::Cow;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use uncurses::ansi::kitty::KittyKeyboardFlags;
 use uncurses::buffer::{Bounded, SurfaceMut, TextBuffer};
 use uncurses::color::{Color, Profile};
 use uncurses::event::{Event, KeyCode, KeyModifiers};
@@ -1354,6 +1355,8 @@ enum Action {
     SwitchView,
     /// `Enter`: open the selected row in the browser.
     Open,
+    /// `Shift+Enter`: open every link in the section the cursor is in.
+    OpenSection,
     /// `y`: copy the selected row's link.
     Copy,
     /// `Y`: copy every link in the section the cursor is in.
@@ -1413,6 +1416,8 @@ fn classify(ev: &Event) -> Action {
                 Action::ToggleHelp
             } else if k.matches("tab") {
                 Action::SwitchView
+            } else if k.matches("shift+enter") {
+                Action::OpenSection
             } else if k.matches("enter") {
                 Action::Open
             } else if k.matches("y") {
@@ -1526,6 +1531,28 @@ impl Ui {
         }
     }
 
+    fn targets<'a>(
+        &self,
+        shown: &'a Sections,
+        visible: Visibility,
+        section: bool,
+    ) -> Vec<nav::Target<'a>> {
+        if section {
+            return nav::section_at_visible(
+                self.view,
+                shown,
+                &self.search,
+                self.selected.unwrap_or_default(),
+                visible,
+            );
+        }
+        let targets = nav::targets_visible(self.view, shown, &self.search, visible);
+        self.selected
+            .and_then(|index| targets.get(index).copied())
+            .into_iter()
+            .collect()
+    }
+
     fn copy_text(
         &self,
         shown: &Sections,
@@ -1533,26 +1560,32 @@ impl Ui {
         format: &str,
         section: bool,
     ) -> Option<(String, usize)> {
-        if !section {
-            let targets = nav::targets_visible(self.view, shown, &self.search, visible);
-            return Some((targets.get(self.selected?)?.format(format), 1));
-        }
-        let targets = nav::section_at_visible(
-            self.view,
-            shown,
-            &self.search,
-            self.selected.unwrap_or_default(),
-            visible,
-        );
+        let targets = self.targets(shown, visible, section);
         if targets.is_empty() {
             return None;
         }
         let text = targets
             .iter()
-            .map(|target| format!("- {}", target.format(format)))
+            .map(|target| {
+                let link = target.format(format);
+                if section { format!("- {link}") } else { link }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         Some((text, targets.len()))
+    }
+
+    fn open_links(
+        &self,
+        shown: &Sections,
+        visible: Visibility,
+        section: bool,
+        mut open: impl FnMut(&str) -> std::io::Result<()>,
+    ) -> Result<()> {
+        for target in self.targets(shown, visible, section) {
+            open(target.url).with_context(|| format!("opening {}", target.url))?;
+        }
+        Ok(())
     }
 
     fn mark_read(&self, shown: &Sections, visible: Visibility, unread: &mut Changes, all: bool) {
@@ -1930,6 +1963,11 @@ impl<'a> App<'a> {
     /// implies. While the search prompt is open every keystroke is text, so it is
     /// routed to [`Self::handle_search_event`] instead.
     fn handle_event(&mut self, ev: &Event) -> Result<Flow> {
+        if matches!(ev, Event::KittyKeyboardEnhancements(_)) {
+            self.program
+                .set_kitty_keyboard(Some(KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES))?;
+            return Ok(Flow::Continue);
+        }
         if self.ui.searching {
             return self.handle_search_event(ev);
         }
@@ -1962,7 +2000,8 @@ impl<'a> App<'a> {
                 self.ui.selected = None;
                 self.repaint_last()?;
             }
-            Action::Open => self.open_selected()?,
+            Action::Open => self.open_links(false)?,
+            Action::OpenSection => self.open_links(true)?,
             Action::Copy => self.copy_links(false)?,
             Action::CopySection => self.copy_links(true)?,
             Action::MarkRead => self.mark_read(false)?,
@@ -2116,14 +2155,17 @@ impl<'a> App<'a> {
         self.repaint_last()
     }
 
-    /// Open the selected row's URL in the browser. A failure becomes the dim
-    /// error line; a no-op (no selection, no data) leaves the screen as is.
-    fn open_selected(&mut self) -> Result<()> {
-        let Some(url) = self.selected_url() else {
+    /// Open the selected row or section. Stop at the first failure and show it
+    /// in the dim error line; no targets leaves the screen as is.
+    fn open_links(&mut self, section: bool) -> Result<()> {
+        let Some(good) = &self.last_good else {
             return Ok(());
         };
-        if let Err(e) = open::url(&url) {
-            self.last_status = format!("error: open failed: {e}");
+        let mut filtered = None;
+        let shown = self.ui.shown(good, &mut filtered);
+        let visible = self.visible_sections(shown);
+        if let Err(e) = self.ui.open_links(shown, visible, section, open::url) {
+            self.last_status = format!("error: open failed: {e:#}");
             self.ui.selected = None;
             self.repaint_last()?;
         }
@@ -2263,6 +2305,30 @@ mod tests {
 
         assert_eq!(classify_search(&ctrl_c), SearchAction::Quit);
         assert_eq!(classify_search(&q), SearchAction::Char('q'));
+    }
+
+    #[test]
+    fn shift_enter_opens_a_section_but_only_applies_an_active_search() {
+        use uncurses::event::Key;
+
+        let enter = Event::KeyPress(Key::new(KeyCode::Enter, KeyModifiers::empty()).normalized());
+        let shift_enter =
+            Event::KeyPress(Key::new(KeyCode::Enter, KeyModifiers::SHIFT).normalized());
+        assert!(matches!(classify(&enter), Action::Open), "{enter:?}");
+        assert!(
+            matches!(classify(&shift_enter), Action::OpenSection),
+            "{shift_enter:?}"
+        );
+        assert_eq!(classify_search(&enter), SearchAction::Enter);
+        assert_eq!(classify_search(&shift_enter), SearchAction::Enter);
+        for modifiers in [
+            KeyModifiers::CTRL,
+            KeyModifiers::ALT,
+            KeyModifiers::CTRL | KeyModifiers::SHIFT,
+        ] {
+            let event = Event::KeyPress(Key::new(KeyCode::Enter, modifiers).normalized());
+            assert!(matches!(classify(&event), Action::None), "{event:?}");
+        }
     }
 
     #[test]
@@ -2584,7 +2650,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_honors_search_and_visible_row_limits() {
+    fn open_and_copy_honor_search_and_visible_row_limits() {
         let sections = Sections {
             queue: Some((0..=3).map(|n| queue_row(n, n == 0, false)).collect()),
             ..Sections::EMPTY
@@ -2612,6 +2678,149 @@ mod tests {
             ui.copy_text(shown, visible, "[{title}]({url})", false),
             Some(("[queue-2](https://queue/2)".into(), 1))
         );
+        for (section, expected) in [
+            (false, vec!["https://queue/2"]),
+            (true, vec!["https://queue/1", "https://queue/2"]),
+        ] {
+            let mut opened = Vec::new();
+            ui.open_links(shown, visible, section, |url| {
+                opened.push(url.to_string());
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(opened, expected, "section={section}");
+        }
+    }
+
+    #[test]
+    fn open_links_use_the_selected_row_or_section_in_render_order() {
+        let sections = Sections {
+            prs: Some(vec![]),
+            queue: Some(vec![queue_row(1, true, false), queue_row(2, false, false)]),
+            merged: Some(vec![merged_row(3), merged_row(4)]),
+            ..Sections::EMPTY
+        };
+        let visible = Visibility::all(&sections);
+        for (selected, section, expected) in [
+            (None, false, vec![]),
+            (None, true, vec!["https://queue/1", "https://queue/2"]),
+            (Some(1), false, vec!["https://queue/2"]),
+            (Some(1), true, vec!["https://queue/1", "https://queue/2"]),
+            (Some(2), true, vec!["https://merged/3", "https://merged/4"]),
+            (Some(4), true, vec![]),
+        ] {
+            let ui = Ui {
+                selected,
+                ..ui(View::Mine)
+            };
+            let mut opened = Vec::new();
+            ui.open_links(&sections, visible, section, |url| {
+                opened.push(url.to_string());
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(opened, expected, "selected={selected:?}, section={section}");
+            assert_eq!(ui.selected, selected);
+        }
+    }
+
+    #[test]
+    fn open_section_supports_reviews_and_shipments() {
+        let sections = Sections {
+            reviewed_merged: Some(
+                (1..=2)
+                    .map(|n| reviews::ReviewedMergedRow {
+                        number: n,
+                        title: format!("reviewed-{n}"),
+                        branch: String::new(),
+                        author: "other".into(),
+                        url: format!("https://reviewed/{n}"),
+                        merged_at: None,
+                    })
+                    .collect(),
+            ),
+            commits: Some(commits::CommitStats {
+                available: true,
+                upcoming: Some(commits::Bucket {
+                    count: commits::Count {
+                        mine: 1,
+                        capped: false,
+                    },
+                    url: "https://compare/upcoming".into(),
+                }),
+                releases: vec![commits::Release {
+                    tag: "v1".into(),
+                    bucket: commits::Bucket {
+                        count: commits::Count {
+                            mine: 1,
+                            capped: false,
+                        },
+                        url: "https://releases/v1".into(),
+                    },
+                    published_at: None,
+                }],
+            }),
+            ..Sections::EMPTY
+        };
+        for (view, expected) in [
+            (
+                View::Mine,
+                vec!["https://compare/upcoming", "https://releases/v1"],
+            ),
+            (
+                View::Reviews,
+                vec!["https://reviewed/1", "https://reviewed/2"],
+            ),
+        ] {
+            let mut opened = Vec::new();
+            ui(view)
+                .open_links(&sections, Visibility::all(&sections), true, |url| {
+                    opened.push(url.to_string());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(opened, expected, "{view:?}");
+        }
+    }
+
+    #[test]
+    fn open_section_stops_at_the_first_failure_and_identifies_the_link() {
+        let sections = Sections {
+            merged: Some((1..=3).map(merged_row).collect()),
+            ..Sections::EMPTY
+        };
+        let mut attempted = Vec::new();
+        let error = ui(View::Mine)
+            .open_links(&sections, Visibility::all(&sections), true, |url| {
+                attempted.push(url.to_string());
+                if attempted.len() == 2 {
+                    Err(std::io::Error::other("opener unavailable"))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert_eq!(attempted, ["https://merged/1", "https://merged/2"]);
+        assert_eq!(
+            format!("{error:#}"),
+            "opening https://merged/2: opener unavailable"
+        );
+    }
+
+    #[test]
+    fn open_section_with_no_matches_does_not_open_any_links() {
+        let sections = Sections {
+            merged: Some(vec![merged_row(1)]),
+            ..Sections::EMPTY
+        };
+        let ui = Ui {
+            search: "no matches".into(),
+            ..ui(View::Mine)
+        };
+        ui.open_links(&sections, Visibility::all(&sections), true, |url| {
+            panic!("unexpected open: {url}")
+        })
+        .unwrap();
     }
 
     fn visible_body(sections: &Sections, visible: Visibility) -> String {
