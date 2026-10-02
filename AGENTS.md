@@ -69,7 +69,8 @@ watch event loop); everything else is testable modules:
 
 - `cli.rs` — clap derive CLI, `Section` enum, `View` (Mine/Reviews, `--view`,
   `.toggle()`), `ReviewScope` (Direct/All, `--review-scope`, `.qualifier()`),
-  `--required` for required-only CI counts,
+  `--required` for required-only CI counts, `--link-format` for copied links
+  (default `{url}`; supports `{title}` and `{url}`),
   duration parser (`s/m/h/d/w`), and the `WATCH_KEYS` `after_help` block
   documenting the interactive watch-mode keys.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
@@ -190,18 +191,21 @@ watch event loop); everything else is testable modules:
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
-- `nav.rs` — watch-mode row navigation + search: `groups(view, &Sections, query)`
-  is the matching rows' open URLs bucketed by rendered section, `targets` is that
-  flattened (PR rows → the PR; shipments → the release / compare log; url-less
-  rows skipped) so a selection index lines up with the rendered rows,
-  `section_at(…, index)` is the one group holding `index` (what `Y` copies; an
-  empty section holds no index, so index 0 means the first non-empty one),
+- `nav.rs` — watch-mode row navigation + search: `groups(view, &Sections, query, visible)`
+  is the matching rows' `Target { title, url }` values bucketed by rendered section;
+  `targets_visible` is that flattened (PR rows → the PR; shipments → the release /
+  compare log; url-less rows skipped) so a selection index lines up with the
+  rendered rows. `section_at_visible(…, index, visible)` is the one group holding
+  `index` (what `Y` copies; an empty section holds no index, so index 0 means the
+  first non-empty one),
   `filter(&Sections, query)` clones the matching rows for rendering
   (same per-row haystack — number/title/branch/author/tag — so rows and targets stay in
   lockstep), `moved` advances the selection cursor by a `nav::Move` (the
   input-agnostic movement type — `lib.rs::classify` maps keys onto it; lazy:
   `None` until the first move, `Bottom` enters at the last row). Refreshes and
-  resizes restore the same selected URL when it remains visible.
+  resizes restore the same selected URL when it remains visible. `Target::format`
+  substitutes `{title}` and `{url}` only in the template, not in inserted values.
+  Titles are full PR titles, release tags, or `upcoming`.
 - `open.rs` — `open::url` opens a URL in the default browser via the platform
   opener (`open` / `xdg-open` / `cmd /C start`), spawned detached; rejects
   non-`http(s)` URLs; no new dep.
@@ -352,8 +356,12 @@ still performs all teardown through `finish`.
   a refresh preserves its URL when that row remains visible. `--once`/piped
   output has no selection.
 - **Copy:** `y` copies the selected row's link, `Y` every link of the section the
-  cursor is in (`nav::section_at_visible`) as a markdown list (`- <url>` per line, no
-  trailing newline). Both honor the active search filter, so `Y` copies only the
+  cursor is in (`nav::section_at_visible`) as a markdown list (`- <link>` per line, no
+  trailing newline). `--link-format` controls each link, defaulting to `{url}`;
+  `[{title}]({url})` produces Markdown links. Substitution is literal, with no
+  Markdown escaping; other text is unchanged. `Ui::copy_text` builds the payload
+  for both commands, and `App::copy_links` sends it to the clipboard.
+  Both honor the active search filter, so `Y` copies only the
   visible matches; with no cursor yet `Y` takes the first non-empty section. The
   outcome ("copied N links", or a `copy failed:` error) lands on the same dim
   trailing line as a refresh error and is cleared by the next refresh. Copying

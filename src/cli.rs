@@ -89,6 +89,10 @@ pub struct Cli {
     #[arg(long)]
     pub required: bool,
 
+    /// Format copied links with {title} and {url}, e.g. '[{title}]({url})' for Markdown.
+    #[arg(long, default_value = "{url}", value_name = "FORMAT")]
+    pub link_format: String,
+
     /// Hide the help legend in one-shot/piped output (in the watch view it
     /// starts hidden and is toggled with `?`).
     #[arg(long)]
@@ -272,6 +276,23 @@ mod tests {
             Cli::try_parse_from(["prowl", "--required"])
                 .unwrap()
                 .required
+        );
+    }
+
+    #[test]
+    fn accepts_link_format() {
+        assert_eq!(Cli::try_parse_from(["prowl"]).unwrap().link_format, "{url}");
+        assert_eq!(
+            Cli::try_parse_from(["prowl", "--link-format", "[{title}]({url})"])
+                .unwrap()
+                .link_format,
+            "[{title}]({url})"
+        );
+        assert_eq!(
+            Cli::try_parse_from(["prowl", "--link-format"])
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::InvalidValue
         );
     }
 }

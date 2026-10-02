@@ -10,20 +10,40 @@ use crate::queue::QueueRow;
 use crate::reviews::{ReviewRow, ReviewedMergedRow};
 use crate::{Sections, Visibility};
 
-/// A row the search can match (its `haystack`) and the cursor can open (`url`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Target<'a> {
+    pub title: &'a str,
+    pub url: &'a str,
+}
+
+impl Target<'_> {
+    pub(crate) fn format(self, template: &str) -> String {
+        // Substitute only in the template, never in an inserted title or URL.
+        template
+            .split("{title}")
+            .map(|part| part.replace("{url}", self.url))
+            .collect::<Vec<_>>()
+            .join(self.title)
+    }
+}
+
+/// A row the search can match and the cursor can open or copy.
 trait Searchable {
     /// PR number, title, branch, and (where present) author or release tag,
     /// joined for a single case-insensitive substring test.
     fn haystack(&self) -> String;
-    fn url(&self) -> &str;
+    fn target(&self) -> Target<'_>;
 }
 
 impl Searchable for PrRow {
     fn haystack(&self) -> String {
         format!("#{} {} {}", self.number, self.title, self.branch)
     }
-    fn url(&self) -> &str {
-        &self.url
+    fn target(&self) -> Target<'_> {
+        Target {
+            title: &self.title,
+            url: &self.url,
+        }
     }
 }
 impl Searchable for QueueRow {
@@ -33,8 +53,11 @@ impl Searchable for QueueRow {
             self.number, self.title, self.branch, self.author
         )
     }
-    fn url(&self) -> &str {
-        &self.url
+    fn target(&self) -> Target<'_> {
+        Target {
+            title: &self.title,
+            url: &self.url,
+        }
     }
 }
 impl Searchable for MergedRow {
@@ -42,8 +65,11 @@ impl Searchable for MergedRow {
         let tag = self.release.as_ref().map_or("", |x| x.tag.as_str());
         format!("#{} {} {} {}", self.number, self.title, self.branch, tag)
     }
-    fn url(&self) -> &str {
-        &self.url
+    fn target(&self) -> Target<'_> {
+        Target {
+            title: &self.title,
+            url: &self.url,
+        }
     }
 }
 impl Searchable for ReviewRow {
@@ -53,8 +79,11 @@ impl Searchable for ReviewRow {
             self.number, self.title, self.branch, self.author
         )
     }
-    fn url(&self) -> &str {
-        &self.url
+    fn target(&self) -> Target<'_> {
+        Target {
+            title: &self.title,
+            url: &self.url,
+        }
     }
 }
 impl Searchable for ReviewedMergedRow {
@@ -64,8 +93,11 @@ impl Searchable for ReviewedMergedRow {
             self.number, self.title, self.branch, self.author
         )
     }
-    fn url(&self) -> &str {
-        &self.url
+    fn target(&self) -> Target<'_> {
+        Target {
+            title: &self.title,
+            url: &self.url,
+        }
     }
 }
 
@@ -75,13 +107,13 @@ fn hit(hay: &str, query_lower: &str) -> bool {
     query_lower.is_empty() || hay.to_lowercase().contains(query_lower)
 }
 
-/// The URLs of the rows in `rows` (if present) matching the already-lowercased
+/// The rows in `rows` (if present) matching the already-lowercased
 /// `query` — one rendered section's worth of navigable targets.
-fn group<'a, T: Searchable>(rows: Option<&'a [T]>, query: &str) -> Vec<&'a str> {
+fn group<'a, T: Searchable>(rows: Option<&'a [T]>, query: &str) -> Vec<Target<'a>> {
     rows.unwrap_or_default()
         .iter()
         .filter(|row| hit(&row.haystack(), query))
-        .map(Searchable::url)
+        .map(Searchable::target)
         .collect()
 }
 
@@ -89,12 +121,12 @@ fn when_visible<T>(rows: Option<&[T]>, visible: bool) -> Option<&[T]> {
     rows.filter(|_| visible)
 }
 
-fn prs_group<'a>(rows: Option<&'a [PrRow]>, query: &str, queue_visible: bool) -> Vec<&'a str> {
+fn prs_group<'a>(rows: Option<&'a [PrRow]>, query: &str, queue_visible: bool) -> Vec<Target<'a>> {
     rows.map_or_else(Vec::new, |rows| {
         rows.iter()
             .filter(|row| !queue_visible || row.queue.is_none())
             .filter(|row| hit(&row.haystack(), query))
-            .map(Searchable::url)
+            .map(Searchable::target)
             .collect()
     })
 }
@@ -102,32 +134,43 @@ fn prs_group<'a>(rows: Option<&'a [PrRow]>, query: &str, queue_visible: bool) ->
 /// The "My Shipments" section's targets: the "upcoming" compare log (when there
 /// is one) then each release page, matched against the already-lowercased
 /// `query`. Empty when the release lookup failed (`available` is false).
-fn shipments<'a>(s: &'a Sections, query: &str) -> Vec<&'a str> {
-    let mut urls = Vec::new();
+fn shipments<'a>(s: &'a Sections, query: &str) -> Vec<Target<'a>> {
+    let mut targets = Vec::new();
     if let Some(stats) = &s.commits
         && stats.available
     {
         if let Some(b) = &stats.upcoming
             && hit("upcoming", query)
         {
-            urls.push(b.url.as_str());
+            targets.push(Target {
+                title: "upcoming",
+                url: &b.url,
+            });
         }
-        urls.extend(
+        targets.extend(
             stats
                 .releases
                 .iter()
                 .filter(|r| hit(&r.tag, query))
-                .map(|r| r.bucket.url.as_str()),
+                .map(|r| Target {
+                    title: &r.tag,
+                    url: &r.bucket.url,
+                }),
         );
     }
-    urls
+    targets
 }
 
 /// The navigable targets of `view` matching `query`, grouped by rendered
 /// section and in render order. `targets` is this flattened, so the two can't
 /// drift; `section_at` uses the grouping to answer "every link in the section
 /// the cursor is in".
-fn groups<'a>(view: View, s: &'a Sections, query: &str, visible: Visibility) -> Vec<Vec<&'a str>> {
+fn groups<'a>(
+    view: View,
+    s: &'a Sections,
+    query: &str,
+    visible: Visibility,
+) -> Vec<Vec<Target<'a>>> {
     let q = query.to_lowercase();
     match view {
         View::Mine => vec![
@@ -140,7 +183,7 @@ fn groups<'a>(view: View, s: &'a Sections, query: &str, visible: Visibility) -> 
                 s.queue.as_deref().map_or_else(Vec::new, |rows| {
                     mode.iter(rows)
                         .filter(|row| hit(&row.haystack(), &q))
-                        .map(Searchable::url)
+                        .map(Searchable::target)
                         .collect()
                 })
             }),
@@ -168,14 +211,19 @@ fn groups<'a>(view: View, s: &'a Sections, query: &str, visible: Visibility) -> 
     }
 }
 
-/// The open URL of every navigable row in `view` that matches `query`, in the
+/// Every navigable row in `view` that matches `query`, in the
 /// exact top-to-bottom order the dashboard renders them, so a selection index
 /// lines up with the rendered (and identically filtered) rows. Rows without a
 /// URL (an "upcoming" shipments row with no commits) are skipped. An empty
 /// `query` yields every row.
 #[cfg(test)]
 fn targets<'a>(view: View, s: &'a Sections, query: &str) -> Vec<&'a str> {
-    targets_visible(view, s, query, Visibility::all(s))
+    urls(targets_visible(view, s, query, Visibility::all(s)))
+}
+
+#[cfg(test)]
+pub(crate) fn urls(targets: Vec<Target<'_>>) -> Vec<&str> {
+    targets.into_iter().map(|target| target.url).collect()
 }
 
 pub(crate) fn targets_visible<'a>(
@@ -183,7 +231,7 @@ pub(crate) fn targets_visible<'a>(
     s: &'a Sections,
     query: &str,
     visible: Visibility,
-) -> Vec<&'a str> {
+) -> Vec<Target<'a>> {
     groups(view, s, query, visible).concat()
 }
 
@@ -196,7 +244,7 @@ pub(crate) fn target_index(
 ) -> Option<usize> {
     targets_visible(view, s, query, visible)
         .iter()
-        .position(|target| *target == url)
+        .position(|target| target.url == url)
 }
 
 /// Every target of the section containing the `index`-th target — what `Y`
@@ -204,7 +252,13 @@ pub(crate) fn target_index(
 /// the first non-empty section; an out-of-range index yields nothing.
 #[cfg(test)]
 fn section_at<'a>(view: View, s: &'a Sections, query: &str, index: usize) -> Vec<&'a str> {
-    section_at_visible(view, s, query, index, Visibility::all(s))
+    urls(section_at_visible(
+        view,
+        s,
+        query,
+        index,
+        Visibility::all(s),
+    ))
 }
 
 pub(crate) fn section_at_visible<'a>(
@@ -213,7 +267,7 @@ pub(crate) fn section_at_visible<'a>(
     query: &str,
     index: usize,
     visible: Visibility,
-) -> Vec<&'a str> {
+) -> Vec<Target<'a>> {
     let mut start = 0;
     for g in groups(view, s, query, visible) {
         if index < start + g.len() {
@@ -399,6 +453,21 @@ mod tests {
                 "https://rel/v1",
             ]
         );
+        let links: Vec<_> = targets_visible(View::Mine, &s, "", Visibility::all(&s))
+            .iter()
+            .map(|target| target.format("[{title}]({url})"))
+            .collect();
+        assert_eq!(
+            links,
+            [
+                "[pr 1](https://pr/1)",
+                "[pr 2](https://pr/2)",
+                "[q 3](https://q/3)",
+                "[m 4](https://m/4)",
+                "[upcoming](https://up)",
+                "[v1](https://rel/v1)",
+            ]
+        );
     }
 
     #[test]
@@ -439,6 +508,45 @@ mod tests {
             targets(View::Reviews, &s, ""),
             vec!["https://rev/1", "https://revm/2"]
         );
+        let links: Vec<_> = targets_visible(View::Reviews, &s, "", Visibility::all(&s))
+            .iter()
+            .map(|target| target.format("[{title}]({url})"))
+            .collect();
+        assert_eq!(links, ["[r](https://rev/1)", "[rm](https://revm/2)"]);
+    }
+
+    #[test]
+    fn link_format_substitutes_only_known_placeholders() {
+        let target = Target {
+            title: "fix parser",
+            url: "https://pr/1",
+        };
+        for (template, expected) in [
+            ("{url}", "https://pr/1"),
+            ("{title}", "fix parser"),
+            ("[{title}]({url})", "[fix parser](https://pr/1)"),
+            (
+                "{url}: {title} {title}",
+                "https://pr/1: fix parser fix parser",
+            ),
+            ("{url}{url}", "https://pr/1https://pr/1"),
+            ("literal {other}", "literal {other}"),
+            ("", ""),
+        ] {
+            assert_eq!(target.format(template), expected, "template: {template:?}");
+        }
+    }
+
+    #[test]
+    fn link_format_preserves_placeholder_text_in_values() {
+        let target = Target {
+            title: "fix: {url} and {title} café",
+            url: "https://pr/{title}/{url}",
+        };
+        assert_eq!(
+            target.format("[{title}]({url})"),
+            "[fix: {url} and {title} café](https://pr/{title}/{url})"
+        );
     }
 
     #[test]
@@ -456,11 +564,11 @@ mod tests {
             reviewed_merged: false,
         };
         assert_eq!(
-            targets_visible(View::Mine, &s, "", visible),
+            urls(targets_visible(View::Mine, &s, "", visible)),
             vec!["https://pr/1"]
         );
         assert_eq!(
-            section_at_visible(View::Mine, &s, "", 0, visible),
+            urls(section_at_visible(View::Mine, &s, "", 0, visible)),
             vec!["https://pr/1"]
         );
         assert_eq!(
@@ -493,15 +601,15 @@ mod tests {
         visible.merged = Some(1);
 
         assert_eq!(
-            targets_visible(View::Mine, &s, "", visible),
+            urls(targets_visible(View::Mine, &s, "", visible)),
             vec!["https://q/1", "https://q/2", "https://m/4"]
         );
         assert_eq!(
-            section_at_visible(View::Mine, &s, "", 0, visible),
+            urls(section_at_visible(View::Mine, &s, "", 0, visible)),
             vec!["https://q/1", "https://q/2"]
         );
         assert_eq!(
-            section_at_visible(View::Mine, &s, "", 2, visible),
+            urls(section_at_visible(View::Mine, &s, "", 2, visible)),
             vec!["https://m/4"]
         );
 
@@ -510,7 +618,7 @@ mod tests {
             1,
         ));
         assert_eq!(
-            targets_visible(View::Mine, &s, "", visible),
+            urls(targets_visible(View::Mine, &s, "", visible)),
             vec!["https://q/1", "https://m/4"]
         );
     }
@@ -530,7 +638,9 @@ mod tests {
             2,
         ));
 
-        let selected = targets_visible(View::Mine, &s, "", visible)[1].to_string();
+        let selected = targets_visible(View::Mine, &s, "", visible)[1]
+            .url
+            .to_string();
         s.queue.as_mut().unwrap()[0].checks.running = 0;
         visible.queue = Some(crate::queue::VisibleRows::limited(
             s.queue.as_deref().unwrap(),
@@ -554,12 +664,12 @@ mod tests {
 
         let mut visible = Visibility::all(&s);
         assert_eq!(
-            targets_visible(View::Mine, &s, "", visible),
+            urls(targets_visible(View::Mine, &s, "", visible)),
             vec!["https://q/1"]
         );
         visible.queue = None;
         assert_eq!(
-            targets_visible(View::Mine, &s, "", visible),
+            urls(targets_visible(View::Mine, &s, "", visible)),
             vec!["https://pr/1"]
         );
     }

@@ -1547,6 +1547,35 @@ impl Ui {
             buf.insert(nav::filter(good, &self.search))
         }
     }
+
+    fn copy_text(
+        &self,
+        shown: &Sections,
+        visible: Visibility,
+        format: &str,
+        section: bool,
+    ) -> Option<(String, usize)> {
+        if !section {
+            let targets = nav::targets_visible(self.view, shown, &self.search, visible);
+            return Some((targets.get(self.selected?)?.format(format), 1));
+        }
+        let targets = nav::section_at_visible(
+            self.view,
+            shown,
+            &self.search,
+            self.selected.unwrap_or_default(),
+            visible,
+        );
+        if targets.is_empty() {
+            return None;
+        }
+        let text = targets
+            .iter()
+            .map(|target| format!("- {}", target.format(format)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some((text, targets.len()))
+    }
 }
 
 /// Entry point: authenticate, resolve repo + user, then render once or watch.
@@ -1953,11 +1982,11 @@ impl<'a> App<'a> {
                 Flow::Continue
             }
             Action::Copy => {
-                self.copy_selected()?;
+                self.copy_links(false)?;
                 Flow::Continue
             }
             Action::CopySection => {
-                self.copy_section()?;
+                self.copy_links(true)?;
                 Flow::Continue
             }
             Action::Move(m) => {
@@ -2068,7 +2097,7 @@ impl<'a> App<'a> {
             let visible = self.visible_sections(shown);
             nav::targets_visible(self.ui.view, shown, &self.ui.search, visible)
                 .get(selected)
-                .map(|url| (*url).to_string())
+                .map(|target| target.url.to_string())
         })
     }
 
@@ -2090,48 +2119,22 @@ impl<'a> App<'a> {
             .map_or(10, |s| usize::from(s.height / 2).max(1))
     }
 
-    /// `y`: copy the selected row's link. A no-op without a selection or data.
-    fn copy_selected(&mut self) -> Result<()> {
-        match self.selected_url() {
-            Some(url) => self.copy(&url, 1),
-            None => Ok(()),
-        }
-    }
-
-    /// `Y`: copy every link of the section the cursor is in, as a markdown list.
-    /// With no selection that's the first non-empty section, matching where a
-    /// movement key would enter. Honors the active search filter, like `targets`.
-    fn copy_section(&mut self) -> Result<()> {
+    /// Copy the selected link (`y`) or its whole section as a list (`Y`).
+    fn copy_links(&mut self, section: bool) -> Result<()> {
         let Some(good) = &self.last_good else {
             return Ok(());
         };
         let mut filtered = None;
         let shown = self.ui.shown(good, &mut filtered);
         let visible = self.visible_sections(shown);
-        let urls = nav::section_at_visible(
-            self.ui.view,
-            shown,
-            &self.ui.search,
-            self.ui.selected.unwrap_or_default(),
-            visible,
-        );
-        if urls.is_empty() {
+        let Some((text, n)) = self
+            .ui
+            .copy_text(shown, visible, &self.cli.link_format, section)
+        else {
             return Ok(());
-        }
-        let n = urls.len();
-        let list = urls
-            .iter()
-            .map(|u| format!("- {u}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.copy(&list, n)
-    }
-
-    /// Hand `text` (`n` links) to the terminal's clipboard and report it on the
-    /// trailing status line, which the next refresh clears.
-    fn copy(&mut self, text: &str, n: usize) -> Result<()> {
+        };
         let plural = if n == 1 { "" } else { "s" };
-        self.last_status = match clipboard::copy(text) {
+        self.last_status = match clipboard::copy(&text) {
             Ok(()) => format!("copied {n} link{plural}"),
             Err(e) => format!("error: copy failed: {e}"),
         };
@@ -2334,6 +2337,105 @@ mod tests {
             release: None,
             merged_at: None,
         }
+    }
+
+    #[test]
+    fn copy_formats_selected_links_and_section_lists() {
+        let sections = Sections {
+            merged: Some(vec![merged_row(1), merged_row(2)]),
+            ..Sections::EMPTY
+        };
+        let ui = Ui {
+            selected: Some(1),
+            ..ui(View::Mine)
+        };
+        let visible = Visibility::all(&sections);
+        let default = Cli::try_parse_from(["prowl"]).unwrap();
+        let markdown = Cli::try_parse_from(["prowl", "--link-format", "[{title}]({url})"]).unwrap();
+        for (format, section, expected, count) in [
+            (default.link_format.as_str(), false, "https://merged/2", 1),
+            (
+                default.link_format.as_str(),
+                true,
+                "- https://merged/1\n- https://merged/2",
+                2,
+            ),
+            (
+                markdown.link_format.as_str(),
+                false,
+                "[merged-2](https://merged/2)",
+                1,
+            ),
+            (
+                markdown.link_format.as_str(),
+                true,
+                "- [merged-1](https://merged/1)\n- [merged-2](https://merged/2)",
+                2,
+            ),
+        ] {
+            assert_eq!(
+                ui.copy_text(&sections, visible, format, section),
+                Some((expected.into(), count)),
+                "format={format:?}, section={section}"
+            );
+        }
+        assert_eq!(ui.selected, Some(1));
+    }
+
+    #[test]
+    fn copy_handles_absent_selection_and_empty_sections() {
+        let sections = Sections {
+            prs: Some(vec![]),
+            merged: Some(vec![merged_row(1)]),
+            ..Sections::EMPTY
+        };
+        let mut ui = ui(View::Mine);
+        let visible = Visibility::all(&sections);
+        assert_eq!(ui.copy_text(&sections, visible, "{url}", false), None);
+        assert_eq!(
+            ui.copy_text(&sections, visible, "{url}", true),
+            Some(("- https://merged/1".into(), 1))
+        );
+        ui.selected = Some(1);
+        for section in [false, true] {
+            assert_eq!(ui.copy_text(&sections, visible, "{url}", section), None);
+        }
+        ui.selected = Some(0);
+        ui.search = "no matches".into();
+        for section in [false, true] {
+            assert_eq!(ui.copy_text(&sections, visible, "{url}", section), None);
+        }
+    }
+
+    #[test]
+    fn copy_honors_search_and_visible_row_limits() {
+        let sections = Sections {
+            queue: Some((0..=3).map(|n| queue_row(n, n == 0, false)).collect()),
+            ..Sections::EMPTY
+        };
+        let ui = Ui {
+            search: "other".into(),
+            selected: Some(1),
+            ..ui(View::Mine)
+        };
+        let mut filtered = None;
+        let shown = ui.shown(&sections, &mut filtered);
+        let mut visible = Visibility::all(shown);
+        visible.queue = Some(queue::VisibleRows::limited(
+            shown.queue.as_deref().unwrap(),
+            2,
+        ));
+        assert_eq!(
+            ui.copy_text(shown, visible, "[{title}]({url})", true),
+            Some((
+                "- [queue-1](https://queue/1)\n- [queue-2](https://queue/2)".into(),
+                2,
+            ))
+        );
+        assert_eq!(
+            ui.copy_text(shown, visible, "[{title}]({url})", false),
+            Some(("[queue-2](https://queue/2)".into(), 1))
+        );
     }
 
     fn visible_body(sections: &Sections, visible: Visibility) -> String {
@@ -2561,7 +2663,13 @@ mod tests {
             .map(|n| format!("https://queue/{n}"))
             .collect();
         assert_eq!(
-            nav::section_at_visible(View::Mine, &sections, "", 10, layout.visible),
+            nav::urls(nav::section_at_visible(
+                View::Mine,
+                &sections,
+                "",
+                10,
+                layout.visible
+            )),
             expected,
             "use every available queue row, keep building and own PRs, and retain queue order"
         );
@@ -2594,7 +2702,12 @@ mod tests {
             let layout = mine_layout(&sections, 20);
             let expected: Vec<_> = (1..=10).map(|n| format!("https://queue/{n}")).collect();
             assert_eq!(
-                nav::targets_visible(View::Mine, &sections, "", layout.visible),
+                nav::urls(nav::targets_visible(
+                    View::Mine,
+                    &sections,
+                    "",
+                    layout.visible
+                )),
                 expected,
                 "queue rows should fill the available height: mine={mine}, building={building}"
             );
@@ -2635,7 +2748,12 @@ mod tests {
                 .map(|n| format!("https://queue/{n}"))
                 .collect();
             assert_eq!(
-                nav::targets_visible(View::Mine, &sections, "", layout.visible),
+                nav::urls(nav::targets_visible(
+                    View::Mine,
+                    &sections,
+                    "",
+                    layout.visible
+                )),
                 expected,
                 "wrong queue rows at height {height}"
             );
@@ -2669,14 +2787,10 @@ mod tests {
         let status = "error: offline";
         let layout = responsive_layout(120, 17, shown, &ui, status, footer, true, true);
         let expected: Vec<_> = (1..=6).map(|n| format!("https://queue/{n}")).collect();
-        assert_eq!(
-            nav::targets_visible(View::Mine, shown, &ui.search, layout.visible),
-            expected
-        );
-        assert_eq!(
-            nav::section_at_visible(View::Mine, shown, &ui.search, 5, layout.visible),
-            expected
-        );
+        let targets = nav::targets_visible(View::Mine, shown, &ui.search, layout.visible);
+        assert_eq!(nav::urls(targets), expected);
+        let section = nav::section_at_visible(View::Mine, shown, &ui.search, 5, layout.visible);
+        assert_eq!(nav::urls(section), expected);
         assert_eq!(
             nav::target_index(
                 View::Mine,
@@ -2771,7 +2885,12 @@ mod tests {
 
         let mine_and_building = mine_layout(&sections, 13);
         assert_eq!(
-            nav::targets_visible(View::Mine, &sections, "", mine_and_building.visible),
+            nav::urls(nav::targets_visible(
+                View::Mine,
+                &sections,
+                "",
+                mine_and_building.visible
+            )),
             ["https://queue/1", "https://queue/2", "https://queue/3"]
         );
         let body = visible_body(&sections, mine_and_building.visible);
@@ -2785,7 +2904,12 @@ mod tests {
 
         let building = mine_layout(&sections, 12);
         assert_eq!(
-            nav::targets_visible(View::Mine, &sections, "", building.visible),
+            nav::urls(nav::targets_visible(
+                View::Mine,
+                &sections,
+                "",
+                building.visible
+            )),
             ["https://queue/1", "https://queue/3"]
         );
         let body = visible_body(&sections, building.visible);
@@ -2800,7 +2924,7 @@ mod tests {
 
         let one = mine_layout(&sections, 11);
         assert_eq!(
-            nav::targets_visible(View::Mine, &sections, "", one.visible),
+            nav::urls(nav::targets_visible(View::Mine, &sections, "", one.visible)),
             ["https://queue/1"]
         );
         assert!(visible_body(&sections, one.visible).contains("+4 hidden"));

@@ -110,6 +110,23 @@ shipments, either reviews list — as a markdown list:
 - https://github.com/owner/name/pull/2
 ```
 
+Use `--link-format` to change both copy commands from URL-only to a custom
+format. For Markdown links:
+
+```sh
+prowl --link-format '[{title}]({url})'
+```
+
+`{title}` is the full PR title, the release tag, or `upcoming`; `{url}` is the
+link destination. These placeholders are replaced literally, without Markdown
+escaping; all other text is kept as written. The default is `{url}`. Section
+copies still prepend `- ` to each formatted link:
+
+```markdown
+- [Fix parser](https://github.com/owner/name/pull/1)
+- [Update docs](https://github.com/owner/name/pull/2)
+```
+
 With no cursor yet, `Y` copies the first non-empty section; with a filter
 applied, it copies only the matching rows. Copying uses the OSC 52 escape, so it
 sets the clipboard of the terminal you're looking at even over SSH — as long as
@@ -121,5 +138,5 @@ cursor and `Enter` work on the matches), and `Esc` clears it (with no
 filter to clear, `Esc` quits).
 
 Run `prowl --help` for all flags (interval, `--only`, `--view`,
-`--review-scope`, `--branch`, `--no-draft`, `--required`, merged window, etc.) and the full
-watch-mode key list.
+`--review-scope`, `--branch`, `--no-draft`, `--required`, `--link-format`,
+merged window, etc.) and the full watch-mode key list.
