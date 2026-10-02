@@ -53,13 +53,13 @@ mod tests {
         let (cmd, args) = opener();
         if cfg!(target_os = "macos") {
             assert_eq!(cmd, "open");
-            assert!(args.is_empty());
+            assert_eq!(args, Vec::<&str>::new());
         } else if cfg!(target_os = "windows") {
             assert_eq!(cmd, "cmd");
             assert_eq!(args, &["/C", "start", ""]);
         } else {
             assert_eq!(cmd, "xdg-open");
-            assert!(args.is_empty());
+            assert_eq!(args, Vec::<&str>::new());
         }
     }
 

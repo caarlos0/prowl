@@ -3100,7 +3100,7 @@ mod tests {
         };
 
         // No selection -> nothing is highlighted (the glanceable default).
-        assert!(highlighted(&ui(View::Mine)).is_empty());
+        assert_eq!(highlighted(&ui(View::Mine)), Vec::<String>::new());
 
         // Selecting the second row highlights exactly that row, whole: the bar
         // reaches the leading marker column, which the caret used to occupy.

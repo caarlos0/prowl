@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(targets(View::Mine, &s, "v1.5"), vec!["https://rel/v1"]);
         assert_eq!(targets(View::Mine, &s, "upcoming"), vec!["https://up"]);
         // No match -> empty.
-        assert!(targets(View::Mine, &s, "zzz").is_empty());
+        assert_eq!(targets(View::Mine, &s, "zzz"), Vec::<&str>::new());
     }
 
     #[test]
@@ -714,7 +714,7 @@ mod tests {
         let f = filter(&s, "#2");
         assert_eq!(f.prs.as_ref().unwrap().len(), 1);
         assert_eq!(f.prs.as_ref().unwrap()[0].number, 2);
-        assert!(f.merged.as_ref().unwrap().is_empty());
+        assert_eq!(f.merged.as_ref().unwrap(), &Vec::<MergedRow>::new());
         // The filtered sections' targets equal the query-filtered targets.
         assert_eq!(targets(View::Mine, &f, ""), targets(View::Mine, &s, "#2"));
     }
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(at(4), vec!["https://m/4", "https://m/5"]);
         assert_eq!(at(6), vec!["https://up", "https://rel/v1"]);
         // Past the end there's no section.
-        assert!(at(7).is_empty());
+        assert_eq!(at(7), Vec::<&str>::new());
     }
 
     #[test]
@@ -759,7 +759,7 @@ mod tests {
         let mut s = empty();
         s.prs = Some(vec![pr(1), pr(2)]);
         assert_eq!(section_at(View::Mine, &s, "#2", 0), vec!["https://pr/2"]);
-        assert!(section_at(View::Mine, &s, "zzz", 0).is_empty());
+        assert_eq!(section_at(View::Mine, &s, "zzz", 0), Vec::<&str>::new());
     }
 
     #[test]
