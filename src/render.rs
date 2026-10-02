@@ -64,10 +64,7 @@ fn link_params(url: &str) -> String {
 
 impl Cell {
     pub fn plain(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            style: Style::new(),
-        }
+        Self::styled(text, Style::new())
     }
 
     pub fn styled(text: impl Into<String>, style: impl Into<Style>) -> Self {
@@ -79,12 +76,7 @@ impl Cell {
 
     /// A dim + underlined OSC-8 hyperlink whose visible text is `text`.
     pub fn link(text: impl Into<String>, url: impl Into<String>) -> Self {
-        let url = url.into();
-        let params = link_params(&url);
-        Self {
-            text: text.into(),
-            style: Style::new().faint().underline().link(url, params),
-        }
+        Self::link_styled(text, url, Style::new().faint())
     }
 
     /// An OSC-8 hyperlink carrying an explicit style (e.g. a colored, clickable

@@ -186,9 +186,10 @@ pub fn queue_nodes(data: QueueData) -> Vec<QueueEntryNode> {
 /// or `None` when there is no queue or the API omits it.
 pub fn queue_next_eta(data: &QueueData) -> Option<i64> {
     data.repository
-        .as_ref()
-        .and_then(|r| r.merge_queue.as_ref())
-        .and_then(|q| q.next_entry_estimated_time_to_merge)
+        .as_ref()?
+        .merge_queue
+        .as_ref()?
+        .next_entry_estimated_time_to_merge
 }
 
 /// Fetch the merge-queue entries and the queue-level ETA. A null or empty queue
@@ -589,14 +590,7 @@ fn required_query(pending: &[PendingRequired]) -> (String, serde_json::Value) {
             format!("pull{alias}"),
             serde_json::Value::from(item.pull_request_number),
         );
-        variables.insert(
-            format!("after{alias}"),
-            item.after
-                .as_ref()
-                .map_or(serde_json::Value::Null, |value| {
-                    serde_json::Value::String(value.clone())
-                }),
-        );
+        variables.insert(format!("after{alias}"), serde_json::json!(item.after));
     }
     (
         format!("query({}) {{\n{fields}}}", declarations.join(", ")),
@@ -904,18 +898,23 @@ mod tests {
 
     #[test]
     fn required_query_uses_commit_id_and_pr_number_variables() {
-        let pending = [PendingRequired {
-            target: 0,
-            pull_request_number: 42,
-            commit_id: "COMMIT_ID".to_string(),
-            after: Some("CURSOR".to_string()),
-        }];
-        let (query, variables) = required_query(&pending);
+        for (after, expected) in [
+            (None, serde_json::Value::Null),
+            (Some("CURSOR"), serde_json::Value::from("CURSOR")),
+        ] {
+            let pending = [PendingRequired {
+                target: 0,
+                pull_request_number: 42,
+                commit_id: "COMMIT_ID".to_string(),
+                after: after.map(str::to_string),
+            }];
+            let (query, variables) = required_query(&pending);
 
-        assert!(query.contains("isRequired(pullRequestNumber: $pull0)"));
-        assert!(query.contains("contexts(first: 100, after: $after0)"));
-        assert_eq!(variables["commit0"], "COMMIT_ID");
-        assert_eq!(variables["pull0"], 42);
-        assert_eq!(variables["after0"], "CURSOR");
+            assert!(query.contains("isRequired(pullRequestNumber: $pull0)"));
+            assert!(query.contains("contexts(first: 100, after: $after0)"));
+            assert_eq!(variables["commit0"], "COMMIT_ID");
+            assert_eq!(variables["pull0"], 42);
+            assert_eq!(variables["after0"], expected);
+        }
     }
 }

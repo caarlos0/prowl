@@ -52,12 +52,7 @@ impl Tracker {
             .filter(|(num, status)| matches!(prev.open_status.get(num), Some(p) if p != *status))
             .map(|(num, _)| *num)
             .collect();
-        let newly_merged = self
-            .merged
-            .iter()
-            .filter(|num| !prev.merged.contains(num))
-            .copied()
-            .collect();
+        let newly_merged = self.merged.difference(&prev.merged).copied().collect();
         Changes {
             status_changed,
             newly_merged,

@@ -101,7 +101,7 @@ impl Sections {
     };
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Visibility {
     pub(crate) prs: bool,
     pub(crate) queue: Option<queue::VisibleRows>,
@@ -120,17 +120,6 @@ impl Visibility {
             shipments: sections.commits.is_some(),
             reviews: sections.reviews.is_some(),
             reviewed_merged: sections.reviewed_merged.is_some(),
-        }
-    }
-
-    fn none() -> Self {
-        Self {
-            prs: false,
-            queue: None,
-            merged: None,
-            shipments: false,
-            reviews: false,
-            reviewed_merged: false,
         }
     }
 }
@@ -206,25 +195,16 @@ fn body_height(sections: &Sections, view: View, visible: Visibility, tabs: bool)
 }
 
 fn bottom_height(ui: &Ui, status: &str, footer: Option<(&str, bool)>, show_help: bool) -> usize {
-    let mut height = 0;
-    let mut blocks = 0usize;
-    if show_help {
-        height += render::help_height(ui.view);
-        blocks += 1;
-    }
-    if !ui.search.is_empty() || ui.searching {
-        height += 1;
-        blocks += 1;
-    }
-    if !status.is_empty() {
-        height += 1;
-        blocks += 1;
-    }
-    if footer.is_some() {
-        height += 1;
-        blocks += 1;
-    }
-    height + blocks.saturating_sub(1)
+    let lines = usize::from(!ui.search.is_empty() || ui.searching)
+        + usize::from(!status.is_empty())
+        + usize::from(footer.is_some());
+    let help = if show_help {
+        render::help_height(ui.view)
+    } else {
+        0
+    };
+    let gaps = (lines + usize::from(show_help)).saturating_sub(1);
+    lines + help + gaps
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -307,7 +287,7 @@ fn responsive_layout(
     let too_small = width < render::MIN_WIDTH || required_height > rows;
     ResponsiveLayout {
         visible: if too_small {
-            Visibility::none()
+            Visibility::default()
         } else {
             visible
         },
@@ -1218,17 +1198,10 @@ fn run_once_interactive(
 ) -> Result<()> {
     let mut program = start_program(terminal)?;
     let result = run_once_session(&mut program, cli, client, repo);
+    // Always finish, but preserve a session error if teardown also failed.
     let finish = program.finish();
-    let sections = match result {
-        Ok(sections) => {
-            finish?;
-            sections
-        }
-        Err(error) => {
-            let _ = finish;
-            return Err(error);
-        }
-    };
+    let sections = result?;
+    finish?;
     if let Some(sections) = sections
         && !cli.no_cache
     {
@@ -1468,27 +1441,22 @@ fn classify(ev: &Event) -> Action {
 /// searchable character, while `Ctrl-C` quits and Esc closes the prompt.
 fn classify_search(ev: &Event) -> SearchAction {
     match ev {
-        Event::KeyPress(k) => {
-            if k.matches("ctrl+c") {
-                SearchAction::Quit
-            } else {
-                match k.code {
-                    KeyCode::Char(c)
-                        if !k
-                            .modifiers
-                            .intersects(KeyModifiers::CTRL | KeyModifiers::ALT) =>
-                    {
-                        SearchAction::Char(c)
-                    }
-                    KeyCode::Space => SearchAction::Char(' '),
-                    KeyCode::Backspace => SearchAction::Backspace,
-                    KeyCode::Enter => SearchAction::Enter,
-                    KeyCode::Escape => SearchAction::Esc,
-                    _ if k.matches("ctrl+z") => SearchAction::Suspend,
-                    _ => SearchAction::None,
-                }
+        Event::KeyPress(k) if k.matches("ctrl+c") => SearchAction::Quit,
+        Event::KeyPress(k) => match k.code {
+            KeyCode::Char(c)
+                if !k
+                    .modifiers
+                    .intersects(KeyModifiers::CTRL | KeyModifiers::ALT) =>
+            {
+                SearchAction::Char(c)
             }
-        }
+            KeyCode::Space => SearchAction::Char(' '),
+            KeyCode::Backspace => SearchAction::Backspace,
+            KeyCode::Enter => SearchAction::Enter,
+            KeyCode::Escape => SearchAction::Esc,
+            _ if k.matches("ctrl+z") => SearchAction::Suspend,
+            _ => SearchAction::None,
+        },
         Event::Resize(ws) => SearchAction::Resize(ws.col, ws.row),
         _ => SearchAction::None,
     }
@@ -1942,55 +1910,38 @@ impl<'a> App<'a> {
         if self.ui.searching {
             return self.handle_search_event(ev);
         }
-        Ok(match classify(ev) {
-            Action::Quit => Flow::Quit,
-            Action::Refresh => Flow::Refresh,
-            Action::Suspend => {
-                self.suspend()?;
-                Flow::Continue
-            }
+        match classify(ev) {
+            Action::Quit => return Ok(Flow::Quit),
+            Action::Refresh => return Ok(Flow::Refresh),
+            Action::Suspend => self.suspend()?,
             Action::ToggleHelp => {
                 self.ui.show_help = !self.ui.show_help;
                 self.ui.selected = None;
                 self.repaint_last()?;
-                Flow::Continue
             }
             Action::SwitchView => {
                 // Selection indices don't carry across views, so start fresh.
                 self.ui.view = self.ui.view.toggle();
                 self.ui.selected = None;
                 self.repaint_last()?;
-                Flow::Continue
             }
             Action::Search => {
                 self.ui.searching = true;
                 self.ui.selected = None;
                 self.repaint_last()?;
-                Flow::Continue
             }
             Action::Cancel => {
                 // Esc clears an applied filter; with none to clear, it quits.
                 if self.ui.search.is_empty() {
-                    Flow::Quit
-                } else {
-                    self.ui.search.clear();
-                    self.ui.selected = None;
-                    self.repaint_last()?;
-                    Flow::Continue
+                    return Ok(Flow::Quit);
                 }
+                self.ui.search.clear();
+                self.ui.selected = None;
+                self.repaint_last()?;
             }
-            Action::Open => {
-                self.open_selected()?;
-                Flow::Continue
-            }
-            Action::Copy => {
-                self.copy_links(false)?;
-                Flow::Continue
-            }
-            Action::CopySection => {
-                self.copy_links(true)?;
-                Flow::Continue
-            }
+            Action::Open => self.open_selected()?,
+            Action::Copy => self.copy_links(false)?,
+            Action::CopySection => self.copy_links(true)?,
             Action::Move(m) => {
                 let len = self.target_count();
                 let next = nav::moved(m, self.ui.selected, len, self.half_page());
@@ -1998,7 +1949,6 @@ impl<'a> App<'a> {
                     self.ui.selected = next;
                     self.repaint_last()?;
                 }
-                Flow::Continue
             }
             Action::Resize(w, h) => {
                 let selected = self.selected_url();
@@ -2014,10 +1964,10 @@ impl<'a> App<'a> {
                 self.program.screen_mut().resize((w, h));
                 self.restore_selection(selected.as_deref());
                 self.repaint_last()?;
-                Flow::Continue
             }
-            Action::None => Flow::Continue,
-        })
+            Action::None => {}
+        }
+        Ok(Flow::Continue)
     }
 
     /// Apply a keystroke while the search prompt is open. Typing filters live
@@ -2093,24 +2043,22 @@ impl<'a> App<'a> {
 
     fn selected_url(&self) -> Option<String> {
         let selected = self.ui.selected?;
-        self.last_good.as_ref().and_then(|good| {
-            let mut filtered = None;
-            let shown = self.ui.shown(good, &mut filtered);
-            let visible = self.visible_sections(shown);
-            nav::targets_visible(self.ui.view, shown, &self.ui.search, visible)
-                .get(selected)
-                .map(|target| target.url.to_string())
-        })
+        let good = self.last_good.as_ref()?;
+        let mut filtered = None;
+        let shown = self.ui.shown(good, &mut filtered);
+        let visible = self.visible_sections(shown);
+        nav::targets_visible(self.ui.view, shown, &self.ui.search, visible)
+            .get(selected)
+            .map(|target| target.url.to_string())
     }
 
     fn restore_selection(&mut self, url: Option<&str>) {
         self.ui.selected = url.and_then(|url| {
-            self.last_good.as_ref().and_then(|good| {
-                let mut filtered = None;
-                let shown = self.ui.shown(good, &mut filtered);
-                let visible = self.visible_sections(shown);
-                nav::target_index(self.ui.view, shown, &self.ui.search, visible, url)
-            })
+            let good = self.last_good.as_ref()?;
+            let mut filtered = None;
+            let shown = self.ui.shown(good, &mut filtered);
+            let visible = self.visible_sections(shown);
+            nav::target_index(self.ui.view, shown, &self.ui.search, visible, url)
         });
     }
 
@@ -2291,6 +2239,40 @@ mod tests {
             search: String::new(),
             searching: false,
             branch: false,
+        }
+    }
+
+    #[test]
+    fn bottom_height_matches_painted_blocks() {
+        for view in [View::Mine, View::Reviews] {
+            for bits in 0u8..32 {
+                let mut ui = ui(view);
+                ui.show_help = bits & 1 != 0;
+                if bits & 2 != 0 {
+                    ui.search = "query".into();
+                }
+                ui.searching = bits & 4 != 0;
+                let status = if bits & 8 != 0 { "error: offline" } else { "" };
+                let footer = (bits & 16 != 0).then_some(("5m", false));
+                let mut canvas = TextBuffer::new(120, 16);
+                let (used, _) = paint_bottom(
+                    &mut canvas,
+                    &Sections::EMPTY,
+                    &ui,
+                    status,
+                    footer,
+                    true,
+                    ui.show_help,
+                    Visibility::default(),
+                    false,
+                    0,
+                );
+                assert_eq!(
+                    bottom_height(&ui, status, footer, ui.show_help),
+                    usize::from(used),
+                    "{view:?}, help/search/searching/status/footer bits={bits:05b}"
+                );
+            }
         }
     }
 
@@ -2977,7 +2959,7 @@ mod tests {
             true,
         );
         assert!(layout.too_small);
-        assert_eq!(layout.visible, Visibility::none());
+        assert_eq!(layout.visible, Visibility::default());
         assert_eq!(layout.required_height, 6);
     }
 

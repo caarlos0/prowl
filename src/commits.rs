@@ -149,10 +149,8 @@ fn release_tags(client: &Client, repo: &Repo, include_prereleases: bool) -> Resu
 /// The trailing `(#NNN)` PR number in a commit subject (the squash / merge
 /// convention), or `None`. The reference must be at the very end and numeric.
 fn pr_number(subject: &str) -> Option<u32> {
-    let s = subject.trim_end();
-    let inner = s.strip_suffix(')')?;
-    let at = inner.rfind("(#")?;
-    inner[at + 2..].parse().ok()
+    let (_, number) = subject.trim_end().strip_suffix(')')?.rsplit_once("(#")?;
+    number.parse().ok()
 }
 
 /// First-line PR number of a commit, if any.
@@ -318,6 +316,7 @@ mod tests {
     fn parses_trailing_pr_number() {
         assert_eq!(pr_number("feat: thing (#12)"), Some(12));
         assert_eq!(pr_number("chore: bump  (#7)\n"), Some(7));
+        assert_eq!(pr_number("follow up (#7) (#12)"), Some(12));
         assert_eq!(pr_number("no reference here"), None);
         // A reference must be at the very end, and must be numeric.
         assert_eq!(pr_number("mid (#3) ref"), None);
