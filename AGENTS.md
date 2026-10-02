@@ -493,6 +493,9 @@ findings fail CI.
 
 CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test (the `build` job)
 and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
+The build follows the latest stable Rust, including new Clippy lints. The audit
+job has `checks: write` to publish its check run and `issues: write` to report
+advisories; those permissions are scoped to that job.
 
 ## The README screenshot
 
