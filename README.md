@@ -8,9 +8,9 @@ A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
 **merge queue**, your **recently merged PRs**, and the **commits you've
 shipped** per release. It refreshes on an interval and **rings the terminal
 bell** the moment one of your PRs merges or an open PR's CI/merge status
-changes — and flags whatever changed. On startup it paints instantly from a
-local cache, then refreshes in the background. A PR that's in the merge queue is
-listed only there, not also under your open PRs.
+changes — and flags whatever changed until you mark it as read. On startup it
+paints instantly from a local cache, then refreshes in the background. A PR
+that's in the merge queue is listed only there, not also under your open PRs.
 
 Press **Tab** to switch to a **reviews** view: the PRs awaiting (or under) your
 review — each flagged with a glyph for whether you still owe a first review, the
@@ -100,14 +100,14 @@ prowl --repo owner/name   # watch a specific repo
 prowl --once              # render once and exit
 ```
 
-While watching, press `r` to refresh now, `Tab` to switch between your PRs and
+While watching, press `Ctrl-R` to refresh now, `Tab` to switch between your PRs and
 your reviews, `?` to toggle the help legend, and `q` (or `Ctrl-C`) to quit;
 `Ctrl-Z` suspends it back to your shell. The dashboard takes over the alternate
 screen, so quitting hands your shell back exactly as you left it. A footer glued
-to the bottom of the screen (`r refresh (every 5m) - tab switch view - enter open
-- y copy - / search - ? help`) shows the keys and the refresh interval. While a
-refresh is in flight the hint reads `r refreshing` and `r` presses are ignored
-until it finishes. On narrow screens the footer removes low-priority labels and
+to the bottom of the screen (`^R refresh (every 5m) - tab switch view - enter open
+- r/R read - y copy - / search - ? help`) shows the keys and the refresh interval.
+`^R` means `Ctrl-R`. While a refresh is in flight the hint reads `^R refreshing`
+and `Ctrl-R` presses are ignored until it finishes. On narrow screens the footer removes low-priority labels and
 hints instead of clipping. When height is limited, prowl first hides the help legend,
 then lower-priority sections. In the PR view it hides shipments, then trims the
 merged list from the oldest rows down to the newest row plus a `+N hidden`
@@ -127,6 +127,14 @@ Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 page; press `Enter` to open the highlighted PR (or release) in your browser. The
 cursor only appears once you start moving it, and stays on the same URL when the
 terminal is resized if that row remains visible.
+
+Changed PRs keep their `▸` marker (`>` in ASCII mode) until you press `r` to
+mark the selected PR as read, or `R` to mark all PRs as read, including hidden
+and filtered rows. Refreshing, moving the selection, opening a PR, switching
+views, and failed refreshes do not clear markers. With no PR selected, `r`
+does nothing. Markers last only for the current session and track your PRs,
+not the Reviews view; `R` clears them from either view. A new event marks the PR
+again, and only new events ring the bell.
 
 Press `y` to copy the selected row's link, or `Y` to copy every link in the
 section the cursor is in — your open PRs, the merge queue, the merged list, your

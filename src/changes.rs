@@ -14,7 +14,7 @@ pub struct Tracker {
     merged: HashSet<i64>,
 }
 
-/// What changed between the previous refresh and the current one.
+/// Changed PRs, used for both a refresh's events and accumulated unread markers.
 #[derive(Debug, Default, Clone)]
 pub struct Changes {
     /// Open PRs whose status changed (highlighted in the Open PRs table).
@@ -24,9 +24,19 @@ pub struct Changes {
 }
 
 impl Changes {
-    /// Whether anything bell-worthy happened.
+    /// Whether any changes are present.
     pub fn any(&self) -> bool {
         !self.status_changed.is_empty() || !self.newly_merged.is_empty()
+    }
+
+    pub(crate) fn extend(&mut self, changes: Changes) {
+        self.status_changed.extend(changes.status_changed);
+        self.newly_merged.extend(changes.newly_merged);
+    }
+
+    pub(crate) fn mark_read(&mut self, number: i64) {
+        self.status_changed.remove(&number);
+        self.newly_merged.remove(&number);
     }
 }
 
@@ -141,5 +151,63 @@ mod tests {
     fn first_refresh_is_silent() {
         // No previous tracker -> default Changes -> nothing rings.
         assert!(!Changes::default().any());
+    }
+
+    #[test]
+    fn unread_changes_accumulate_without_repeating_the_bell() {
+        let before = Tracker::build(
+            Some(&[pr(1, Some(Status::Pending)), pr(2, Some(Status::Pending))]),
+            Some(&[]),
+        );
+        let after = Tracker::build(
+            Some(&[pr(1, Some(Status::Pass)), pr(2, Some(Status::Pending))]),
+            Some(&[merged(3)]),
+        );
+        let mut unread = after.diff(&before);
+        let unchanged = after.diff(&after);
+        assert!(!unchanged.any(), "unread markers must not ring again");
+        unread.extend(unchanged);
+        assert_eq!(unread.status_changed, HashSet::from([1]));
+        assert_eq!(unread.newly_merged, HashSet::from([3]));
+
+        let later = Tracker::build(
+            Some(&[pr(2, Some(Status::Pass)), pr(1, Some(Status::Pass))]),
+            Some(&[merged(3)]),
+        );
+        unread.extend(later.diff(&after));
+        assert_eq!(unread.status_changed, HashSet::from([1, 2]));
+        assert_eq!(unread.newly_merged, HashSet::from([3]));
+
+        unread.mark_read(1);
+        unread.extend(later.diff(&later));
+        assert_eq!(unread.status_changed, HashSet::from([2]));
+        assert_eq!(unread.newly_merged, HashSet::from([3]));
+
+        let changed_again = Tracker::build(
+            Some(&[pr(1, Some(Status::Fail)), pr(2, Some(Status::Pass))]),
+            Some(&[merged(3)]),
+        );
+        let changes = changed_again.diff(&later);
+        assert!(
+            changes.any(),
+            "a new event must ring even after marking read"
+        );
+        unread.extend(changes);
+        assert_eq!(unread.status_changed, HashSet::from([1, 2]));
+    }
+
+    #[test]
+    fn marking_a_merged_pr_read_clears_its_open_and_merged_events() {
+        let before = Tracker::build(Some(&[pr(1, Some(Status::Pending))]), Some(&[]));
+        let after = Tracker::build(Some(&[pr(1, Some(Status::Pass))]), Some(&[]));
+        let mut unread = after.diff(&before);
+        let merged = Tracker::build(Some(&[]), Some(&[merged(1)]));
+        unread.extend(merged.diff(&after));
+        assert_eq!(unread.status_changed, HashSet::from([1]));
+        assert_eq!(unread.newly_merged, HashSet::from([1]));
+
+        unread.mark_read(1);
+        unread.extend(merged.diff(&merged));
+        assert!(!unread.any(), "{unread:?}");
     }
 }

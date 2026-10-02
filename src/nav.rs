@@ -12,6 +12,7 @@ use crate::{Sections, Visibility};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Target<'a> {
+    pub number: Option<i64>,
     pub title: &'a str,
     pub url: &'a str,
 }
@@ -41,6 +42,7 @@ impl Searchable for PrRow {
     }
     fn target(&self) -> Target<'_> {
         Target {
+            number: Some(self.number),
             title: &self.title,
             url: &self.url,
         }
@@ -55,6 +57,7 @@ impl Searchable for QueueRow {
     }
     fn target(&self) -> Target<'_> {
         Target {
+            number: Some(self.number),
             title: &self.title,
             url: &self.url,
         }
@@ -67,6 +70,7 @@ impl Searchable for MergedRow {
     }
     fn target(&self) -> Target<'_> {
         Target {
+            number: Some(self.number),
             title: &self.title,
             url: &self.url,
         }
@@ -81,6 +85,7 @@ impl Searchable for ReviewRow {
     }
     fn target(&self) -> Target<'_> {
         Target {
+            number: Some(self.number),
             title: &self.title,
             url: &self.url,
         }
@@ -95,6 +100,7 @@ impl Searchable for ReviewedMergedRow {
     }
     fn target(&self) -> Target<'_> {
         Target {
+            number: Some(self.number),
             title: &self.title,
             url: &self.url,
         }
@@ -143,6 +149,7 @@ fn shipments<'a>(s: &'a Sections, query: &str) -> Vec<Target<'a>> {
             && hit("upcoming", query)
         {
             targets.push(Target {
+                number: None,
                 title: "upcoming",
                 url: &b.url,
             });
@@ -153,6 +160,7 @@ fn shipments<'a>(s: &'a Sections, query: &str) -> Vec<Target<'a>> {
                 .iter()
                 .filter(|r| hit(&r.tag, query))
                 .map(|r| Target {
+                    number: None,
                     title: &r.tag,
                     url: &r.bucket.url,
                 }),
@@ -518,6 +526,7 @@ mod tests {
     #[test]
     fn link_format_substitutes_only_known_placeholders() {
         let target = Target {
+            number: Some(1),
             title: "fix parser",
             url: "https://pr/1",
         };
@@ -540,6 +549,7 @@ mod tests {
     #[test]
     fn link_format_preserves_placeholder_text_in_values() {
         let target = Target {
+            number: Some(1),
             title: "fix: {url} and {title} café",
             url: "https://pr/{title}/{url}",
         };

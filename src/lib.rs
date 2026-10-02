@@ -689,7 +689,7 @@ fn paint_reviews(
 }
 
 /// Paint the dashboard's body onto `s` from row `top`: the watch-only tab strip
-/// and the active view's sections. Rows that changed since the previous refresh
+/// and the active view's sections. Rows with unread changes
 /// (per `changes`) are flagged with a leading marker. `tabs` is set only while
 /// watching, since the view switcher is an interactive affordance. `ascii`
 /// selects letters/parens over Nerd Font glyphs/bars; colors are written as
@@ -1342,8 +1342,12 @@ enum Action {
     None,
     /// `q`/`Ctrl-C`: quit.
     Quit,
-    /// `r`/`R`: refresh now.
+    /// `Ctrl-R`: refresh now.
     Refresh,
+    /// `r`: mark the selected PR as read.
+    MarkRead,
+    /// `R`: mark all PRs as read.
+    MarkAllRead,
     /// `?`: toggle the help legend.
     ToggleHelp,
     /// `Tab`: switch to the other view.
@@ -1399,8 +1403,12 @@ fn classify(ev: &Event) -> Action {
                 Action::Quit
             } else if k.matches("esc") {
                 Action::Cancel
-            } else if k.matches_any(["r", "R"]) {
+            } else if k.matches("ctrl+r") {
                 Action::Refresh
+            } else if k.matches("R") {
+                Action::MarkAllRead
+            } else if k.matches("r") {
+                Action::MarkRead
             } else if k.matches("?") {
                 Action::ToggleHelp
             } else if k.matches("tab") {
@@ -1466,7 +1474,7 @@ fn classify_search(ev: &Event) -> SearchAction {
 enum Flow {
     /// Keep waiting / keep fetching.
     Continue,
-    /// `r` was pressed: refresh now.
+    /// `Ctrl-R` was pressed: refresh now.
     Refresh,
     /// A quit key was pressed: leave the loop (the caller tears the screen down).
     Quit,
@@ -1545,6 +1553,18 @@ impl Ui {
             .collect::<Vec<_>>()
             .join("\n");
         Some((text, targets.len()))
+    }
+
+    fn mark_read(&self, shown: &Sections, visible: Visibility, unread: &mut Changes, all: bool) {
+        if all {
+            *unread = Changes::default();
+        } else if let Some(selected) = self.selected
+            && let Some(number) = nav::targets_visible(self.view, shown, &self.search, visible)
+                .get(selected)
+                .and_then(|target| target.number)
+        {
+            unread.mark_read(number);
+        }
     }
 }
 
@@ -1635,6 +1655,8 @@ struct App<'a> {
     /// Change-detection baseline and the last successfully fetched sections.
     prev: Option<Tracker>,
     last_good: Option<Sections>,
+    /// Unread changes stay marked until acknowledged, for this session only.
+    unread: Changes,
     /// The interactive dashboard state: view, help visibility, selection, search.
     ui: Ui,
     /// The most recent short error (empty unless a refresh or an open failed),
@@ -1643,7 +1665,7 @@ struct App<'a> {
     /// transient note (a clipboard copy). Worded in full, and cleared by the
     /// next refresh.
     last_status: String,
-    /// Whether a fetch is in flight, so the footer can say `r refreshing`.
+    /// Whether a fetch is in flight, so the footer can say `^R refreshing`.
     refreshing: bool,
     /// Whether the bell is armed. The first refresh after a cached start is
     /// silent (it still highlights changes).
@@ -1682,6 +1704,7 @@ impl<'a> App<'a> {
             default_branch: String::new(),
             prev: None,
             last_good: None,
+            unread: Changes::default(),
             ui: Ui {
                 view: cli.view,
                 show_help: false,
@@ -1721,7 +1744,7 @@ impl<'a> App<'a> {
                 self.last_good = Some(c.sections);
                 // Cached data is real content, so go straight to the alt screen.
                 self.enter_alt()?;
-                self.redraw(&Changes::default())?;
+                self.redraw()?;
             }
             None => paint_loading(self.program.screen_mut())?,
         }
@@ -1749,8 +1772,8 @@ impl<'a> App<'a> {
 
     /// Paint the current dashboard via [`render_dashboard`], drawing the last
     /// good sections (or an empty frame, so a first-fetch error still shows its
-    /// error line + footer) with `changes` highlighted.
-    fn redraw(&mut self, changes: &Changes) -> Result<()> {
+    /// error line + footer) with unread changes highlighted.
+    fn redraw(&mut self) -> Result<()> {
         let good = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
         let mut buf = None;
         let sections = self.ui.shown(good, &mut buf);
@@ -1759,7 +1782,7 @@ impl<'a> App<'a> {
             self.program.screen_mut(),
             sections,
             &self.ui,
-            changes,
+            &self.unread,
             &self.last_status,
             Some((self.eta.as_str(), self.refreshing)),
             ascii,
@@ -1810,10 +1833,10 @@ impl<'a> App<'a> {
     /// The result arrives over a channel; pressing quit returns immediately and
     /// abandons the in-flight request (the thread is reaped at process exit).
     /// `me` and the default branch are resolved here too (once), so even the
-    /// first round-trip never freezes input. `r` is ignored — a fetch is already
+    /// first round-trip never freezes input. `Ctrl-R` is ignored — a fetch is already
     /// in flight.
     fn fetch_responsive(&mut self) -> Result<Flow> {
-        // The footer says `r refreshing` (with `r` dimmed) for the duration.
+        // The footer says `^R refreshing` (with `^R` dimmed) for the duration.
         self.refreshing = true;
         self.repaint_last()?;
         let flow = self.fetch_loop();
@@ -1854,7 +1877,7 @@ impl<'a> App<'a> {
                     self.me = me;
                     self.default_branch = default_branch;
                     // Cleared before painting, so the result frame already shows
-                    // the plain `r refresh` hint again.
+                    // the plain `^R refresh` hint again.
                     self.refreshing = false;
                     self.apply(sections)?;
                     return Ok(Flow::Continue);
@@ -1877,7 +1900,7 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Wait out the refresh interval, staying responsive: `r` refreshes now, `?`
+    /// Wait out the refresh interval, staying responsive: `Ctrl-R` refreshes now, `?`
     /// toggles help, quit/suspend/resize are honored, other keys are discarded.
     fn wait_interval(&mut self) -> Result<Flow> {
         let deadline = Instant::now() + self.cli.interval.dur;
@@ -1942,6 +1965,8 @@ impl<'a> App<'a> {
             Action::Open => self.open_selected()?,
             Action::Copy => self.copy_links(false)?,
             Action::CopySection => self.copy_links(true)?,
+            Action::MarkRead => self.mark_read(false)?,
+            Action::MarkAllRead => self.mark_read(true)?,
             Action::Move(m) => {
                 let len = self.target_count();
                 let next = nav::moved(m, self.ui.selected, len, self.half_page());
@@ -2105,6 +2130,15 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn mark_read(&mut self, all: bool) -> Result<()> {
+        let good = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
+        let mut filtered = None;
+        let shown = self.ui.shown(good, &mut filtered);
+        let visible = self.visible_sections(shown);
+        self.ui.mark_read(shown, visible, &mut self.unread, all);
+        self.repaint_last()
+    }
+
     /// Render a successful fetch: diff against the previous snapshot, paint, ring
     /// the bell on a change (once armed), and cache the result.
     fn apply(&mut self, sections: Sections) -> Result<()> {
@@ -2116,6 +2150,7 @@ impl<'a> App<'a> {
             .map(|p| tracker.diff(p))
             .unwrap_or_default();
         let bell = changes.any();
+        self.unread.extend(changes);
 
         self.last_status.clear();
         self.prev = Some(tracker);
@@ -2124,7 +2159,7 @@ impl<'a> App<'a> {
         // Keep the same URL selected instead of reusing its old numeric index.
         self.restore_selection(selected.as_deref());
         self.enter_alt()?;
-        self.redraw(&changes)?;
+        self.redraw()?;
 
         if self.armed && bell && self.cli.bell && !self.cli.no_bell {
             let _ = self.program.beep();
@@ -2144,14 +2179,14 @@ impl<'a> App<'a> {
         self.last_status = format!("error: {}", short_error(&e));
         self.enter_alt()?;
         self.ui.selected = None;
-        self.redraw(&Changes::default())
+        self.redraw()
     }
 
     /// Repaint the current frame in place (after a `?` toggle or a resize), once
     /// there is something to show.
     fn repaint_last(&mut self) -> Result<()> {
         if self.last_good.is_some() {
-            self.redraw(&Changes::default())?;
+            self.redraw()?;
         }
         Ok(())
     }
@@ -2228,6 +2263,35 @@ mod tests {
 
         assert_eq!(classify_search(&ctrl_c), SearchAction::Quit);
         assert_eq!(classify_search(&q), SearchAction::Char('q'));
+    }
+
+    #[test]
+    fn read_keys_are_distinct_from_refresh_and_search_text() {
+        use uncurses::event::Key;
+
+        let read =
+            Event::KeyPress(Key::new(KeyCode::Char('r'), KeyModifiers::empty()).normalized());
+        let refresh =
+            Event::KeyPress(Key::new(KeyCode::Char('r'), KeyModifiers::CTRL).normalized());
+        assert!(matches!(classify(&read), Action::MarkRead));
+        assert!(matches!(classify(&refresh), Action::Refresh));
+        assert_eq!(classify_search(&read), SearchAction::Char('r'));
+        assert_eq!(classify_search(&refresh), SearchAction::None);
+        for modifiers in [
+            KeyModifiers::empty(),
+            KeyModifiers::SHIFT,
+            KeyModifiers::CAPS_LOCK,
+        ] {
+            let read_all = Event::KeyPress(Key::new(KeyCode::Char('R'), modifiers).normalized());
+            assert!(
+                matches!(classify(&read_all), Action::MarkAllRead),
+                "{read_all:?}"
+            );
+            assert!(
+                matches!(classify_search(&read_all), SearchAction::Char(_)),
+                "{read_all:?}"
+            );
+        }
     }
 
     /// A `Ui` for the given view with nothing selected and no filter.
@@ -2321,6 +2385,134 @@ mod tests {
             release: None,
             merged_at: None,
         }
+    }
+
+    #[test]
+    fn mark_read_clears_only_the_selected_visible_pr() {
+        let sections = Sections {
+            prs: Some(vec![queued_open_row(1)]),
+            queue: Some(vec![queue_row(1, true, true), queue_row(2, false, false)]),
+            merged: Some(vec![merged_row(3), merged_row(4)]),
+            ..Sections::EMPTY
+        };
+        let mut ui = ui(View::Mine);
+        let mut visible = Visibility::all(&sections);
+        visible.queue = Some(queue::VisibleRows::limited(
+            sections.queue.as_deref().unwrap(),
+            1,
+        ));
+        visible.merged = Some(1);
+        let mut unread = Changes {
+            status_changed: [1, 2].into(),
+            newly_merged: [3, 4].into(),
+        };
+        // The queued open PR is deduplicated and queue #2 is hidden: index 1 is #3.
+        ui.selected = Some(1);
+        ui.mark_read(&sections, visible, &mut unread, false);
+        assert_eq!(unread.status_changed, [1, 2].into());
+        assert_eq!(unread.newly_merged, [4].into());
+        assert_eq!(ui.selected, Some(1));
+
+        ui.selected = Some(0);
+        ui.mark_read(&sections, visible, &mut unread, false);
+        assert_eq!(unread.status_changed, [2].into());
+        assert_eq!(unread.newly_merged, [4].into());
+
+        ui.search = "merged-4".into();
+        let mut filtered = None;
+        let shown = ui.shown(&sections, &mut filtered);
+        ui.mark_read(shown, Visibility::all(shown), &mut unread, false);
+        assert_eq!(unread.status_changed, [2].into());
+        assert!(unread.newly_merged.is_empty());
+    }
+
+    #[test]
+    fn mark_read_ignores_absent_selection_and_shipments() {
+        let sections = Sections {
+            merged: Some(vec![merged_row(1)]),
+            commits: Some(commits::CommitStats {
+                available: true,
+                upcoming: Some(commits::Bucket {
+                    count: commits::Count {
+                        mine: 1,
+                        capped: false,
+                    },
+                    url: "https://compare/1".into(),
+                }),
+                releases: vec![],
+            }),
+            ..Sections::EMPTY
+        };
+        let visible = Visibility::all(&sections);
+        let mut ui = ui(View::Mine);
+        let mut unread = Changes {
+            newly_merged: [1].into(),
+            ..Changes::default()
+        };
+        for selected in [None, Some(1), Some(2)] {
+            ui.selected = selected;
+            ui.mark_read(&sections, visible, &mut unread, false);
+            assert_eq!(unread.newly_merged, [1].into(), "selected={selected:?}");
+        }
+        ui.selected = Some(0);
+        ui.search = "no matches".into();
+        ui.mark_read(&sections, visible, &mut unread, false);
+        assert_eq!(unread.newly_merged, [1].into());
+    }
+
+    #[test]
+    fn mark_all_read_includes_hidden_and_filtered_prs_in_either_view() {
+        let sections = Sections {
+            prs: Some(vec![queued_open_row(1)]),
+            merged: Some(vec![merged_row(2)]),
+            ..Sections::EMPTY
+        };
+        for view in [View::Mine, View::Reviews] {
+            let ui = Ui {
+                search: "no matches".into(),
+                ..ui(view)
+            };
+            let mut unread = Changes {
+                status_changed: [1].into(),
+                newly_merged: [2].into(),
+            };
+            let mut filtered = None;
+            let shown = ui.shown(&sections, &mut filtered);
+            ui.mark_read(shown, Visibility::default(), &mut unread, true);
+            assert!(!unread.any(), "{view:?}: {unread:?}");
+        }
+    }
+
+    #[test]
+    fn unread_marker_survives_selection_help_and_search_until_marked_read() {
+        let sections = Sections {
+            merged: Some(vec![merged_row(1), merged_row(2)]),
+            ..Sections::EMPTY
+        };
+        let mut unread = Changes {
+            newly_merged: [2].into(),
+            ..Changes::default()
+        };
+        let mut ui = ui(View::Mine);
+        for selected in [None, Some(1)] {
+            ui.selected = selected;
+            ui.show_help = selected.is_some();
+            let text = render_to_string(&sections, &ui, &unread, None, true, Profile::Disabled);
+            let row = text.lines().find(|row| row.contains("merged-2")).unwrap();
+            assert!(row.starts_with('>'), "{row}");
+        }
+        ui.search = "merged-2".into();
+        ui.selected = Some(0);
+        let mut filtered = None;
+        let shown = ui.shown(&sections, &mut filtered);
+        let text = render_to_string(shown, &ui, &unread, None, true, Profile::Disabled);
+        let row = text.lines().find(|row| row.contains("merged-2")).unwrap();
+        assert!(row.starts_with('>'), "{row}");
+        ui.mark_read(shown, Visibility::all(shown), &mut unread, false);
+        let text = render_to_string(shown, &ui, &unread, None, true, Profile::Disabled);
+        let row = text.lines().find(|row| row.contains("merged-2")).unwrap();
+        assert!(!row.starts_with('>'), "{row}");
+        assert_eq!(ui.selected, Some(0));
     }
 
     #[test]
@@ -2850,7 +3042,7 @@ mod tests {
         assert_eq!(lines.len(), 17);
         assert!(lines[12].contains("/other  (6 matches)"));
         assert!(lines[14].contains(status));
-        assert!(lines[16].contains("r refreshing"));
+        assert!(lines[16].contains("^R refreshing"));
     }
 
     #[test]

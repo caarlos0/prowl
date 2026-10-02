@@ -481,7 +481,7 @@ pub fn paint_header(
 /// Empty-section placeholders are indented by it so they read as a row.
 pub const ROW_INDENT: u16 = 6;
 
-/// A leading cell marking a row that changed since the previous refresh.
+/// A leading cell marking a row with unread changes.
 pub fn change_marker(highlighted: bool, ascii: bool) -> Cell {
     if highlighted {
         let m = if ascii { ">" } else { "\u{25b8}" };
@@ -508,10 +508,10 @@ pub fn highlight_row(s: &mut impl TextSurface, y: u16) {
 }
 
 /// Paint the watch-mode key-hint footer at row `y`, folding the constant
-/// refresh interval into the refresh hint: `r refresh (every 5m) - tab switch
-/// view - enter open - / search - ? help`. While a refresh is in flight the
-/// refresh hint becomes `r refreshing` (the interval is dropped and the `r` glyph
-/// is dimmed, since `r` is inert until the fetch finishes). Each key glyph is a
+/// refresh interval into the refresh hint: `^R refresh (every 5m) - tab switch
+/// view - enter open - r/R read - y copy - / search - ? help`. While a refresh
+/// is in flight the hint becomes `^R refreshing` (the interval is dropped and
+/// the `^R` glyph is dimmed, since `Ctrl-R` is inert until it finishes). Each key glyph is a
 /// bold muted accent, its labels dim; plain in ASCII mode. Returns y + 1.
 pub fn paint_footer(
     s: &mut impl TextSurface,
@@ -527,9 +527,10 @@ pub fn paint_footer(
         format!("refresh (every {interval})")
     };
     let mut hints = vec![
-        ("r", refresh),
+        ("^R", refresh),
         ("tab", "switch view".to_string()),
         ("enter", "open".to_string()),
+        ("r/R", "read".to_string()),
         ("y", "copy".to_string()),
         ("/", "search".to_string()),
         ("?", "help".to_string()),
@@ -600,8 +601,8 @@ pub fn paint_footer(
         if i > 0 {
             x = s.set_str((x, y), " - ", &dim).x;
         }
-        // `r` is inert while a fetch is in flight, so its glyph fades to dim.
-        let key_style = if *key_glyph == "r" && refreshing {
+        // `Ctrl-R` is inert while a fetch is in flight, so its glyph fades to dim.
+        let key_style = if *key_glyph == "^R" && refreshing {
             &dim
         } else {
             &key
@@ -751,6 +752,10 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
     s.set_str((2, y), &keys, &dim);
     y += 1;
 
+    let keys = format!("r mark read{sep}R mark all read{sep}^R refresh");
+    s.set_str((2, y), &keys, &dim);
+    y += 1;
+
     match view {
         View::Mine => {
             for a in status::APPROVAL_ORDER {
@@ -783,9 +788,9 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
 }
 
 /// The number of legend rows [`paint_help`] paints for `view` (header + the key
-/// line + one row per entry), so callers can size a surface before painting.
+/// lines + one row per entry), so callers can size a surface before painting.
 pub fn help_height(view: View) -> usize {
-    2 + match view {
+    3 + match view {
         // One approval glyph per state, plus the conflict marker.
         View::Mine => status::APPROVAL_ORDER.len() + 1,
         View::Reviews => status::REVIEW_ORDER.len(),
@@ -1010,21 +1015,21 @@ mod tests {
 
     #[test]
     fn footer_is_plain_or_styled_key_hints() {
-        let plain = encode(80, 1, Profile::Disabled, |b| {
+        let plain = encode(120, 1, Profile::Disabled, |b| {
             paint_footer(b, "5m", false, false, true, 0);
         });
         assert_eq!(
             plain,
-            "r refresh (every 5m) - tab switch view - enter open - y copy - / search - ? help"
+            "^R refresh (every 5m) - tab switch view - enter open - r/R read - y copy - / search - ? help"
         );
 
         // While a refresh is in flight the refresh hint says so instead.
         let refreshing = encode(80, 1, Profile::Disabled, |b| {
             paint_footer(b, "5m", true, false, true, 0);
         });
-        assert!(refreshing.starts_with("r refreshing"));
+        assert!(refreshing.starts_with("^R refreshing"));
 
-        let styled = encode(80, 1, Profile::TrueColor, |b| {
+        let styled = encode(120, 1, Profile::TrueColor, |b| {
             paint_footer(b, "5m", false, false, false, 0);
         });
         assert!(styled.contains("refresh (every 5m)"));
@@ -1036,14 +1041,14 @@ mod tests {
         let compact = encode(80, 1, Profile::Disabled, |b| {
             paint_footer(b, "5m", false, true, true, 0);
         });
-        assert!(compact.starts_with("+ resize for more - r refresh"));
+        assert!(compact.starts_with("+ resize for more - ^R refresh"));
 
         for width in MIN_WIDTH..80 {
             let plain = encode(width, 1, Profile::Disabled, |b| {
                 paint_footer(b, "5m", false, false, true, 0);
             });
             assert!(plain.chars().count() <= usize::from(width));
-            assert!(plain.starts_with('r'));
+            assert!(plain.starts_with("^R"));
 
             let constrained = encode(width, 1, Profile::Disabled, |b| {
                 paint_footer(b, "5m", false, true, true, 0);
@@ -1056,7 +1061,27 @@ mod tests {
             paint_footer(b, "5m", true, true, false, 0);
         });
         assert!(compact_refreshing.starts_with("\x1b[1;"));
-        assert!(compact_refreshing.contains("\x1b[2mresize for more - r\x1b[m \x1b[2mrefreshing"));
+        assert!(compact_refreshing.contains("\x1b[2mresize for more - ^R\x1b[m \x1b[2mrefreshing"));
+        for width in MIN_WIDTH..80 {
+            let mut canvas = TextBuffer::new(width, 1);
+            paint_footer(&mut canvas, "5m", true, true, true, 0);
+            let text = canvas.display_with(Profile::Disabled).to_string();
+            assert!(text.contains("^R refreshing"), "width={width}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn help_documents_read_and_refresh_keys() {
+        for view in [View::Mine, View::Reviews] {
+            let height = help_height(view) as u16;
+            let text = encode(120, height, Profile::Disabled, |b| {
+                assert_eq!(paint_help(b, view, true, 0), height);
+            });
+            assert!(
+                text.contains("r mark read | R mark all read | ^R refresh"),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -21,7 +21,9 @@ Keys (while watching):
   Y                copy every link in the selected section, as a markdown list
   /                filter by number / title / author / release tag
   Esc              clear the filter
-  r                refresh now
+  r                mark the selected PR as read
+  R                mark all PRs as read (including hidden rows)
+  Ctrl-R           refresh now
   Tab              switch view (your PRs / your reviews)
   ?                toggle the help legend
   Ctrl-C           quit";

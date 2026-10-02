@@ -298,7 +298,7 @@ fn main() {
     };
     let cli = Cli::parse_from(["prowl"]);
 
-    // A few rows carry the "changed since the last refresh" marker and one is
+    // A few rows carry the unread change marker and one is
     // selected, so the shot shows both affordances.
     let changes = Changes {
         status_changed: [408, 412].into_iter().collect(),

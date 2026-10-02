@@ -16,12 +16,13 @@ output with `--view`):
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 
 Below the active view is an optional help legend, an optional search prompt, and
-last a `r refresh (every 5m) - tab switch view - enter open -
-y copy - / search - ? help` footer (which also shows the refresh interval, and
-reads `r refreshing` while a fetch is in flight). While watching, the very top
-shows a `my PRs / reviews` tab strip with the active view accented. It rings the
-terminal bell when one of your PRs merges or an open PR's status changes, and
-flags the changed rows (the bell and change markers track the Mine view only).
+last a `^R refresh (every 5m) - tab switch view - enter open -
+r/R read - y copy - / search - ? help` footer (which also shows the refresh
+interval, and reads `^R refreshing` while a fetch is in flight; `^R` means
+`Ctrl-R`). While watching, the very top shows a `my PRs / reviews` tab strip
+with the active view accented. It rings the terminal bell when one of your PRs
+merges or an open PR's status changes, and flags the changed rows until marked
+read (the bell and change markers track the Mine view only).
 The interactive watch runs on the
 [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with an event
 loop: it shows an *inline* `Loading...` frame, then enters the **alternate
@@ -134,7 +135,7 @@ watch event loop); everything else is testable modules:
   line (the `/` query + match count; it paints no cursor and instead *returns*
   the caret cell, so the watch can park the terminal's real one there), and the
   help legend
-  (`paint_help(view, …)` — a movement-keys line then, contextual: the
+  (`paint_help(view, …)` — movement and read/refresh key lines then, contextual: the
   approval glyphs and the conflict marker for Mine, review glyphs for Reviews; the column headers
   speak for themselves and are not repeated; first in the bottom block, above the
   search prompt and footer) live here too, plus `render_table`
@@ -204,8 +205,12 @@ watch event loop); everything else is testable modules:
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
+  Each refresh's diff drives the bell and is accumulated into `App::unread`;
+  every repaint uses those session-only markers until `r`/`R` clears them.
 - `nav.rs` — watch-mode row navigation + search: `groups(view, &Sections, query, visible)`
-  is the matching rows' `Target { title, url }` values bucketed by rendered section;
+  is the matching rows' `Target { number, title, url }` values bucketed by rendered section;
+  `number` is `Some(PR number)` for PRs and `None` for shipments, so marking read
+  uses the same filtered, visible selection as open and copy.
   `targets_visible` is that flattened (PR rows → the PR; shipments → the release /
   compare log; url-less rows skipped) so a selection index lines up with the
   rendered rows. `section_at_visible(…, index, visible)` is the one group holding
@@ -293,13 +298,15 @@ grapheme clustering and in-band resize where the terminal supports them. The
 loop uses `poll_event` with
 the interval as the timeout. Keys are classified into an `Action` (or, while the
 search prompt is open, a `SearchAction`) with `Key::matches`, which is
-**case-sensitive** — bindings must list both cases (`["r", "R"]`). `r`/`R`
-refresh now, `Tab` switches view, `?` toggles help, `/` opens search, `Enter`
+**case-sensitive** — case-insensitive bindings must list both cases (`["q", "Q"]`).
+`Ctrl-R` refreshes now; `r` marks the selected PR as read and `R` marks all as read.
+`Tab` switches view, `?` toggles help, `/` opens search, `Enter`
 opens the selected row, `y`/`Y` copy links, the movement keys drive the cursor,
 `q`/`Q`/`Ctrl-C` quit (`Esc` clears the filter, or quits when there is none),
-`Ctrl-Z` suspends/resumes, `Resize` repaints. All watch UI state lives in one
-`Ui` struct (view, help, selection, search, `--branch`). `ctrlc` handles external
-SIGINT/SIGTERM/SIGHUP by asking the event loop to stop; the owning `Program`
+`Ctrl-Z` suspends/resumes, `Resize` repaints. Watch interaction state lives in
+`Ui` (view, help, selection, search, `--branch`); unread markers live in
+`App::unread`. `ctrlc` handles external SIGINT/SIGTERM/SIGHUP by asking the event
+loop to stop; the owning `Program`
 still performs all teardown through `finish`.
 
 ## Key behaviors
@@ -354,6 +361,14 @@ still performs all teardown through `finish`.
   state through its per-row glyph instead). `bell false` in config or
   `--bell=false` disables it; explicit CLI values override config.
   `--no-bell` remains supported and cannot be combined with an explicit `--bell`.
+- **Unread markers:** `App::unread` accumulates refresh diffs for the current
+  session; every redraw uses it, including navigation, search, view changes,
+  resize, and failed refreshes. Only new diffs drive the bell, not outstanding
+  unread markers. `r` clears both status and merge markers for the selected PR
+  through `Ui::mark_read`, using the same visible targets as open/copy; no
+  selection or a shipment is a no-op. `R` clears all unread markers from either
+  view, including filtered/hidden PRs. Neither action moves the selection.
+  New events mark the PR again. Markers are not saved to the cache.
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
@@ -406,7 +421,8 @@ still performs all teardown through `finish`.
   `--no-cache` skips both read and write.
 - **Terminal:** the watch runs on a `uncurses::Program` in the alternate screen
   with the cursor hidden (it reappears only in the search prompt); raw mode means stray keystrokes never garble the
-  dashboard or spill into the shell. `r`/`R` forces a refresh now; `Tab` switches
+  dashboard or spill into the shell. `Ctrl-R` forces a refresh now; `r`/`R`
+  marks the selected PR/all PRs as read; `Tab` switches
   view; `?` toggles the help legend (contextual to the active view —
   approval glyphs and the conflict marker for Mine, review glyphs for Reviews — hidden by
   default, rendered at the top of the bottom block, above the search prompt and
@@ -426,15 +442,15 @@ still performs all teardown through `finish`.
   as one section. Open PRs remain whole; if they cannot fit, the frame says
   `Terminal too small — need W×H.` The only persistent
   bottom line is the footer
-  (`r refresh (every 5m) - tab switch view - enter open - y copy - / search - ?
+  (`^R refresh (every 5m) - tab switch view - enter open - r/R read - y copy - / search - ?
   help`), which carries the refresh interval and progressively removes
   low-priority labels/hints to fit narrow widths instead of clipping; a failed refresh adds a dim
   `error: …` line above it (the same slot a copy's `copied N links`
-  confirmation uses). While a fetch is in flight the footer reads `r refreshing` with the
-  `r` glyph dimmed. Every fetch (and the one-time `me`/default-branch resolution)
+  confirmation uses). While a fetch is in flight the footer reads `^R refreshing` with the
+  `^R` glyph dimmed. Every fetch (and the one-time `me`/default-branch resolution)
   runs on a **detached background thread** and returns over a channel; the main
   thread only polls input and paints, so network I/O never blocks the UI —
-  navigation, search, `Tab`, `?`, resize and suspend stay live mid-refresh and
+  navigation, search, `r`/`R`, `Tab`, `?`, resize and suspend stay live mid-refresh and
   **quit is instant** (a quit abandons the in-flight request, which is reaped at
   process exit). The terminal is restored on every exit path by `App::stop`
   (`Program::finish`), which the caller always runs after `App::run`; external
