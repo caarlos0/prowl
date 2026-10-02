@@ -192,6 +192,8 @@ Press `/` to search: type to filter the rows live by number, title, branch,
 author, or release tag; `Enter` applies the filter and drops you back to the list (so the
 cursor and `Enter` work on the matches), and `Esc` clears it (with no
 filter to clear, `Esc` quits).
+The prompt preserves uppercase letters and composed text.
+For example, `Release` stays `Release` in the prompt; the filter still ignores case.
 
 Run `prowl --help` for all flags (interval, `--only`, `--view`,
 `--review-scope`, `--branch`, `--no-draft`, `--required`, `--link-format`,
