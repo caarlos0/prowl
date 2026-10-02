@@ -65,6 +65,33 @@ prowl --login                 # authorize once in the browser
 GITHUB_TOKEN=… prowl --once    # or just bring your own token
 ```
 
+## Configuration
+
+prowl reads `~/.config/prowl/config` once at startup. If `XDG_CONFIG_HOME` is
+set, it reads `$XDG_CONFIG_HOME/prowl/config` instead; `APPDATA` is the next
+fallback, before `~/.config`. Empty environment variables are ignored.
+
+Use a long flag name without `--`, a space, and its value on each line:
+
+```text
+interval 30s
+bell false
+branch true
+only mine,queue,merged
+link-format [{title}]({url})
+```
+
+CLI values override the file, and the file overrides built-in defaults.
+Repeated entries use the last value. Boolean values are `true` or `false`;
+`--bell=true` enables the bell even when the file says `bell false`.
+The existing `--no-bell` still works as an alias for `--bell=false`.
+
+Blank lines and lines starting with `#` are ignored. The rest of each setting
+line is its literal value, including spaces and `#`; do not add shell quotes
+or expect environment-variable expansion. Leading and trailing whitespace is
+ignored. A missing file is fine; invalid settings and unreadable files stop
+startup with an error. `--help` and `--version` do not read the file.
+
 ## Usage
 
 ```sh

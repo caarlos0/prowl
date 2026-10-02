@@ -71,8 +71,21 @@ watch event loop); everything else is testable modules:
   `.toggle()`), `ReviewScope` (Direct/All, `--review-scope`, `.qualifier()`),
   `--required` for required-only CI counts, `--link-format` for copied links
   (default `{url}`; supports `{title}` and `{url}`),
-  duration parser (`s/m/h/d/w`), and the `WATCH_KEYS` `after_help` block
-  documenting the interactive watch-mode keys.
+  `--bell=true/false` (default true, with `--no-bell` retained as an alias),
+  duration parser (`s/m/h/d/w`), and the `AFTER_HELP` block documenting config
+  syntax and the interactive watch-mode keys. `Cli::load` parses CLI arguments
+  first so help, version, and usage errors never read config, then applies saved
+  defaults and parses again.
+- `config.rs` — startup defaults from `$XDG_CONFIG_HOME/prowl/config`, then
+  `$APPDATA/prowl/config`, then `~/.config/prowl/config` (empty environment
+  variables are ignored). Each line is a long flag name without `--` plus its
+  literal value; blank lines and full-line `#` comments are skipped. Values use
+  clap's existing parsers and runtime defaults (`clap`'s `string` feature);
+  CLI > file > built-ins, with the last repeated config entry winning.
+  `no-bell` is normalized to the inverse `bell` value for compatibility.
+  A missing file is ignored; other read errors and invalid settings are fatal,
+  with invalid lines identified by path and line number. Read only at startup,
+  not on refresh.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
   `parse_graphql()`.
@@ -219,7 +232,8 @@ watch event loop); everything else is testable modules:
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
-`run()` first creates a `uncurses::terminal::Terminal::stdio()`; interactivity is
+`run()` loads CLI/config settings, then creates a
+`uncurses::terminal::Terminal::stdio()`; interactivity is
 its `is_terminal().1` (output a TTY?). When the output is **not** a TTY (piped,
 redirected), `render_once` paints the dashboard onto an offscreen `TextBuffer`
 sized to its content (a generous `height_bound` + `bottom_bound`, then cropped to
@@ -337,7 +351,9 @@ still performs all teardown through `finish`.
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
   not ring). The first refresh is silent. Changed rows get a `▸` marker. Bell
   and change markers track the **Mine** view only (the Reviews view conveys
-  state through its per-row glyph instead).
+  state through its per-row glyph instead). `bell false` in config or
+  `--bell=false` disables it; explicit CLI values override config.
+  `--no-bell` remains supported and cannot be combined with an explicit `--bell`.
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
   line, and does not ring.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
@@ -511,7 +527,8 @@ Required secrets: `GORELEASER_KEY`, `GH_PAT` (repo scope, for tap/nur pushes),
 
 Tests are offline: JSON fixtures under `tests/fixtures/` (real captures + a
 crafted queue) drive parsing → rows → render in `tests/parsing.rs`, plus
-per-module unit tests. No network in tests.
+per-module unit tests. `tests/config.rs` exercises startup config paths, errors,
+and help/version without network calls. No network in tests.
 
 ## Conventions
 

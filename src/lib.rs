@@ -30,6 +30,7 @@ pub mod changes;
 pub mod cli;
 pub mod clipboard;
 pub mod commits;
+mod config;
 pub mod github;
 pub mod merged;
 pub mod model;
@@ -44,6 +45,7 @@ pub mod timefmt;
 
 use anyhow::{Context, Result};
 use changes::{Changes, Tracker};
+#[cfg(test)]
 use clap::Parser;
 use cli::{Cli, View};
 use github::{Client, Repo};
@@ -1580,7 +1582,7 @@ impl Ui {
 
 /// Entry point: authenticate, resolve repo + user, then render once or watch.
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::load()?;
     // Detect interactivity through uncurses' `Terminal` (is the output half a
     // TTY?) and reuse the very same handle to build the watch `Screen` or to
     // encode the one-shot frame. Auth can drive the interactive device flow
@@ -2176,7 +2178,7 @@ impl<'a> App<'a> {
         self.enter_alt()?;
         self.redraw(&changes)?;
 
-        if self.armed && bell && !self.cli.no_bell {
+        if self.armed && bell && self.cli.bell && !self.cli.no_bell {
             let _ = self.program.beep();
         }
         self.armed = true;
