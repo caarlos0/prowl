@@ -2469,6 +2469,7 @@ mod tests {
                 running: u64::from(building),
                 ..status::Checks::default()
             },
+            missing_required_checks: 0,
         }
     }
 

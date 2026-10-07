@@ -80,6 +80,7 @@ fn entry(position: i64, number: i64, author: &str, title: &str) -> QueueRow {
         enqueued_at: ago(0),
         build_started_at: None,
         checks: checks(0, 0, 0),
+        missing_required_checks: 0,
     }
 }
 

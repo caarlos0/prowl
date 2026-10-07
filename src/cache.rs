@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bump when the cached data model changes; older files are then ignored.
-const VERSION: u32 = 15;
+const VERSION: u32 = 16;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]
@@ -185,6 +185,30 @@ mod tests {
         .unwrap();
         for sort in [OpenSort::Updated, OpenSort::Created] {
             assert!(parse(&encoded, false, sort).is_none());
+        }
+    }
+
+    #[test]
+    fn cached_queue_preserves_missing_check_counts_for_row_priority() {
+        let data: crate::model::QueueData =
+            crate::github::parse_graphql(include_bytes!("../tests/fixtures/queue_populated.json"))
+                .unwrap();
+        let mut nodes = crate::model::queue_nodes(data);
+        nodes[0].missing_required_checks = 2;
+        let sections = Sections {
+            queue: Some(crate::queue::build_rows(nodes, "me")),
+            ..Sections::EMPTY
+        };
+        for required in [false, true] {
+            let encoded = serde_json::to_vec(&CacheRef {
+                version: VERSION,
+                required,
+                saved_at: "12:00:00",
+                sections: &sections,
+            })
+            .unwrap();
+            let cached = parse(&encoded, required, OpenSort::Updated).unwrap();
+            assert_eq!(cached.sections.queue, sections.queue);
         }
     }
 }

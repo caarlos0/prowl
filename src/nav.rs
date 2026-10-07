@@ -400,6 +400,7 @@ mod tests {
             enqueued_at: None,
             build_started_at: None,
             checks: crate::status::Checks::default(),
+            missing_required_checks: 0,
         }
     }
 

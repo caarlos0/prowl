@@ -210,7 +210,7 @@ pub fn lamp_color(l: Lamp) -> Color {
 
 /// How many check runs sit on each lamp. Default counts come from GitHub's
 /// rollup aggregates; required-only counts come from every paginated context.
-/// For My PRs, the running count also includes unreported required checks.
+/// The running count also includes unreported required checks.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Checks {
     pub fail: u64,

@@ -26,6 +26,14 @@ pub struct QueueRow {
     pub build_started_at: Option<String>,
     /// Failing / running / passing checks on the speculative merge commit.
     pub checks: Checks,
+    /// Included in RUN, but not in the building-row priority.
+    pub missing_required_checks: u64,
+}
+
+impl QueueRow {
+    fn is_building(&self) -> bool {
+        self.checks.running > self.missing_required_checks
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -45,12 +53,12 @@ impl VisibleRows {
     pub(crate) fn limited(rows: &[QueueRow], limit: usize) -> Self {
         let building = rows
             .iter()
-            .filter(|row| row.checks.running > 0)
+            .filter(|row| row.is_building())
             .count()
             .min(limit);
         let mine = rows
             .iter()
-            .filter(|row| row.mine && row.checks.running == 0)
+            .filter(|row| row.mine && !row.is_building())
             .count()
             .min(limit - building);
         Self {
@@ -66,7 +74,7 @@ impl VisibleRows {
 
     pub(crate) fn iter(mut self, rows: &[QueueRow]) -> impl Iterator<Item = &QueueRow> {
         rows.iter().filter(move |row| {
-            let remaining = if row.checks.running > 0 {
+            let remaining = if row.is_building() {
                 &mut self.building
             } else if row.mine {
                 &mut self.mine
@@ -104,6 +112,7 @@ pub fn build_rows(nodes: Vec<QueueEntryNode>, me: &str) -> Vec<QueueRow> {
                 enqueued_at: n.enqueued_at,
                 build_started_at,
                 checks,
+                missing_required_checks: n.missing_required_checks,
             }
         })
         .collect();
@@ -182,11 +191,13 @@ mod tests {
                 title: format!("PR {number}"),
                 url: format!("https://x/{number}"),
                 head_ref_name: Some(format!("branch-{number}")),
+                base_ref: None,
                 author: Some(Login {
                     login: login.to_string(),
                 }),
             },
             required: None,
+            missing_required_checks: 0,
         }
     }
 
@@ -300,5 +311,33 @@ mod tests {
             rows[0].build_started_at.as_deref(),
             Some("2026-08-28T10:00:00Z")
         );
+    }
+
+    #[test]
+    fn missing_required_checks_do_not_promote_waiting_rows_to_building() {
+        let mut waiting = node(1, 1, "other");
+        waiting.missing_required_checks = 2;
+        let mut mine = node(2, 2, "me");
+        mine.missing_required_checks = 2;
+        let mut building = node(3, 3, "other");
+        building.required = Some(RequiredSummary {
+            checks: Checks {
+                running: 1,
+                ..Checks::default()
+            },
+            ..RequiredSummary::default()
+        });
+        building.missing_required_checks = 2;
+        let rows = build_rows(vec![waiting, mine, building], "me");
+        for (limit, expected) in [(1, vec![3]), (2, vec![2, 3]), (3, vec![1, 2, 3])] {
+            assert_eq!(
+                VisibleRows::limited(&rows, limit)
+                    .iter(&rows)
+                    .map(|row| row.number)
+                    .collect::<Vec<_>>(),
+                expected,
+                "limit={limit}"
+            );
+        }
     }
 }

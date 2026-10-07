@@ -95,11 +95,14 @@ watch event loop); everything else is testable modules:
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
   two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
-  (reuses `merged_query`, now carrying `author`). My PRs also reads required
+  (reuses `merged_query`, now carrying `author`). My PRs and Merge Queue share
+  `fetch_required`, which reads required
   context names from each distinct base ref's `refUpdateRule` and all pages of
   active `rules`. Missing required contexts are added to `RUN` in both normal
   and required-only mode, after comparing them with the commit's paginated
-  `isRequired` contexts.
+  `isRequired` contexts (the speculative commit for queue entries, not the PR
+  head). Entries without a speculative commit count all expected checks as
+  missing but have no BUILD start.
 - `status.rs` — **the** palette: `Approval` (RequiredApproved/Approved/Pending)
   with `approval_of` (`reviewDecision: APPROVED` means all required reviews are
   approved; otherwise any `latestOpinionatedReviews` approval means Approved),
@@ -187,7 +190,10 @@ watch event loop); everything else is testable modules:
   checks). `FAIL`/`RUN`/`PASS` is the same check semaphore as the open-PRs table
   (`render::lamp_cell`), counting the speculative merge commit's checks from the
   rollup's own `checkRunCountsByState` / `statusContextCountsByState` aggregates
-  (`QueueEntryNode::checks`). The rollup is a single flat connection (cheap, and
+  (`QueueEntryNode::checks`), with unreported required checks added to `RUN`.
+  `QueueRow::missing_required_checks` preserves that count separately so missing
+  checks do not promote a waiting row into `VisibleRows`' building priority.
+  The rollup is a single flat connection (cheap, and
   front-loads the real check runs, unlike `checkSuites` whose first entries are
   app integrations). The `Merge Queue` header also carries the queue-level ETA
   (`~11m to merge`, from `mergeQueue.nextEntryEstimatedTimeToMerge`) as a dim
@@ -245,7 +251,8 @@ watch event loop); everything else is testable modules:
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
   Loading re-sorts My open PRs using the current `--sort-open` value rather
   than the order saved by a previous run. Caches from before missing required
-  checks were included in `RUN` are invalidated.
+  checks were included in the queue's `RUN` and stored separately for row
+  priority are invalidated.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 `run()` loads CLI/config settings, then creates a
@@ -345,14 +352,16 @@ still performs all teardown through `finish`.
 - **Check counts** come from the rollup's `checkRunCountsByState` /
   `statusContextCountsByState` aggregates, so they're exact and unpaginated —
   no phantom zero-run check suites and no truncated page to compensate for.
-  In My PRs, `RUN` also includes required checks that have not reported on the
-  head commit. Required context names come from the actual base branch's
+  In My PRs and Merge Queue, `RUN` also includes required checks that have not
+  reported on the relevant commit (PR head or speculative merge).
+  Required context names come from the actual base branch's
   classic protection and active repository/organization rulesets, fetched once
-  per distinct base ref per refresh and de-duplicated. All reported required
+  per distinct base ref per section fetch and de-duplicated. All reported required
   contexts are paginated before counting missing ones, so a queued, running,
   failed, or passed check is not also counted as missing. This applies with and
-  without `--required`, including commits with no rollup. The merge queue keeps
-  counting only reported checks on its speculative commit.
+  without `--required`, including commits with no rollup. Queue entries without
+  a speculative commit count all expected checks in `RUN`; missing checks
+  neither start `BUILD` nor raise a waiting row's responsive-layout priority.
   With `--required`, prowl follows those contexts page by page in a second
   batched GraphQL query and uses each context's `isRequired(pullRequestNumber:)`
   value for both the semaphore and the merge queue's BUILD start.
@@ -512,7 +521,9 @@ still performs all teardown through `finish`.
   check-run `startedAt` timestamps (BUILD = now − the earliest) plus that same
   connection's `checkRunCountsByState` / `statusContextCountsByState` aggregates
   (the FAIL/RUN/PASS semaphore), plus the queue-level
-  `nextEntryEstimatedTimeToMerge` (the header ETA).
+  `nextEntryEstimatedTimeToMerge` (the header ETA). Each entry's PR carries
+  `baseRef { id }`; required-context discovery and pagination are shared with
+  My PRs, using the queue entry's `headCommit` to count missing checks.
 - Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
   `mergeStateStatus`, `reviewDecision`,
   `latestOpinionatedReviews(first: 100) { nodes { state } }`,
