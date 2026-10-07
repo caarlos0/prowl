@@ -1,6 +1,6 @@
 [package]
 name = "prowl"
-version = "1.13.1"
+version = "1.15.0"
 edition = "2024"
 description = "A tiny terminal radar for your GitHub pull requests."
 license = "MIT"
