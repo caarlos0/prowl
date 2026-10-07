@@ -56,7 +56,9 @@ use std::time::{Duration, Instant};
 use uncurses::ansi::kitty::KittyKeyboardFlags;
 use uncurses::buffer::{Bounded, SurfaceMut, TextBuffer};
 use uncurses::color::{Color, Profile};
-use uncurses::event::{Event, KeyCode, KeyModifiers};
+use uncurses::event::Event;
+#[cfg(test)]
+use uncurses::event::{KeyCode, KeyModifiers};
 use uncurses::layout::Position;
 use uncurses::program::Program;
 use uncurses::screen::Screen;
@@ -1377,11 +1379,11 @@ enum Action {
 /// A keystroke while the search prompt is open (raw text input, unlike the
 /// semantic [`Action`]s of normal mode).
 #[derive(Debug, PartialEq, Eq)]
-enum SearchAction {
+enum SearchAction<'a> {
     /// Ignore (an unbound key, or a non-input event).
     None,
-    /// A printable character to append to the query.
-    Char(char),
+    /// Produced text to append to the query.
+    Text(&'a str),
     /// Backspace: drop the last query character.
     Backspace,
     /// Enter: apply the filter and leave the prompt.
@@ -1453,24 +1455,25 @@ fn classify(ev: &Event) -> Action {
 /// Classify an event while the search prompt is open: printable characters
 /// extend the query, everything else is an edit/exit key. `q` remains a
 /// searchable character, while `Ctrl-C` quits and Esc closes the prompt.
-fn classify_search(ev: &Event) -> SearchAction {
+fn classify_search(ev: &Event) -> SearchAction<'_> {
     match ev {
-        Event::KeyPress(k) if k.matches("ctrl+c") => SearchAction::Quit,
-        Event::KeyPress(k) => match k.code {
-            KeyCode::Char(c)
-                if !k
-                    .modifiers
-                    .intersects(KeyModifiers::CTRL | KeyModifiers::ALT) =>
-            {
-                SearchAction::Char(c)
+        Event::KeyPress(k) => {
+            if let Some(text) = k.text.as_deref() {
+                SearchAction::Text(text)
+            } else if k.matches("backspace") {
+                SearchAction::Backspace
+            } else if k.matches_any(["enter", "shift+enter"]) {
+                SearchAction::Enter
+            } else if k.matches("esc") {
+                SearchAction::Esc
+            } else if k.matches("ctrl+c") {
+                SearchAction::Quit
+            } else if k.matches("ctrl+z") {
+                SearchAction::Suspend
+            } else {
+                SearchAction::None
             }
-            KeyCode::Space => SearchAction::Char(' '),
-            KeyCode::Backspace => SearchAction::Backspace,
-            KeyCode::Enter => SearchAction::Enter,
-            KeyCode::Escape => SearchAction::Esc,
-            _ if k.matches("ctrl+z") => SearchAction::Suspend,
-            _ => SearchAction::None,
-        },
+        }
         Event::Resize(ws) => SearchAction::Resize(ws.col, ws.row),
         _ => SearchAction::None,
     }
@@ -2040,8 +2043,8 @@ impl<'a> App<'a> {
     /// Esc clears the filter and closes it.
     fn handle_search_event(&mut self, ev: &Event) -> Result<Flow> {
         match classify_search(ev) {
-            SearchAction::Char(c) => {
-                self.ui.search.push(c);
+            SearchAction::Text(text) => {
+                self.ui.search.push_str(text);
                 self.ui.selected = None;
             }
             SearchAction::Backspace => {
@@ -2301,11 +2304,57 @@ mod tests {
     fn ctrl_c_quits_while_search_is_open() {
         use uncurses::event::Key;
 
-        let ctrl_c = Event::KeyPress(Key::new(KeyCode::Char('c'), KeyModifiers::CTRL));
-        let q = Event::KeyPress(Key::new(KeyCode::Char('q'), KeyModifiers::empty()));
+        let ctrl_c = Event::KeyPress(Key::new(KeyCode::Char('c'), KeyModifiers::CTRL).normalized());
+        let q = Event::KeyPress(Key::new(KeyCode::Char('q'), KeyModifiers::empty()).normalized());
 
         assert_eq!(classify_search(&ctrl_c), SearchAction::Quit);
-        assert_eq!(classify_search(&q), SearchAction::Char('q'));
+        assert_eq!(classify_search(&q), SearchAction::Text("q"));
+    }
+
+    #[test]
+    fn search_uses_produced_text_instead_of_key_codes() {
+        use uncurses::event::Key;
+
+        for (code, text) in [
+            (KeyCode::Space, " "),
+            (KeyCode::Char('R'), "R"),
+            (KeyCode::Char('!'), "!"),
+        ] {
+            let event = Event::KeyPress(Key::new(code, KeyModifiers::empty()).normalized());
+            assert_eq!(classify_search(&event), SearchAction::Text(text));
+        }
+
+        for text in ["!", "e\u{301}", "enter", "backspace", "esc"] {
+            let mut key = Key::new(KeyCode::Char('1'), KeyModifiers::SHIFT);
+            key.text = Some(text.to_owned());
+            let event = Event::KeyPress(key.normalized());
+            assert_eq!(classify_search(&event), SearchAction::Text(text));
+        }
+    }
+
+    #[test]
+    fn search_matches_commands_and_ignores_non_text_keys() {
+        use uncurses::event::Key;
+
+        for (code, modifiers, expected) in [
+            (
+                KeyCode::Backspace,
+                KeyModifiers::empty(),
+                SearchAction::Backspace,
+            ),
+            (KeyCode::Escape, KeyModifiers::empty(), SearchAction::Esc),
+            (
+                KeyCode::Char('z'),
+                KeyModifiers::CTRL,
+                SearchAction::Suspend,
+            ),
+            (KeyCode::Char('x'), KeyModifiers::ALT, SearchAction::None),
+            (KeyCode::Space, KeyModifiers::CTRL, SearchAction::None),
+            (KeyCode::Up, KeyModifiers::empty(), SearchAction::None),
+        ] {
+            let event = Event::KeyPress(Key::new(code, modifiers).normalized());
+            assert_eq!(classify_search(&event), expected, "{event:?}");
+        }
     }
 
     #[test]
@@ -2329,6 +2378,7 @@ mod tests {
         ] {
             let event = Event::KeyPress(Key::new(KeyCode::Enter, modifiers).normalized());
             assert!(matches!(classify(&event), Action::None), "{event:?}");
+            assert_eq!(classify_search(&event), SearchAction::None);
         }
     }
 
@@ -2342,7 +2392,7 @@ mod tests {
             Event::KeyPress(Key::new(KeyCode::Char('r'), KeyModifiers::CTRL).normalized());
         assert!(matches!(classify(&read), Action::MarkRead));
         assert!(matches!(classify(&refresh), Action::Refresh));
-        assert_eq!(classify_search(&read), SearchAction::Char('r'));
+        assert_eq!(classify_search(&read), SearchAction::Text("r"));
         assert_eq!(classify_search(&refresh), SearchAction::None);
         for modifiers in [
             KeyModifiers::empty(),
@@ -2354,10 +2404,7 @@ mod tests {
                 matches!(classify(&read_all), Action::MarkAllRead),
                 "{read_all:?}"
             );
-            assert!(
-                matches!(classify_search(&read_all), SearchAction::Char(_)),
-                "{read_all:?}"
-            );
+            assert_eq!(classify_search(&read_all), SearchAction::Text("R"));
         }
     }
 

@@ -441,8 +441,11 @@ still performs all teardown through `finish`.
   the rows live (case-insensitive substring over number/title/branch/author/release
   tag), Enter applies the filter and returns to the list, Esc (or a lone Esc from
   the list) clears it — and with no filter to clear, Esc quits. While the prompt
-  is open every keystroke is text (`classify_search`), else keys are normal-mode
-  actions (`classify`). `nav::filter` produces the rendered rows and
+  is open, `classify_search` appends the full `Key::text` value, preserving case
+  and composed input. Keys without text use `Key::matches` / `matches_any` for
+  Backspace, Enter / Shift+Enter, Esc, Ctrl-C, and Ctrl-Z; other keys are ignored.
+  Outside the prompt, keys are normal-mode actions (`classify`).
+  `nav::filter` produces the rendered rows and
   `nav::targets_visible(…, query)` the navigable ones from the **same** predicate, so the
   caret/open track the visible matches; the selection resets on each edit. The
   prompt uses the **terminal's own cursor**: `paint_search_prompt` returns the
