@@ -27,7 +27,7 @@ pub struct PrRow {
     pub conflicts: bool,
     /// Coarse CI/merge state; not rendered, it is the bell's change key.
     pub status: Option<Status>,
-    /// Failing / running / passing check runs on the last commit.
+    /// Failing / pending / passing checks, including unreported required checks.
     pub checks: Checks,
     /// Unresolved review threads (capped at one page — see `unresolved_capped`).
     pub unresolved: usize,
@@ -171,6 +171,7 @@ mod tests {
             updated_at: None,
             created_at: None,
             head_ref_name: Some(format!("branch-{number}")),
+            base_ref: None,
             review_decision: None,
             latest_opinionated_reviews: OpinionatedReviews::default(),
             merge_queue_entry: None,
@@ -198,6 +199,7 @@ mod tests {
                 }],
             },
             required_checks: None,
+            missing_required_checks: 0,
         }
     }
 

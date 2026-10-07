@@ -95,7 +95,11 @@ watch event loop); everything else is testable modules:
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
   two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
-  (reuses `merged_query`, now carrying `author`).
+  (reuses `merged_query`, now carrying `author`). My PRs also reads required
+  context names from each distinct base ref's `refUpdateRule` and all pages of
+  active `rules`. Missing required contexts are added to `RUN` in both normal
+  and required-only mode, after comparing them with the commit's paginated
+  `isRequired` contexts.
 - `status.rs` — **the** palette: `Approval` (RequiredApproved/Approved/Pending)
   with `approval_of` (`reviewDecision: APPROVED` means all required reviews are
   approved; otherwise any `latestOpinionatedReviews` approval means Approved),
@@ -240,8 +244,8 @@ watch event loop); everything else is testable modules:
 - `cache.rs` — per-repo on-disk cache of the last `Sections` under
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
   Loading re-sorts My open PRs using the current `--sort-open` value rather
-  than the order saved by a previous run. Caches from before the required-approval
-  state was stored are invalidated.
+  than the order saved by a previous run. Caches from before missing required
+  checks were included in `RUN` are invalidated.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 `run()` loads CLI/config settings, then creates a
@@ -341,6 +345,14 @@ still performs all teardown through `finish`.
 - **Check counts** come from the rollup's `checkRunCountsByState` /
   `statusContextCountsByState` aggregates, so they're exact and unpaginated —
   no phantom zero-run check suites and no truncated page to compensate for.
+  In My PRs, `RUN` also includes required checks that have not reported on the
+  head commit. Required context names come from the actual base branch's
+  classic protection and active repository/organization rulesets, fetched once
+  per distinct base ref per refresh and de-duplicated. All reported required
+  contexts are paginated before counting missing ones, so a queued, running,
+  failed, or passed check is not also counted as missing. This applies with and
+  without `--required`, including commits with no rollup. The merge queue keeps
+  counting only reported checks on its speculative commit.
   With `--required`, prowl follows those contexts page by page in a second
   batched GraphQL query and uses each context's `isRequired(pullRequestNumber:)`
   value for both the semaphore and the merge queue's BUILD start.
@@ -506,6 +518,11 @@ still performs all teardown through `finish`.
   aggregate exists, hence the page + a `+` when capped), and the last commit's
   `statusCheckRollup { contexts(first: 1) { checkRunCountsByState
   statusContextCountsByState } }` — the aggregates only, no context nodes.
+  `baseRef { id }` identifies each actual target branch. A separate paginated
+  query reads `refUpdateRule.requiredStatusCheckContexts` and active
+  `rules.parameters.requiredStatusChecks`. When any checks are expected (or
+  `--required` is set), the existing batched commit query reads all contexts,
+  including their names and `isRequired`, to identify unreported required checks.
 - Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with
   `headRefName` and `mergedAt`
   (fetched `sort:updated-desc`, since search can't sort by merge time, then

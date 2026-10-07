@@ -29,8 +29,11 @@ changes, an existing approval still earns a single check. A PR
 that **conflicts** with its base branch marks its own title in red, so it costs
 no column. Everything else that could hold a PR back is broken out to the right:
 a red/yellow/green **check semaphore** (`FAIL` / `RUN` / `PASS` check-run
-counts) and the number of unresolved review **threads**. Nothing is reported
-twice.
+counts) and the number of unresolved review **threads**. `RUN` includes running,
+queued, and waiting checks. In **My open PRs**, it also counts required checks
+that have not reported yet, using the PR's base-branch protection and active
+repository/organization rulesets. Once a required check reports, it counts only
+in its reported state, not twice.
 
 Merge-queue entries get the same semaphore for their speculative merge commit,
 next to how long they've been queued and how long that build has been running.

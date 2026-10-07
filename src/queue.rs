@@ -284,6 +284,7 @@ mod tests {
                 pass: 2,
             },
             build_started_at: Some("2026-08-28T10:00:00Z".to_string()),
+            ..RequiredSummary::default()
         });
 
         let rows = build_rows(vec![n], "caarlos0");

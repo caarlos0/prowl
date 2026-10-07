@@ -8,7 +8,7 @@ use crate::github::{Client, Repo};
 use crate::status::{self, Approval, Checks};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::fmt::Write as _;
 
 // ----------------------------------------------------------------------------
@@ -238,6 +238,7 @@ pub const MINE_QUERY: &str = r#"query($q: String!) {
     nodes {
       ... on PullRequest {
         number title url mergeable mergeStateStatus isDraft updatedAt createdAt headRefName
+        baseRef { id }
         reviewDecision
         latestOpinionatedReviews(first: 100) { nodes { state } }
         mergeQueueEntry { position state }
@@ -278,6 +279,8 @@ pub struct PrNode {
     /// The PR's head branch.
     #[serde(rename = "headRefName")]
     pub head_ref_name: Option<String>,
+    #[serde(rename = "baseRef")]
+    pub(crate) base_ref: Option<BaseRef>,
     /// Whether the PR satisfies GitHub's required review rules; null without them.
     #[serde(rename = "reviewDecision")]
     pub review_decision: Option<String>,
@@ -291,6 +294,13 @@ pub struct PrNode {
     pub commits: Commits,
     #[serde(skip)]
     pub(crate) required_checks: Option<Checks>,
+    #[serde(skip)]
+    pub(crate) missing_required_checks: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BaseRef {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -388,23 +398,37 @@ fn checks_from_counts(check_runs: &[StateCount], status_contexts: &[StateCount])
 
 impl PrNode {
     /// The failing / running / passing check counts for the PR's last commit.
-    /// Check runs and legacy commit statuses are folded into the same semaphore.
+    /// RUN also includes required checks that have not reported on that commit.
     pub fn checks(&self) -> Checks {
-        if let Some(checks) = self.required_checks {
-            return checks;
-        }
-        let Some(rollup) = self
+        let rollup = self
             .commits
             .nodes
             .first()
-            .and_then(|n| n.commit.status_check_rollup.as_ref())
-        else {
-            return Checks::default();
+            .and_then(|n| n.commit.status_check_rollup.as_ref());
+        let mut checks = if let Some(checks) = self.required_checks {
+            checks
+        } else if let Some(rollup) = rollup {
+            checks_from_counts(
+                &rollup.contexts.check_runs,
+                &rollup.contexts.status_contexts,
+            )
+        } else {
+            Checks::default()
         };
-        checks_from_counts(
-            &rollup.contexts.check_runs,
-            &rollup.contexts.status_contexts,
-        )
+        checks.running += self.missing_required_checks;
+        checks
+    }
+
+    fn apply_required(
+        &mut self,
+        summary: RequiredSummary,
+        expected: &HashSet<String>,
+        required_only: bool,
+    ) {
+        self.missing_required_checks = expected.difference(&summary.contexts).count() as u64;
+        if required_only {
+            self.required_checks = Some(summary.checks);
+        }
     }
 
     /// Whether the PR has any approval or all required approvals.
@@ -439,25 +463,41 @@ pub fn fetch_my_prs(
     let q = mine_search(repo, me, sort);
     let data: MineData = client.graphql(MINE_QUERY, serde_json::json!({ "q": q }))?;
     let mut nodes = data.search.nodes;
-    if required_only {
-        let (indices, targets): (Vec<_>, Vec<_>) = nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, node)| {
-                node.commits.nodes.first().map(|commit| {
-                    (
-                        index,
-                        RequiredTarget {
-                            pull_request_number: node.number,
-                            commit_id: commit.commit.id.clone(),
-                        },
-                    )
-                })
-            })
-            .unzip();
-        for (index, summary) in indices.into_iter().zip(fetch_required(client, targets)?) {
-            nodes[index].required_checks = Some(summary.checks);
+    let mut required_contexts = HashMap::new();
+    for node in &mut nodes {
+        if let Some(base) = &node.base_ref {
+            let contexts = match required_contexts.entry(base.id.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(fetch_required_contexts(client, &base.id)?),
+            };
+            node.missing_required_checks = contexts.len() as u64;
         }
+    }
+    let (indices, targets): (Vec<_>, Vec<_>) = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| required_only || node.missing_required_checks > 0)
+        .filter_map(|(index, node)| {
+            node.commits.nodes.first().map(|commit| {
+                (
+                    index,
+                    RequiredTarget {
+                        pull_request_number: node.number,
+                        commit_id: commit.commit.id.clone(),
+                    },
+                )
+            })
+        })
+        .unzip();
+    let empty = HashSet::new();
+    for (index, summary) in indices.into_iter().zip(fetch_required(client, targets)?) {
+        let node = &mut nodes[index];
+        let expected = node
+            .base_ref
+            .as_ref()
+            .and_then(|base| required_contexts.get(&base.id))
+            .unwrap_or(&empty);
+        node.apply_required(summary, expected, required_only);
     }
     Ok(nodes)
 }
@@ -465,6 +505,104 @@ pub fn fetch_my_prs(
 // ----------------------------------------------------------------------------
 // Required status checks
 // ----------------------------------------------------------------------------
+
+const REQUIRED_CONTEXTS_QUERY: &str = r#"query($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on Ref {
+      refUpdateRule { requiredStatusCheckContexts }
+      rules(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          parameters {
+            __typename
+            ... on RequiredStatusChecksParameters {
+              requiredStatusChecks { context }
+            }
+          }
+        }
+      }
+    }
+  }
+}"#;
+
+#[derive(Debug, Deserialize)]
+struct RequiredRefData {
+    node: Option<RequiredRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequiredRef {
+    #[serde(rename = "refUpdateRule")]
+    update_rule: Option<RefUpdateRule>,
+    rules: RefRules,
+}
+
+#[derive(Debug, Deserialize)]
+struct RefUpdateRule {
+    #[serde(rename = "requiredStatusCheckContexts")]
+    contexts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RefRules {
+    #[serde(rename = "pageInfo")]
+    page_info: RequiredPageInfo,
+    nodes: Vec<RefRule>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RefRule {
+    parameters: Option<RuleParameters>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "__typename")]
+enum RuleParameters {
+    RequiredStatusChecksParameters {
+        #[serde(rename = "requiredStatusChecks")]
+        checks: Vec<RequiredCheck>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequiredCheck {
+    context: String,
+}
+
+impl RequiredRef {
+    fn add_to(self, contexts: &mut HashSet<String>) -> Result<Option<String>> {
+        if let Some(rule) = self.update_rule {
+            contexts.extend(rule.contexts.into_iter().flatten());
+        }
+        for rule in self.rules.nodes {
+            if let Some(RuleParameters::RequiredStatusChecksParameters { checks }) = rule.parameters
+            {
+                contexts.extend(checks.into_iter().map(|check| check.context));
+            }
+        }
+        self.rules.page_info.next_cursor()
+    }
+}
+
+fn fetch_required_contexts(client: &Client, id: &str) -> Result<HashSet<String>> {
+    let mut contexts = HashSet::new();
+    let mut after: Option<String> = None;
+    loop {
+        let data: RequiredRefData = client.graphql(
+            REQUIRED_CONTEXTS_QUERY,
+            serde_json::json!({ "id": id, "after": after }),
+        )?;
+        after = data
+            .node
+            .context("required-check base branch was unavailable")?
+            .add_to(&mut contexts)?;
+        if after.is_none() {
+            return Ok(contexts);
+        }
+    }
+}
 
 #[derive(Debug)]
 struct RequiredTarget {
@@ -476,6 +614,7 @@ struct RequiredTarget {
 pub(crate) struct RequiredSummary {
     pub(crate) checks: Checks,
     pub(crate) build_started_at: Option<String>,
+    pub(crate) contexts: HashSet<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -504,11 +643,25 @@ struct RequiredPageInfo {
     end_cursor: Option<String>,
 }
 
+impl RequiredPageInfo {
+    fn next_cursor(self) -> Result<Option<String>> {
+        if self.has_next_page {
+            Ok(Some(
+                self.end_cursor
+                    .context("required-check page had no end cursor")?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "__typename")]
 enum RequiredContext {
     CheckRun {
         required: bool,
+        name: String,
         status: String,
         conclusion: Option<String>,
         #[serde(rename = "startedAt")]
@@ -516,6 +669,7 @@ enum RequiredContext {
     },
     StatusContext {
         required: bool,
+        context: String,
         state: String,
     },
 }
@@ -525,10 +679,12 @@ impl RequiredContext {
         match self {
             RequiredContext::CheckRun {
                 required: true,
+                name,
                 status,
                 conclusion,
                 started_at,
             } => {
+                summary.contexts.insert(name);
                 summary.checks.add(
                     status::check_run_lamp(conclusion.as_deref().unwrap_or(&status)),
                     1,
@@ -544,8 +700,12 @@ impl RequiredContext {
             }
             RequiredContext::StatusContext {
                 required: true,
+                context,
                 state,
-            } => summary.checks.add(status::status_context_lamp(&state), 1),
+            } => {
+                summary.contexts.insert(context);
+                summary.checks.add(status::status_context_lamp(&state), 1);
+            }
             _ => {}
         }
     }
@@ -580,11 +740,11 @@ fn required_query(pending: &[PendingRequired]) -> (String, serde_json::Value) {
           __typename
           ... on CheckRun {{
             required: isRequired(pullRequestNumber: $pull{alias})
-            status conclusion startedAt
+            name status conclusion startedAt
           }}
           ... on StatusContext {{
             required: isRequired(pullRequestNumber: $pull{alias})
-            state
+            context state
           }}
         }}
       }}
@@ -641,14 +801,8 @@ fn fetch_required(client: &Client, targets: Vec<RequiredTarget>) -> Result<Vec<R
             for context in rollup.contexts.nodes {
                 context.add_to(&mut summaries[item.target]);
             }
-            if rollup.contexts.page_info.has_next_page {
-                item.after = Some(
-                    rollup
-                        .contexts
-                        .page_info
-                        .end_cursor
-                        .context("required-check page had no end cursor")?,
-                );
+            item.after = rollup.contexts.page_info.next_cursor()?;
+            if item.after.is_some() {
                 next.push(item);
             }
         }
@@ -895,24 +1049,28 @@ mod tests {
         for context in [
             RequiredContext::CheckRun {
                 required: true,
+                name: "test".to_string(),
                 status: "COMPLETED".to_string(),
                 conclusion: Some("FAILURE".to_string()),
                 started_at: Some("2026-08-28T11:00:00Z".to_string()),
             },
             RequiredContext::CheckRun {
                 required: true,
+                name: "lint".to_string(),
                 status: "IN_PROGRESS".to_string(),
                 conclusion: None,
                 started_at: Some("2026-08-28T10:00:00Z".to_string()),
             },
             RequiredContext::CheckRun {
                 required: false,
+                name: "optional".to_string(),
                 status: "COMPLETED".to_string(),
                 conclusion: Some("SUCCESS".to_string()),
                 started_at: Some("2026-08-28T09:00:00Z".to_string()),
             },
             RequiredContext::StatusContext {
                 required: true,
+                context: "legacy".to_string(),
                 state: "SUCCESS".to_string(),
             },
         ] {
@@ -931,6 +1089,216 @@ mod tests {
             summary.build_started_at.as_deref(),
             Some("2026-08-28T10:00:00Z")
         );
+        assert_eq!(
+            summary.contexts,
+            HashSet::from(["test".into(), "lint".into(), "legacy".into()])
+        );
+    }
+
+    #[test]
+    fn required_contexts_combine_branch_protection_and_all_rule_pages() {
+        let mut contexts = HashSet::new();
+        for (page, expected_cursor) in [
+            (
+                serde_json::json!({
+                    "refUpdateRule": { "requiredStatusCheckContexts": ["test", "legacy"] },
+                    "rules": {
+                        "pageInfo": { "hasNextPage": true, "endCursor": "NEXT" },
+                        "nodes": [
+                            { "parameters": null },
+                            { "parameters": { "__typename": "PullRequestParameters" } },
+                            { "parameters": {
+                                "__typename": "RequiredStatusChecksParameters",
+                                "requiredStatusChecks": [
+                                    { "context": "test" }, { "context": "lint" }
+                                ]
+                            } }
+                        ]
+                    }
+                }),
+                Some("NEXT"),
+            ),
+            (
+                serde_json::json!({
+                    "refUpdateRule": { "requiredStatusCheckContexts": ["test", "legacy"] },
+                    "rules": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": "LAST" },
+                        "nodes": [{ "parameters": {
+                            "__typename": "RequiredStatusChecksParameters",
+                            "requiredStatusChecks": [{ "context": "security" }]
+                        } }]
+                    }
+                }),
+                None,
+            ),
+        ] {
+            let rules: RequiredRef = serde_json::from_value(page).unwrap();
+            assert_eq!(
+                rules.add_to(&mut contexts).unwrap().as_deref(),
+                expected_cursor
+            );
+        }
+        assert_eq!(
+            contexts,
+            HashSet::from([
+                "test".into(),
+                "legacy".into(),
+                "lint".into(),
+                "security".into()
+            ])
+        );
+    }
+
+    #[test]
+    fn unprotected_branches_have_no_expected_checks() {
+        for update_rule in [
+            serde_json::Value::Null,
+            serde_json::json!({ "requiredStatusCheckContexts": null }),
+            serde_json::json!({ "requiredStatusCheckContexts": [] }),
+        ] {
+            let rules: RequiredRef = serde_json::from_value(serde_json::json!({
+                "refUpdateRule": update_rule,
+                "rules": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": []
+                }
+            }))
+            .unwrap();
+            let mut contexts = HashSet::new();
+            assert_eq!(rules.add_to(&mut contexts).unwrap(), None);
+            assert!(contexts.is_empty(), "{contexts:?}");
+        }
+    }
+
+    #[test]
+    fn required_check_pages_need_a_cursor_to_continue() {
+        let page = RequiredPageInfo {
+            has_next_page: true,
+            end_cursor: None,
+        };
+        assert_eq!(
+            page.next_cursor().unwrap_err().to_string(),
+            "required-check page had no end cursor"
+        );
+    }
+
+    fn pr_without_checks() -> PrNode {
+        let data: MineData =
+            crate::github::parse_graphql(include_bytes!("../tests/fixtures/mine_no_rollup.json"))
+                .unwrap();
+        data.search.nodes.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn missing_required_checks_stay_in_run_until_they_report() {
+        let expected = HashSet::from(["test".into(), "legacy".into()]);
+        for required_only in [false, true] {
+            for (state, fail, running, pass) in [
+                (None, 0, 2, 0),
+                (Some("QUEUED"), 0, 2, 0),
+                (Some("IN_PROGRESS"), 0, 2, 0),
+                (Some("SUCCESS"), 0, 1, 1),
+                (Some("FAILURE"), 1, 1, 0),
+                (Some("SKIPPED"), 0, 1, 1),
+            ] {
+                let mut node = pr_without_checks();
+                let mut counts = vec![StateCount {
+                    state: "SUCCESS".into(),
+                    count: 3,
+                }];
+                let mut summary = RequiredSummary::default();
+                // An optional check with the same name is not the required job.
+                RequiredContext::CheckRun {
+                    required: false,
+                    name: "legacy".into(),
+                    status: "COMPLETED".into(),
+                    conclusion: Some("SUCCESS".into()),
+                    started_at: None,
+                }
+                .add_to(&mut summary);
+                if let Some(state) = state {
+                    counts.push(StateCount {
+                        state: state.into(),
+                        count: 1,
+                    });
+                    RequiredContext::CheckRun {
+                        required: true,
+                        name: "test".into(),
+                        status: state.into(),
+                        conclusion: None,
+                        started_at: None,
+                    }
+                    .add_to(&mut summary);
+                }
+                node.commits.nodes[0].commit.status_check_rollup = Some(Rollup {
+                    contexts: RollupCounts {
+                        check_runs: counts,
+                        status_contexts: vec![],
+                    },
+                });
+                node.apply_required(summary, &expected, required_only);
+                let rows = crate::prs::build_rows(vec![node], OpenSort::Updated);
+                assert_eq!(
+                    rows[0].checks,
+                    Checks {
+                        fail,
+                        running,
+                        pass: pass + if required_only { 0 } else { 3 }
+                    },
+                    "required_only={required_only}, state={state:?}"
+                );
+                assert_eq!(
+                    rows[0].status,
+                    Some(if fail > 0 {
+                        status::Status::Fail
+                    } else {
+                        status::Status::Pending
+                    })
+                );
+                for ascii in [false, true] {
+                    let table = crate::prs::to_table(&rows, ascii, &HashSet::new(), false);
+                    assert_eq!(table.rows[0][6].text, running.to_string());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_required_checks_count_even_without_a_rollup() {
+        for required_only in [false, true] {
+            let mut node = pr_without_checks();
+            node.apply_required(
+                RequiredSummary::default(),
+                &HashSet::from(["test".into(), "lint".into()]),
+                required_only,
+            );
+            assert_eq!(
+                node.checks(),
+                Checks {
+                    fail: 0,
+                    running: 2,
+                    pass: 0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn reported_legacy_statuses_are_not_counted_as_missing() {
+        for state in ["EXPECTED", "PENDING", "SUCCESS", "FAILURE"] {
+            let mut node = pr_without_checks();
+            let mut summary = RequiredSummary::default();
+            RequiredContext::StatusContext {
+                required: true,
+                context: "legacy".into(),
+                state: state.into(),
+            }
+            .add_to(&mut summary);
+            let checks = summary.checks;
+            node.apply_required(summary, &HashSet::from(["legacy".into()]), true);
+            assert_eq!(node.checks(), checks, "{state}");
+            assert_eq!(node.missing_required_checks, 0, "{state}");
+        }
     }
 
     #[test]
