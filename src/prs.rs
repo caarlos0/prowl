@@ -288,7 +288,7 @@ mod tests {
                 [2, 1, 4, 3],
                 "{sort:?}"
             );
-            assert!(build_rows(vec![], sort).is_empty());
+            assert_eq!(build_rows(vec![], sort), Vec::<PrRow>::new());
         }
     }
 
