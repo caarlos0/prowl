@@ -597,11 +597,12 @@ pushes, and watches the workflow run. It only runs from a clean `main`.
 Tag `vX.Y.Z` → `.github/workflows/release.yml` runs **GoReleaser Pro**
 (`.goreleaser.yaml`). The config `includes:` shared snippets from
 [`caarlos0/goreleaserfiles`](https://github.com/caarlos0/goreleaserfiles)
-(changelog/release, notarization, packaging) and publishes: archives, nfpm/nix/
+(changelog/release and notarization) and publishes: archives, nfpm/
 homebrew-cask packages, the npm package `@caarlos0/prowl`, SBOMs, and a
 cosign-signed checksum. `snapshot.yml` builds a snapshot on pushes/same-repo PRs.
-Required secrets: `GORELEASER_KEY`, `GH_PAT` (repo scope, for tap/nur pushes),
-`NPM_TOKEN`; `MACOS_*` enable optional macOS notarization.
+Required secrets: `GORELEASER_KEY`, `APP_PRIVATE_KEY` (with the `APP_CLIENT_ID`
+variable for Homebrew tap pushes), `NPM_TOKEN`; `MACOS_*` enable optional macOS
+notarization.
 
 Tests are offline: JSON fixtures under `tests/fixtures/` (real captures + a
 crafted queue) drive parsing → rows → render in `tests/parsing.rs`, plus
