@@ -25,15 +25,23 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+      - id: publishing-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: caarlos0
+          repositories: |
+            homebrew-tap
+          permission-contents: write
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser-pro
           version: "~> v2"
           args: release --clean
         env:
-          # GH_PAT needs `repo` scope so the homebrew tap and nur pushes work.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ steps.publishing-token.outputs.token }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
           # Optional macOS notarization (skipped when unset).
           MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
