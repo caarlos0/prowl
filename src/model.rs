@@ -245,8 +245,9 @@ pub fn fetch_queue(
 // My open PRs
 // ----------------------------------------------------------------------------
 
-pub const MINE_QUERY: &str = r#"query($q: String!) {
-  search(type: ISSUE, first: 50, query: $q) {
+pub const MINE_QUERY: &str = r#"query($q: String!, $after: String) {
+  search(type: ISSUE, first: 5, after: $after, query: $q) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
         number title url mergeable mergeStateStatus isDraft updatedAt createdAt headRefName
@@ -272,6 +273,16 @@ pub struct MineData {
 #[derive(Debug, Deserialize)]
 pub struct MineNodes {
     pub nodes: Vec<PrNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+impl MineNodes {
+    fn add_to(self, nodes: &mut Vec<PrNode>) -> Result<Option<String>> {
+        let after = self.page_info.next_cursor()?;
+        nodes.extend(self.nodes);
+        Ok(after)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,8 +479,16 @@ pub fn fetch_my_prs(
     required_only: bool,
 ) -> Result<Vec<PrNode>> {
     let q = mine_search(repo, me, sort);
-    let data: MineData = client.graphql(MINE_QUERY, serde_json::json!({ "q": q }))?;
-    let mut nodes = data.search.nodes;
+    let mut nodes = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let data: MineData =
+            client.graphql(MINE_QUERY, serde_json::json!({ "q": q, "after": after }))?;
+        after = data.search.add_to(&mut nodes)?;
+        if after.is_none() {
+            break;
+        }
+    }
     let targets: Vec<_> = nodes
         .iter()
         .map(|node| RequiredTarget {
@@ -535,7 +554,7 @@ struct RefUpdateRule {
 #[derive(Debug, Deserialize)]
 struct RefRules {
     #[serde(rename = "pageInfo")]
-    page_info: RequiredPageInfo,
+    page_info: PageInfo,
     nodes: Vec<RefRule>,
 }
 
@@ -638,24 +657,23 @@ struct RequiredRollup {
 #[derive(Debug, Deserialize)]
 struct RequiredContexts {
     #[serde(rename = "pageInfo")]
-    page_info: RequiredPageInfo,
+    page_info: PageInfo,
     nodes: Vec<RequiredContext>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RequiredPageInfo {
+struct PageInfo {
     #[serde(rename = "hasNextPage")]
     has_next_page: bool,
     #[serde(rename = "endCursor")]
     end_cursor: Option<String>,
 }
 
-impl RequiredPageInfo {
+impl PageInfo {
     fn next_cursor(self) -> Result<Option<String>> {
         if self.has_next_page {
             Ok(Some(
-                self.end_cursor
-                    .context("required-check page had no end cursor")?,
+                self.end_cursor.context("GraphQL page had no end cursor")?,
             ))
         } else {
             Ok(None)
@@ -817,21 +835,19 @@ fn fetch_required(
         .collect();
 
     while !pending.is_empty() {
-        let (query, variables) = required_query(&pending);
-        let mut data: HashMap<String, Option<RequiredCommit>> =
-            client.graphql(&query, variables)?;
-        let mut next = Vec::new();
-        for (alias, mut item) in pending.into_iter().enumerate() {
-            let commit = data
-                .remove(&format!("c{alias}"))
-                .with_context(|| format!("required-check response omitted c{alias}"))?
-                .with_context(|| format!("required-check commit c{alias} was unavailable"))?;
-            item.after = summaries[item.target].add_page(commit)?;
-            if item.after.is_some() {
-                next.push(item);
+        for batch in pending.chunks_mut(5) {
+            let (query, variables) = required_query(batch);
+            let mut data: HashMap<String, Option<RequiredCommit>> =
+                client.graphql(&query, variables)?;
+            for (alias, item) in batch.iter_mut().enumerate() {
+                let commit = data
+                    .remove(&format!("c{alias}"))
+                    .with_context(|| format!("required-check response omitted c{alias}"))?
+                    .with_context(|| format!("required-check commit c{alias} was unavailable"))?;
+                item.after = summaries[item.target].add_page(commit)?;
             }
         }
-        pending = next;
+        pending.retain(|item| item.after.is_some());
     }
 
     for (target, summary) in targets.iter().zip(&mut summaries) {
@@ -1039,6 +1055,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mine_query_uses_small_pages() {
+        assert!(
+            MINE_QUERY.contains("first: 5, after: $after"),
+            "{MINE_QUERY}"
+        );
+        assert!(MINE_QUERY.contains("$after: String"), "{MINE_QUERY}");
+        assert!(
+            MINE_QUERY.contains("pageInfo { hasNextPage endCursor }"),
+            "{MINE_QUERY}"
+        );
+    }
+
+    #[test]
+    fn mine_pages_preserve_all_prs_and_return_the_next_cursor() {
+        let mut first: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine.json")).unwrap();
+        first["data"]["search"]["pageInfo"] = serde_json::json!({
+            "hasNextPage": true,
+            "endCursor": "NEXT",
+        });
+        let first: MineData =
+            crate::github::parse_graphql(&serde_json::to_vec(&first).unwrap()).unwrap();
+        let last: MineData =
+            crate::github::parse_graphql(include_bytes!("../tests/fixtures/mine_no_rollup.json"))
+                .unwrap();
+        let mut nodes = Vec::new();
+        assert_eq!(
+            first.search.add_to(&mut nodes).unwrap().as_deref(),
+            Some("NEXT")
+        );
+        assert_eq!(last.search.add_to(&mut nodes).unwrap(), None);
+        assert_eq!(
+            nodes.iter().map(|node| node.number).collect::<Vec<_>>(),
+            [6475, 5323, 6656, 123]
+        );
+        assert_eq!(nodes[0].checks().fail, 4);
+        assert_eq!(nodes[3].review_threads.unresolved(), (1, false));
+    }
+
+    #[test]
+    fn mine_empty_page_finishes_pagination() {
+        let data: MineData =
+            crate::github::parse_graphql(include_bytes!("../tests/fixtures/mine_empty.json"))
+                .unwrap();
+        let mut nodes = Vec::new();
+        assert_eq!(data.search.add_to(&mut nodes).unwrap(), None);
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn mine_pages_do_not_stop_at_fifty_prs() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine_no_rollup.json")).unwrap();
+        let mut nodes = Vec::new();
+        for page in 0..11 {
+            let mut response = fixture.clone();
+            response["data"]["search"]["nodes"] = (0..5)
+                .map(|offset| {
+                    let mut node = fixture["data"]["search"]["nodes"][0].clone();
+                    node["number"] = (page * 5 + offset + 1).into();
+                    node
+                })
+                .collect();
+            response["data"]["search"]["pageInfo"] = serde_json::json!({
+                "hasNextPage": page < 10,
+                "endCursor": format!("PAGE_{page}"),
+            });
+            let data: MineData =
+                crate::github::parse_graphql(&serde_json::to_vec(&response).unwrap()).unwrap();
+            let after = data.search.add_to(&mut nodes).unwrap();
+            if page < 10 {
+                assert_eq!(after, Some(format!("PAGE_{page}")));
+            } else {
+                assert_eq!(after, None);
+            }
+        }
+        assert_eq!(
+            nodes.iter().map(|node| node.number).collect::<Vec<_>>(),
+            (1..=55).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mine_rejects_a_page_without_pagination_metadata() {
+        let mut fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine.json")).unwrap();
+        fixture["data"]["search"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pageInfo");
+        let err = crate::github::parse_graphql::<MineData>(&serde_json::to_vec(&fixture).unwrap())
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("missing field `pageInfo`"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn mine_search_sorts_before_the_api_page_limit() {
         let repo = Repo::parse("owner/repo").unwrap();
         for (sort, qualifier) in [
@@ -1199,14 +1314,14 @@ mod tests {
     }
 
     #[test]
-    fn required_check_pages_need_a_cursor_to_continue() {
-        let page = RequiredPageInfo {
+    fn graphql_pages_need_a_cursor_to_continue() {
+        let page = PageInfo {
             has_next_page: true,
             end_cursor: None,
         };
         assert_eq!(
             page.next_cursor().unwrap_err().to_string(),
-            "required-check page had no end cursor"
+            "GraphQL page had no end cursor"
         );
     }
 
