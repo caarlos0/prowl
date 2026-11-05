@@ -16,6 +16,7 @@ Keys (while watching):
   j / k            move the selection (also Down / Up arrows)
   g / G            jump to the first / last row
   Ctrl-D / Ctrl-U  move the selection half a page
+  PgUp / PgDn      scroll the viewport without changing the selection
   Enter            open the selected PR or release in your browser
   Shift+Enter      open every link in the selected section (terminal support required)
   y                copy the selected row's link to the clipboard

@@ -678,9 +678,37 @@ fn bottom_bound(ui: &Ui) -> u16 {
     n as u16
 }
 
-/// Paint a watch frame at the surface's dimensions. The body scrolls to the
-/// selection; the search prompt, status, and footer stay at the bottom.
-/// Help belongs to the scrolling body so it cannot consume the entire viewport.
+fn watch_body(
+    screen: &impl TextSurface,
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    ascii: bool,
+) -> (TextBuffer, u16, Option<u16>, bool) {
+    let mut body = staging_buffer(
+        screen,
+        screen.bounds().width,
+        height_bound(sections, ui).max(1),
+    );
+    let top = if ui.show_help {
+        render::paint_help(&mut body, ui.view, ascii, 0) + 1
+    } else {
+        0
+    };
+    let (body_h, selected, compact) = paint_body(
+        &mut body,
+        sections,
+        ui,
+        changes,
+        ascii,
+        true,
+        Visibility::all(sections),
+        top,
+    );
+    (body, body_h, selected, compact)
+}
+
+/// Paint a watch frame with a scrollable body and a pinned bottom block.
 /// The caller must clear the surface first.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_watch_frame(
@@ -694,14 +722,7 @@ pub fn paint_watch_frame(
 ) -> Option<Position> {
     let bounds = screen.bounds();
     let visible = Visibility::all(sections);
-    let mut body = staging_buffer(screen, bounds.width, height_bound(sections, ui).max(1));
-    let top = if ui.show_help {
-        render::paint_help(&mut body, ui.view, ascii, 0) + 1
-    } else {
-        0
-    };
-    let (body_h, selected, compact) =
-        paint_body(&mut body, sections, ui, changes, ascii, true, visible, top);
+    let (mut body, body_h, selected, compact) = watch_body(screen, sections, ui, changes, ascii);
     let bottom_h = bottom_height(ui, status, footer, false) as u16;
     let mut bottom = staging_buffer(screen, bounds.width, bottom_h.max(1));
     let (bottom_h, caret) = paint_bottom(
@@ -716,14 +737,17 @@ pub fn paint_watch_frame(
         compact,
         0,
     );
-    let (top, cut) = render::compose(
+    let offset = ui.scroll.unwrap_or_else(|| {
+        render::body_scroll_offset(body_h, bounds.height.saturating_sub(bottom_h), selected)
+    });
+    let (top, cut) = render::compose_scrolled(
         screen,
         &mut body,
         body_h,
         &mut bottom,
         bottom_h,
         bounds.height,
-        selected,
+        offset,
     );
     caret
         .filter(|p| p.y >= cut)
@@ -1116,6 +1140,8 @@ enum Action {
     Cancel,
     /// A movement key: move the selection cursor.
     Move(nav::Move),
+    /// Page up or down without changing the selected link.
+    Scroll(bool),
     /// `Ctrl-Z`: suspend to the shell, then resume.
     Suspend,
     /// The terminal was resized to these cell dimensions.
@@ -1140,6 +1166,7 @@ enum SearchAction<'a> {
     Quit,
     /// `Ctrl-Z`: suspend to the shell, then resume.
     Suspend,
+    Scroll(bool),
     /// The terminal was resized to these cell dimensions.
     Resize(u16, u16),
 }
@@ -1189,6 +1216,10 @@ fn classify(ev: &Event) -> Action {
                 Action::Move(nav::Move::HalfDown)
             } else if k.matches("ctrl+u") {
                 Action::Move(nav::Move::HalfUp)
+            } else if k.matches("pageup") {
+                Action::Scroll(false)
+            } else if k.matches("pagedown") {
+                Action::Scroll(true)
             } else {
                 Action::None
             }
@@ -1216,6 +1247,10 @@ fn classify_search(ev: &Event) -> SearchAction<'_> {
                 SearchAction::Quit
             } else if k.matches("ctrl+z") {
                 SearchAction::Suspend
+            } else if k.matches("pageup") {
+                SearchAction::Scroll(false)
+            } else if k.matches("pagedown") {
+                SearchAction::Scroll(true)
             } else {
                 SearchAction::None
             }
@@ -1248,6 +1283,8 @@ pub struct Ui {
     /// until the user moves it), reset when switching views or changing the
     /// search, and restored by URL after a refresh or resize.
     pub selected: Option<usize>,
+    /// Explicit body offset after PageUp/PageDown; selection movement clears it.
+    pub scroll: Option<u16>,
     /// The active search query; empty means no filter is applied.
     pub search: String,
     /// Whether the search prompt is open and capturing text.
@@ -1264,6 +1301,7 @@ impl Ui {
             view: cli.view,
             show_help: !cli.no_help,
             selected: None,
+            scroll: None,
             search: String::new(),
             searching: false,
             branch: cli.branch,
@@ -1295,6 +1333,20 @@ impl Ui {
             let mut filtered = None;
             let shown = self.shown(good, &mut filtered);
             nav::target_index(self.view, shown, &self.search, Visibility::all(shown), url)
+        });
+    }
+
+    fn scroll_page(&mut self, down: bool, body_h: u16, available: u16, selected_row: Option<u16>) {
+        let max = body_h.saturating_sub(available);
+        let offset = self
+            .scroll
+            .unwrap_or_else(|| render::body_scroll_offset(body_h, available, selected_row))
+            .min(max);
+        let step = available.max(1);
+        self.scroll = Some(if down {
+            offset.saturating_add(step).min(max)
+        } else {
+            offset.saturating_sub(step)
         });
     }
 
@@ -1509,6 +1561,7 @@ impl<'a> App<'a> {
                 view: cli.view,
                 show_help: false,
                 selected: None,
+                scroll: None,
                 search: String::new(),
                 searching: false,
                 branch: cli.branch,
@@ -1745,17 +1798,20 @@ impl<'a> App<'a> {
             Action::ToggleHelp => {
                 self.ui.show_help = !self.ui.show_help;
                 self.ui.selected = None;
+                self.ui.scroll = None;
                 self.repaint_last()?;
             }
             Action::SwitchView => {
                 // Selection indices don't carry across views, so start fresh.
                 self.ui.view = self.ui.view.toggle();
                 self.ui.selected = None;
+                self.ui.scroll = None;
                 self.repaint_last()?;
             }
             Action::Search => {
                 self.ui.searching = true;
                 self.ui.selected = None;
+                self.ui.scroll = None;
                 self.repaint_last()?;
             }
             Action::Cancel => {
@@ -1765,6 +1821,7 @@ impl<'a> App<'a> {
                 }
                 self.ui.search.clear();
                 self.ui.selected = None;
+                self.ui.scroll = None;
                 self.repaint_last()?;
             }
             Action::Open => self.open_links(false)?,
@@ -1776,11 +1833,13 @@ impl<'a> App<'a> {
             Action::Move(m) => {
                 let len = self.target_count();
                 let next = nav::moved(m, self.ui.selected, len, self.half_page());
-                if next != self.ui.selected {
+                if next != self.ui.selected || self.ui.scroll.is_some() {
                     self.ui.selected = next;
+                    self.ui.scroll = None;
                     self.repaint_last()?;
                 }
             }
+            Action::Scroll(down) => self.scroll_page(down)?,
             Action::Resize(w, h) => {
                 let selected = self.selected_url();
                 // The event already carries the new size, so resize to it
@@ -1809,10 +1868,12 @@ impl<'a> App<'a> {
             SearchAction::Text(text) => {
                 self.ui.search.push_str(text);
                 self.ui.selected = None;
+                self.ui.scroll = None;
             }
             SearchAction::Backspace => {
                 self.ui.search.pop();
                 self.ui.selected = None;
+                self.ui.scroll = None;
             }
             SearchAction::Enter => {
                 self.ui.searching = false;
@@ -1820,9 +1881,11 @@ impl<'a> App<'a> {
             SearchAction::Esc => {
                 self.ui.search.clear();
                 self.ui.searching = false;
+                self.ui.scroll = None;
             }
             SearchAction::Quit => return Ok(Flow::Quit),
             SearchAction::Suspend => return self.suspend().map(|()| Flow::Continue),
+            SearchAction::Scroll(down) => return self.scroll_page(down).map(|()| Flow::Continue),
             // The prompt only opens while watching, so we own the alt screen
             // and the frame is the whole window.
             SearchAction::Resize(w, h) => {
@@ -1872,6 +1935,27 @@ impl<'a> App<'a> {
         self.program
             .window_cells()
             .map_or(10, |s| usize::from(s.height / 2).max(1))
+    }
+
+    fn scroll_page(&mut self, down: bool) -> Result<()> {
+        if !self.in_alt {
+            return Ok(());
+        }
+        let good = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
+        let mut filtered = None;
+        let sections = self.ui.shown(good, &mut filtered);
+        let screen = self.program.screen();
+        let ascii = ascii_mode(self.cli.ascii, screen.color_profile());
+        let (_, body_h, selected, _) = watch_body(screen, sections, &self.ui, &self.unread, ascii);
+        let bottom_h = bottom_height(
+            &self.ui,
+            &self.last_status,
+            Some((self.eta.as_str(), self.refreshing)),
+            false,
+        ) as u16;
+        let available = screen.height().saturating_sub(bottom_h);
+        self.ui.scroll_page(down, body_h, available, selected);
+        self.repaint_last()
     }
 
     /// Copy the selected link (`y`) or its whole section as a list (`Y`).
@@ -1978,6 +2062,7 @@ impl<'a> App<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use uncurses::buffer::Surface;
     use uncurses::text::Encode;
 
@@ -2150,6 +2235,7 @@ mod tests {
             view,
             show_help: false,
             selected: None,
+            scroll: None,
             search: String::new(),
             searching: false,
             branch: false,
@@ -2643,6 +2729,96 @@ mod tests {
             true,
         );
         canvas
+    }
+
+    #[test]
+    fn page_keys_scroll_in_normal_and_search_modes() {
+        use uncurses::event::Key;
+
+        for (code, down) in [(KeyCode::PageUp, false), (KeyCode::PageDown, true)] {
+            let event = Event::KeyPress(Key::new(code, KeyModifiers::empty()).normalized());
+            assert!(matches!(classify(&event), Action::Scroll(value) if value == down));
+            assert_eq!(classify_search(&event), SearchAction::Scroll(down));
+        }
+    }
+
+    #[test]
+    fn page_scrolling_reaches_every_help_line_and_empty_section_without_targets() {
+        let sections = Sections {
+            prs: Some(vec![]),
+            queue: Some(vec![]),
+            merged: Some(vec![]),
+            reviews: Some(vec![]),
+            reviewed_merged: Some(vec![]),
+            ..Sections::EMPTY
+        };
+        for view in [View::Mine, View::Reviews] {
+            let mut ui = ui(view);
+            ui.show_help = true;
+            assert_eq!(
+                nav::targets_visible(view, &sections, "", Visibility::all(&sections)).len(),
+                0
+            );
+            let screen = TextBuffer::new(120, 6);
+            let (body, height, selected, _) =
+                watch_body(&screen, &sections, &ui, &Changes::default(), true);
+            let expected = body.display_with(Profile::Disabled).to_string();
+            let mut seen = HashSet::new();
+            for _ in 0..height {
+                let frame = watch_frame(&sections, &ui, 120, 6);
+                let text = frame.display_with(Profile::Disabled).to_string();
+                let lines: Vec<_> = text.lines().collect();
+                assert!(lines.last().unwrap().starts_with("^R refresh"));
+                seen.extend(
+                    lines[..lines.len() - 1]
+                        .iter()
+                        .map(|line| line.trim_end().to_string()),
+                );
+                ui.scroll_page(true, height, 5, selected);
+            }
+            for line in expected.lines().filter(|line| !line.trim().is_empty()) {
+                assert!(seen.contains(line.trim_end()), "{view:?}: missing {line:?}");
+            }
+            for _ in 0..height {
+                ui.scroll_page(false, height, 5, selected);
+            }
+            assert_eq!(ui.scroll, Some(0));
+            let frame = watch_frame(&sections, &ui, 120, 6);
+            assert!(
+                frame
+                    .display_with(Profile::Disabled)
+                    .to_string()
+                    .starts_with("Help")
+            );
+        }
+    }
+
+    #[test]
+    fn manual_scroll_preserves_selection_and_clamps_after_resize() {
+        let sections = Sections {
+            prs: Some(vec![queued_open_row(1)]),
+            ..Sections::EMPTY
+        };
+        let mut ui = ui(View::Mine);
+        ui.show_help = true;
+        ui.selected = Some(0);
+        ui.scroll_page(true, 40, 5, Some(20));
+        assert_eq!(ui.scroll, Some(23));
+        assert_eq!(ui.selected, Some(0));
+        ui.scroll_page(false, 10, 5, Some(20));
+        assert_eq!(ui.scroll, Some(0));
+        let frame = watch_frame(&sections, &ui, 120, 6);
+        assert!(
+            frame
+                .display_with(Profile::Disabled)
+                .to_string()
+                .starts_with("Help")
+        );
+        assert_eq!(ui.selected, Some(0));
+        ui.scroll_page(true, 3, 5, None);
+        assert_eq!(ui.scroll, Some(0));
+        ui.scroll_page(true, 3, 0, None);
+        assert_eq!(ui.scroll, Some(1));
     }
 
     #[test]

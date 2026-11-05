@@ -707,18 +707,35 @@ pub fn compose<T: SurfaceMut + Bounded + ?Sized>(
     rows: u16,
     caret: Option<u16>,
 ) -> (u16, u16) {
+    let available = rows.saturating_sub(bottom_h);
+    let offset = body_scroll_offset(body_h, available, caret);
+    compose_scrolled(screen, body, body_h, bottom, bottom_h, rows, offset)
+}
+
+pub fn body_scroll_offset(body_h: u16, available: u16, caret: Option<u16>) -> u16 {
+    caret.map_or(0, |row| {
+        row.saturating_sub(available / 2)
+            .min(body_h.saturating_sub(available))
+    })
+}
+
+/// Compose a frame at an explicit body offset, with the bottom block pinned.
+pub fn compose_scrolled<T: SurfaceMut + Bounded + ?Sized>(
+    screen: &mut T,
+    body: &mut TextBuffer,
+    body_h: u16,
+    bottom: &mut TextBuffer,
+    bottom_h: u16,
+    rows: u16,
+    offset: u16,
+) -> (u16, u16) {
     // The bottom block keeps its tail if it alone overflows, so the footer
     // survives even when the prompt and status cannot both fit.
     let shown_bottom = bottom_h.min(rows);
     let cut = bottom_h - shown_bottom;
     let avail = rows - shown_bottom;
 
-    // Centering the caret scrolls the body a row at a time in either direction;
-    // with no caret (or nothing to scroll) we sit at the top.
-    let off = match caret {
-        Some(c) if body_h > avail => c.saturating_sub(avail / 2).min(body_h - avail),
-        _ => 0,
-    };
+    let off = offset.min(body_h.saturating_sub(avail));
     if avail > 0 {
         // A `View` clips without translating, so drawing it maps its top-left —
         // the first visible body row — onto the top of the screen.
@@ -763,8 +780,9 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
     s.set_str((2, y), &keys, &dim);
     y += 1;
 
-    let keys =
-        format!("r mark read{sep}R mark all read{sep}^R refresh{sep}shift+enter open section");
+    let keys = format!(
+        "PgUp/PgDn scroll{sep}r mark read{sep}R mark all read{sep}^R refresh{sep}shift+enter open section"
+    );
     s.set_str((2, y), &keys, &dim);
     y += 1;
 

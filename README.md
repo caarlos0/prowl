@@ -124,7 +124,7 @@ to the bottom of the screen (`^R refresh (every 5m) - tab switch view - enter op
 - r/R read - y copy - / search - ? help`) shows the keys and the refresh interval.
 `^R` means `Ctrl-R`. While a refresh is in flight the hint reads `^R refreshing`
 and `Ctrl-R` presses are ignored until it finishes. On narrow screens the footer removes low-priority labels and
-hints instead of clipping. The body scrolls vertically to keep the selected row visible.
+hints instead of clipping. `PgUp`/`PgDn` scroll independently; selection movement follows the row.
 Every enabled section stays available in both views, regardless of terminal size.
 The search prompt, status line, and footer stay at the bottom.
 Press `?` to show help at the top of the scrolling body.

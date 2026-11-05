@@ -283,7 +283,7 @@ raw mode). Because the caller always runs `stop`, the terminal is restored on
 every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
 calls `stop` itself before bailing). Each frame is painted by `redraw` →
 `render_dashboard`, which uses `paint_watch_frame` once `in_alt` is set: `paint_body` and
-`paint_bottom` each paint into their own `TextBuffer`, and `render::compose`
+`paint_bottom` each paint into their own `TextBuffer`, and `render::compose_scrolled`
 places them. The renderer's line-scroll capabilities (CSR/SU-SD/IL-DL) need no
 stripping: uncurses gates scroll detection on `scroll_optimize && sync_output &&
 fullscreen`, so a scroll — which moves full rows, including the pinned bottom
@@ -322,7 +322,7 @@ opens the selected row, `Shift+Enter` opens its section, `y`/`Y` copy links,
 the movement keys drive the cursor,
 `q`/`Q`/`Ctrl-C` quit (`Esc` clears the filter, or quits when there is none),
 `Ctrl-Z` suspends/resumes, `Resize` repaints. Watch interaction state lives in
-`Ui` (view, help, selection, search, `--branch`); unread markers live in
+`Ui` (view, help, selection, scroll, search, branch); unread markers use
 `App::unread`. `ctrlc` handles external SIGINT/SIGTERM/SIGHUP by asking the event
 loop to stop; the owning `Program`
 still performs all teardown through `finish`.

@@ -374,4 +374,19 @@ fn scroll_frames(sections: &prowl::Sections, mut ui: Ui, changes: &Changes) {
         );
         println!("{}", frame.display_with(Profile::Disabled));
     }
+    ui.show_help = true;
+    ui.selected = None;
+    ui.scroll = Some(5);
+    let mut frame = TextBuffer::new(120, 6);
+    prowl::paint_watch_frame(
+        &mut frame,
+        sections,
+        &ui,
+        changes,
+        "",
+        Some(("5m", false)),
+        true,
+    );
+    println!("--- {:?}: HELP AFTER PgDn (120x6) ---", ui.view);
+    println!("{}", frame.display_with(Profile::Disabled));
 }
