@@ -24,10 +24,6 @@ use uncurses::text::{Encode, TextSurface};
 /// terminal surface to size against.
 pub const OUTPUT_WIDTH: usize = 120;
 
-/// Below this width there is not enough room for a useful PR row after every
-/// optional column has been removed.
-pub const MIN_WIDTH: u16 = 24;
-
 /// Two blank columns separate adjacent table columns.
 const SEP: usize = 2;
 const TITLE_MIN: usize = 5;
@@ -341,7 +337,7 @@ pub fn table_is_compact_aligned(
     table: &Table,
     alignment: &TableAlignment,
 ) -> bool {
-    table_layout(s, table, Some(alignment)).is_some_and(|layout| {
+    table_layout(s, table, Some(alignment)).is_none_or(|layout| {
         layout.columns.len() < table.header.len()
             || layout
                 .columns
@@ -369,9 +365,25 @@ pub fn paint_table_aligned(
     ascii: bool,
     top: u16,
 ) -> u16 {
-    let Some(layout) = table_layout(s, table, Some(alignment)) else {
-        return top;
-    };
+    // Keep mandatory columns when the surface is too narrow. The surface clips
+    // them, but every data row still occupies its usual position.
+    let layout = table_layout(s, table, Some(alignment)).unwrap_or_else(|| {
+        let title = table
+            .column("TITLE")
+            .expect("tables without TITLE always fit");
+        TableLayout {
+            columns: (0..=title).collect(),
+            widths: (0..=title)
+                .map(|column| {
+                    if column == title {
+                        TITLE_MIN
+                    } else {
+                        aligned_col_width(s, table, column, title, Some(alignment))
+                    }
+                })
+                .collect(),
+        }
+    });
     let title_idx = table.column("TITLE");
     let branch_idx = table.column("BRANCH");
 
@@ -695,9 +707,8 @@ pub fn compose<T: SurfaceMut + Bounded + ?Sized>(
     rows: u16,
     caret: Option<u16>,
 ) -> (u16, u16) {
-    // The bottom block wins the space it needs; if it alone overflows (a short
-    // terminal with the help legend open) it keeps its tail — the search prompt,
-    // error line and footer — and the legend above them is what gets cut.
+    // The bottom block keeps its tail if it alone overflows, so the footer
+    // survives even when the prompt and status cannot both fit.
     let shown_bottom = bottom_h.min(rows);
     let cut = bottom_h - shown_bottom;
     let avail = rows - shown_bottom;
@@ -738,8 +749,8 @@ fn legend_row(
 /// the glyphs and values that view actually uses, so a glyph the other view
 /// reuses for something else can't muddy it. The Mine view lists the approval
 /// glyphs and the conflict marker; the Reviews view lists review-state glyphs.
-/// Painted above the search prompt / footer, since it documents the keys they
-/// list. Returns the next free row.
+/// The watch puts help in the scrolling body; one-shot output puts it above the
+/// search prompt and footer. Returns the next free row.
 pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -> u16 {
     let dim = Style::new().faint();
     let mut y = paint_header(s, "Help", status::OVERLAY, None, None, ascii, top);
@@ -1044,7 +1055,7 @@ mod tests {
         });
         assert!(compact.starts_with("+ resize for more - ^R refresh"));
 
-        for width in MIN_WIDTH..80 {
+        for width in 24..80 {
             let plain = encode(width, 1, Profile::Disabled, |b| {
                 paint_footer(b, "5m", false, false, true, 0);
             });
@@ -1063,7 +1074,7 @@ mod tests {
         });
         assert!(compact_refreshing.starts_with("\x1b[1;"));
         assert!(compact_refreshing.contains("\x1b[2mresize for more - ^R\x1b[m \x1b[2mrefreshing"));
-        for width in MIN_WIDTH..80 {
+        for width in 24..80 {
             let mut canvas = TextBuffer::new(width, 1);
             paint_footer(&mut canvas, "5m", true, true, true, 0);
             let text = canvas.display_with(Profile::Disabled).to_string();
@@ -1161,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn title_stays_larger_than_branch_at_minimum_width() {
+    fn title_stays_larger_than_branch_at_narrow_width() {
         let table = Table {
             header: vec!["", "PR", "TITLE", "BRANCH"],
             rows: vec![vec![
@@ -1171,8 +1182,8 @@ mod tests {
                 Cell::plain("feature/a-long-branch"),
             ]],
         };
-        let canvas = TextBuffer::new(MIN_WIDTH, 2);
-        let layout = table_layout(&canvas, &table, None).expect("minimum width should fit");
+        let canvas = TextBuffer::new(24, 2);
+        let layout = table_layout(&canvas, &table, None).expect("narrow width should fit");
         let title = layout
             .columns
             .iter()
@@ -1187,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_columns_can_report_terminal_too_small() {
+    fn mandatory_columns_clip_without_dropping_data_rows() {
         let table = Table {
             header: vec!["PR", "TITLE", "BRANCH"],
             rows: vec![vec![
@@ -1196,10 +1207,19 @@ mod tests {
                 Cell::plain("branch"),
             ]],
         };
-        let canvas = TextBuffer::new(MIN_WIDTH, 2);
+        let mut canvas = TextBuffer::new(24, 2);
         assert!(!table_fits(&canvas, &table));
         let alignment = table_alignment(&canvas, &[&table]);
-        assert!(table_required_width(&canvas, &table, &alignment) > MIN_WIDTH);
+        assert!(table_required_width(&canvas, &table, &alignment) > 24);
+        assert!(table_is_compact_aligned(&canvas, &table, &alignment));
+        assert_eq!(
+            paint_table_aligned(&mut canvas, &table, &alignment, true, 0),
+            2
+        );
+        let text = canvas.display_with(Profile::Disabled).to_string();
+        assert!(text.contains("#12345678901234567890"));
+        assert!(text.contains("PR"));
+        assert!(!text.contains("BRANCH"));
     }
 
     #[test]
@@ -1281,7 +1301,7 @@ mod tests {
                 Cell::plain("3"),
             ]],
         };
-        for width in MIN_WIDTH..=80 {
+        for width in 24..=80 {
             let output = encode(width, 2, Profile::Disabled, |canvas| {
                 paint_table(canvas, &table, true, 0);
             });

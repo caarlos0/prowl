@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_queue_preserves_missing_check_counts_for_row_priority() {
+    fn cached_queue_preserves_missing_check_counts() {
         let data: crate::model::QueueData =
             crate::github::parse_graphql(include_bytes!("../tests/fixtures/queue_populated.json"))
                 .unwrap();

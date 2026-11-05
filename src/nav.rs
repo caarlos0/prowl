@@ -185,24 +185,10 @@ fn groups<'a>(
             prs_group(
                 when_visible(s.prs.as_deref(), visible.prs),
                 &q,
-                visible.queue.is_some(),
+                visible.queue,
             ),
-            visible.queue.map_or_else(Vec::new, |mode| {
-                s.queue.as_deref().map_or_else(Vec::new, |rows| {
-                    mode.iter(rows)
-                        .filter(|row| hit(&row.haystack(), &q))
-                        .map(Searchable::target)
-                        .collect()
-                })
-            }),
-            visible.merged.map_or_else(Vec::new, |shown| {
-                group(
-                    s.merged
-                        .as_deref()
-                        .map(|rows| &rows[..shown.min(rows.len())]),
-                    &q,
-                )
-            }),
+            group(when_visible(s.queue.as_deref(), visible.queue), &q),
+            group(when_visible(s.merged.as_deref(), visible.merged), &q),
             if visible.shipments {
                 shipments(s, &q)
             } else {
@@ -569,8 +555,8 @@ mod tests {
         s.merged = Some(vec![merged(3)]);
         let visible = Visibility {
             prs: true,
-            queue: None,
-            merged: None,
+            queue: false,
+            merged: false,
             shipments: false,
             reviews: false,
             reviewed_merged: false,
@@ -594,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_sections_expose_only_rendered_targets() {
+    fn full_sections_include_offscreen_targets_in_display_order() {
         let mut building = queued(1);
         building.mine = false;
         building.checks.running = 1;
@@ -605,33 +591,25 @@ mod tests {
         let mut s = empty();
         s.queue = Some(vec![building, mine, other]);
         s.merged = Some(vec![merged(4), merged(5)]);
-        let mut visible = Visibility::all(&s);
-        visible.queue = Some(crate::queue::VisibleRows::limited(
-            s.queue.as_deref().unwrap(),
-            2,
-        ));
-        visible.merged = Some(1);
+        let visible = Visibility::all(&s);
 
         assert_eq!(
             urls(targets_visible(View::Mine, &s, "", visible)),
-            vec!["https://q/1", "https://q/2", "https://m/4"]
+            vec![
+                "https://q/1",
+                "https://q/2",
+                "https://q/3",
+                "https://m/4",
+                "https://m/5"
+            ]
         );
         assert_eq!(
             urls(section_at_visible(View::Mine, &s, "", 0, visible)),
-            vec!["https://q/1", "https://q/2"]
+            vec!["https://q/1", "https://q/2", "https://q/3"]
         );
         assert_eq!(
-            urls(section_at_visible(View::Mine, &s, "", 2, visible)),
-            vec!["https://m/4"]
-        );
-
-        visible.queue = Some(crate::queue::VisibleRows::limited(
-            s.queue.as_deref().unwrap(),
-            1,
-        ));
-        assert_eq!(
-            urls(targets_visible(View::Mine, &s, "", visible)),
-            vec!["https://q/1", "https://m/4"]
+            urls(section_at_visible(View::Mine, &s, "", 3, visible)),
+            vec!["https://m/4", "https://m/5"]
         );
     }
 
@@ -644,20 +622,12 @@ mod tests {
         let mine_c = queued(3);
         let mut s = empty();
         s.queue = Some(vec![building, mine_b, mine_c]);
-        let mut visible = Visibility::all(&s);
-        visible.queue = Some(crate::queue::VisibleRows::limited(
-            s.queue.as_deref().unwrap(),
-            2,
-        ));
+        let visible = Visibility::all(&s);
 
         let selected = targets_visible(View::Mine, &s, "", visible)[1]
             .url
             .to_string();
-        s.queue.as_mut().unwrap()[0].checks.running = 0;
-        visible.queue = Some(crate::queue::VisibleRows::limited(
-            s.queue.as_deref().unwrap(),
-            2,
-        ));
+        s.queue.as_mut().unwrap().remove(0);
 
         assert_eq!(
             target_index(View::Mine, &s, "", visible, &selected),
@@ -679,7 +649,7 @@ mod tests {
             urls(targets_visible(View::Mine, &s, "", visible)),
             vec!["https://q/1"]
         );
-        visible.queue = None;
+        visible.queue = false;
         assert_eq!(
             urls(targets_visible(View::Mine, &s, "", visible)),
             vec!["https://pr/1"]

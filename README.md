@@ -38,8 +38,7 @@ counts only in its reported state, not twice.
 Merge-queue entries get the same semaphore for their speculative merge commit,
 next to how long they've been queued and how long that build has been running.
 Required checks count in `RUN` even before that commit exists; `BUILD` stays
-`—` until a job starts. Missing checks do not give a waiting row the
-height-limited layout's priority for building entries.
+`—` until a job starts. The queue keeps every entry in position order.
 Use `--required` to count only checks required to merge each pull request; in
 the merge queue, `BUILD` then starts at the first required job.
 
@@ -51,8 +50,8 @@ hides drafts. Each PR number is a clickable link to the PR. Tables use the full
 terminal width, giving most space to the title and then the optional branch. As
 the terminal gets narrower, detail columns disappear from the right; the
 `FAIL` / `RUN` / `PASS` semaphore always disappears as one group.
-`+ resize for more` in the footer means a wider or taller terminal would reveal
-more information.
+`+ resize for more` in the footer means a wider terminal would reveal more information.
+There is no minimum terminal size. Very narrow terminals clip mandatory columns.
 
 ## Install
 
@@ -125,17 +124,11 @@ to the bottom of the screen (`^R refresh (every 5m) - tab switch view - enter op
 - r/R read - y copy - / search - ? help`) shows the keys and the refresh interval.
 `^R` means `Ctrl-R`. While a refresh is in flight the hint reads `^R refreshing`
 and `Ctrl-R` presses are ignored until it finishes. On narrow screens the footer removes low-priority labels and
-hints instead of clipping. When height is limited, prowl first hides the help legend,
-then lower-priority sections. In the PR view it hides shipments, then trims the
-merged list from the oldest rows down to the newest row plus a `+N hidden`
-line. The merge queue then removes only as many rows as needed, keeping
-building PRs first, then your PRs, then other entries. Within each group,
-entries nearer the front of the queue stay visible first. The displayed rows
-remain in queue order, with a hidden count, and use the available height
-before the section disappears. In the reviews view it hides
-reviewed-and-merged PRs. The open PR section is always kept whole. If that
-section or the minimum useful columns do not fit, prowl shows
-`Terminal too small` with the minimum required dimensions. The legend is contextual to the active view:
+hints instead of clipping. The body scrolls vertically to keep the selected row visible.
+Every enabled section stays available in both views, regardless of terminal size.
+The search prompt, status line, and footer stay at the bottom.
+Press `?` to show help at the top of the scrolling body.
+The legend is contextual to the active view:
 approval glyphs and the conflict marker for your PRs, review glyphs for your
 reviews.
 
@@ -143,11 +136,12 @@ Move the selection cursor through the listed PRs and releases with `j`/`k` (or
 `↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a
 page; press `Enter` to open the highlighted PR (or release) in your browser. The
 cursor only appears once you start moving it, and stays on the same URL when the
-terminal is resized if that row remains visible.
+terminal is resized or refreshed if that URL still exists.
+One-shot and piped output keep the full dashboard height.
 
-Press `Shift+Enter` to open every visible link in the selected section, like
+Press `Shift+Enter` to open every matching link in the selected section, like
 `Y` does for copying. It uses the first non-empty section when nothing is
-selected and honors the current filter and hidden-row limits. Links open in
+selected and honors the current filter, including offscreen rows. Links open in
 display order; if an opener fails, prowl stops opening the remaining links
 and shows the failed link.
 This shortcut requires a terminal that can report `Shift+Enter` separately
@@ -156,7 +150,7 @@ terminal sends plain `Enter` instead, only the selected link opens. While
 typing a search, either key applies the filter without opening links.
 
 Changed PRs keep their `▸` marker (`>` in ASCII mode) until you press `r` to
-mark the selected PR as read, or `R` to mark all PRs as read, including hidden
+mark the selected PR as read, or `R` to mark all PRs as read, including offscreen
 and filtered rows. Refreshing, moving the selection, opening a PR, switching
 views, and failed refreshes do not clear markers. With no PR selected, `r`
 does nothing. Markers last only for the current session and track your PRs,

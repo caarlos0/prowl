@@ -51,6 +51,8 @@ task screenshot                      # regenerate, upload, and relink it
 
 cargo run --example demo             # or just print the "my PRs" view
 cargo run --example demo -- reviews  # ...and the reviews view
+cargo run --example demo -- scroll   # top/bottom eight-row watch frames
+cargo run --example demo -- reviews scroll
 ```
 
 `task screenshot` needs [vhs](https://github.com/charmbracelet/vhs) (and the

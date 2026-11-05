@@ -91,8 +91,8 @@ pub struct Sections {
 }
 
 impl Sections {
-    /// Every section disabled — painted as just the bottom (error/footer/help)
-    /// when a fetch fails before any data has arrived.
+    /// Every section disabled — only status, footer, and optional help remain
+    /// when a fetch fails before any data arrives.
     const EMPTY: Sections = Sections {
         merged: None,
         queue: None,
@@ -107,8 +107,8 @@ impl Sections {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Visibility {
     pub(crate) prs: bool,
-    pub(crate) queue: Option<queue::VisibleRows>,
-    pub(crate) merged: Option<usize>,
+    pub(crate) queue: bool,
+    pub(crate) merged: bool,
     pub(crate) shipments: bool,
     pub(crate) reviews: bool,
     pub(crate) reviewed_merged: bool,
@@ -118,81 +118,11 @@ impl Visibility {
     pub(crate) fn all(sections: &Sections) -> Self {
         Self {
             prs: sections.prs.is_some(),
-            queue: sections.queue.as_ref().map(|_| queue::VisibleRows::ALL),
-            merged: sections.merged.as_ref().map(Vec::len),
+            queue: sections.queue.is_some(),
+            merged: sections.merged.is_some(),
             shipments: sections.commits.is_some(),
             reviews: sections.reviews.is_some(),
             reviewed_merged: sections.reviewed_merged.is_some(),
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-struct ResponsiveLayout {
-    visible: Visibility,
-    show_help: bool,
-    constrained: bool,
-    too_small: bool,
-    required_height: u16,
-}
-
-fn section_height<T>(rows: Option<&[T]>, visible: bool) -> usize {
-    if visible && let Some(rows) = rows {
-        rows.len() + 3
-    } else {
-        0
-    }
-}
-
-fn limited_section_height(total: usize, shown: Option<usize>) -> usize {
-    shown.map_or(0, |shown| {
-        if shown == 0 {
-            3
-        } else {
-            shown + 3 + usize::from(shown < total)
-        }
-    })
-}
-
-fn body_height(sections: &Sections, view: View, visible: Visibility, tabs: bool) -> usize {
-    let top = usize::from(tabs) * 2;
-    top + match view {
-        View::Mine => {
-            let prs = if visible.prs {
-                sections.prs.as_ref().map_or(0, |rows| {
-                    if visible.queue.is_some() {
-                        rows.iter().filter(|row| row.queue.is_none()).count()
-                    } else {
-                        rows.len()
-                    }
-                }) + 3
-            } else {
-                0
-            };
-            let queue = sections.queue.as_deref().map_or(0, |rows| {
-                limited_section_height(rows.len(), visible.queue.map(|mode| mode.count(rows)))
-            });
-            let merged = sections
-                .merged
-                .as_deref()
-                .map_or(0, |rows| limited_section_height(rows.len(), visible.merged));
-            prs + queue
-                + merged
-                + if visible.shipments {
-                    sections.commits.as_ref().map_or(0, |stats| {
-                        if stats.available {
-                            stats.releases.len() + 3
-                        } else {
-                            2
-                        }
-                    })
-                } else {
-                    0
-                }
-        }
-        View::Reviews => {
-            section_height(sections.reviews.as_deref(), visible.reviews)
-                + section_height(sections.reviewed_merged.as_deref(), visible.reviewed_merged)
         }
     }
 }
@@ -208,97 +138,6 @@ fn bottom_height(ui: &Ui, status: &str, footer: Option<(&str, bool)>, show_help:
     };
     let gaps = (lines + usize::from(show_help)).saturating_sub(1);
     lines + help + gaps
-}
-
-#[allow(clippy::too_many_arguments)]
-fn responsive_layout(
-    width: u16,
-    rows: u16,
-    sections: &Sections,
-    ui: &Ui,
-    status: &str,
-    footer: Option<(&str, bool)>,
-    tabs: bool,
-    pinned: bool,
-) -> ResponsiveLayout {
-    let all = Visibility::all(sections);
-    if !pinned {
-        return ResponsiveLayout {
-            visible: all,
-            show_help: ui.show_help,
-            constrained: false,
-            too_small: false,
-            required_height: 0,
-        };
-    }
-
-    let mut visible = all;
-    let mut show_help = ui.show_help;
-    let fits = |visible, show_help| {
-        body_height(sections, ui.view, visible, tabs) + bottom_height(ui, status, footer, show_help)
-            <= usize::from(rows)
-    };
-
-    if !fits(visible, show_help) {
-        show_help = false;
-    }
-    if !fits(visible, show_help) {
-        match ui.view {
-            View::Mine => {
-                let protect_shipments = !all.prs && all.queue.is_none() && all.merged.is_none();
-                if !protect_shipments {
-                    visible.shipments = false;
-                }
-                if !fits(visible, show_help)
-                    && let Some(shown) = visible.merged
-                {
-                    for keep in (1..shown).rev() {
-                        visible.merged = Some(keep);
-                        if fits(visible, show_help) {
-                            break;
-                        }
-                    }
-                    if !fits(visible, show_help) {
-                        visible.merged = None;
-                    }
-                }
-                if !fits(visible, show_help)
-                    && let (Some(rows), Some(_)) = (sections.queue.as_deref(), visible.queue)
-                {
-                    for keep in (0..rows.len()).rev() {
-                        visible.queue = Some(queue::VisibleRows::limited(rows, keep));
-                        if fits(visible, show_help) {
-                            break;
-                        }
-                    }
-                    if !fits(visible, show_help) {
-                        visible.queue = None;
-                    }
-                }
-            }
-            View::Reviews => {
-                if all.reviews {
-                    visible.reviewed_merged = false;
-                }
-            }
-        }
-    }
-
-    let required_height = (body_height(sections, ui.view, visible, tabs)
-        + bottom_height(ui, status, footer, show_help))
-    .min(usize::from(u16::MAX)) as u16;
-    let too_small = width < render::MIN_WIDTH || required_height > rows;
-    ResponsiveLayout {
-        visible: if too_small {
-            Visibility::default()
-        } else {
-            visible
-        },
-        show_help,
-        constrained: show_help != ui.show_help || visible != all,
-        too_small,
-        required_height,
-    }
 }
 
 /// Fetch the sections for the requested views. `want_mine` covers the Mine view
@@ -388,16 +227,14 @@ fn fetch(
 }
 
 /// Paint one PR section onto `s` at row `top`: a counted header (with an optional
-/// dim note), then either its table or, when empty, a dim placeholder. A partial
-/// section adds a dim `+N hidden` row before the trailing blank. Returns the next
-/// free row.
+/// dim note), then either its table or, when empty, a dim placeholder.
+/// Returns the next free row.
 #[allow(clippy::too_many_arguments)]
 fn paint_section(
     s: &mut impl TextSurface,
     title: &str,
     accent: Color,
     count: usize,
-    hidden: usize,
     note: Option<&str>,
     empty_msg: &str,
     table: Option<&render::Table>,
@@ -406,33 +243,19 @@ fn paint_section(
     top: u16,
 ) -> u16 {
     let y = render::paint_header(s, title, accent, Some(&count.to_string()), note, ascii, top);
-    let y = match (table, hidden) {
-        (Some(table), _) => render::paint_table_aligned(s, table, alignment, ascii, y),
-        (None, 0) => render::paint_dim_at(s, empty_msg, render::ROW_INDENT, y),
-        (None, _) => y,
-    };
-    let y = if hidden > 0 {
-        render::paint_dim_at(s, &format!("+{hidden} hidden"), render::ROW_INDENT, y)
-    } else {
-        y
+    let y = match table {
+        Some(table) => render::paint_table_aligned(s, table, alignment, ascii, y),
+        None => render::paint_dim_at(s, empty_msg, render::ROW_INDENT, y),
     };
     y + 1
 }
 
-fn table_state(
-    s: &impl TextSurface,
-    tables: &[&render::Table],
-) -> (render::TableAlignment, bool, u16) {
+fn table_state(s: &impl TextSurface, tables: &[&render::Table]) -> (render::TableAlignment, bool) {
     let alignment = render::table_alignment(s, tables);
     let compact = tables
         .iter()
         .any(|table| render::table_is_compact_aligned(s, table, &alignment));
-    let required_width = tables
-        .iter()
-        .map(|table| render::table_required_width(s, table, &alignment))
-        .max()
-        .unwrap_or(0);
-    (alignment, compact, required_width)
+    (alignment, compact)
 }
 
 /// Whether `table` has a `local`-th row — i.e. whether the selection landed on
@@ -470,10 +293,9 @@ fn mine_selection(
 }
 
 /// The Mine view: My open PRs, Merge Queue, My merged PRs, then My Shipments.
-/// Each visible section shows its header (with the full count); an empty section
-/// follows it with a dim placeholder, and a partial section ends with a hidden
-/// count. Returns the next free row and the row the selection caret landed on,
-/// if any.
+/// Each enabled section shows its header and full count.
+/// Empty sections show a dim placeholder. Returns the next free row and the
+/// selected row, if any.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn paint_mine(
     s: &mut impl TextSurface,
@@ -484,9 +306,9 @@ fn paint_mine(
     show_branch: bool,
     visible: Visibility,
     top: u16,
-) -> (u16, Option<u16>, bool, u16) {
+) -> (u16, Option<u16>, bool) {
     let prs_rows = sections.prs.as_deref().filter(|_| visible.prs).map(|rows| {
-        if visible.queue.is_some() {
+        if visible.queue {
             Cow::Owned(prs::without_queued(rows.to_vec()))
         } else {
             Cow::Borrowed(rows)
@@ -496,26 +318,11 @@ fn paint_mine(
         .as_deref()
         .filter(|r| !r.is_empty())
         .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, show_branch));
-    let queue_rows = sections
-        .queue
-        .as_deref()
-        .zip(visible.queue)
-        .map(|(rows, mode)| {
-            if mode == queue::VisibleRows::ALL {
-                Cow::Borrowed(rows)
-            } else {
-                Cow::Owned(mode.iter(rows).cloned().collect())
-            }
-        });
+    let queue_rows = sections.queue.as_deref().filter(|_| visible.queue);
     let queue_table = queue_rows
-        .as_deref()
         .filter(|r| !r.is_empty())
         .map(|rows| queue::to_table(rows, ascii, show_branch));
-    let merged_rows = sections
-        .merged
-        .as_deref()
-        .zip(visible.merged)
-        .map(|(rows, shown)| &rows[..shown.min(rows.len())]);
+    let merged_rows = sections.merged.as_deref().filter(|_| visible.merged);
     let merged_table = merged_rows
         .filter(|r| !r.is_empty())
         .map(|rows| merged::to_table(rows, ascii, &changes.newly_merged, show_branch));
@@ -523,13 +330,9 @@ fn paint_mine(
         .into_iter()
         .flatten()
         .collect();
-    let (alignment, compact, required_width) = table_state(s, &tables);
-    if s.bounds().width < required_width {
-        return (top, None, compact, required_width);
-    }
-
+    let (alignment, compact) = table_state(s, &tables);
     let np = prs_rows.as_deref().map_or(0, <[prs::PrRow]>::len);
-    let nq = queue_rows.as_deref().map_or(0, <[queue::QueueRow]>::len);
+    let nq = queue_rows.map_or(0, <[queue::QueueRow]>::len);
     let nm = merged_rows.map_or(0, <[merged::MergedRow]>::len);
     let (prs_sel, queue_sel, merged_sel, ship_sel) = mine_selection(selected, np, nq, nm);
     let prs_sel = prs_sel.filter(|&local| selects_row(prs_table.as_ref(), local));
@@ -545,7 +348,6 @@ fn paint_mine(
             "My open PRs",
             status::GREEN,
             rows.len(),
-            0,
             None,
             "No open PRs.",
             prs_table.as_ref(),
@@ -554,7 +356,7 @@ fn paint_mine(
             y,
         );
     }
-    if let (Some(rows), Some(shown)) = (&sections.queue, queue_rows.as_deref()) {
+    if let Some(rows) = queue_rows {
         // The queue-level ETA (time until a newly added entry would merge) rides
         // alongside the header as a dim note.
         caret = caret.or(queue_sel.map(|l| caret_row(y, l)));
@@ -569,7 +371,6 @@ fn paint_mine(
             "Merge Queue",
             status::PEACH,
             rows.len(),
-            rows.len() - shown.len(),
             eta.as_deref(),
             "No merge queue.",
             queue_table.as_ref(),
@@ -578,14 +379,13 @@ fn paint_mine(
             y,
         );
     }
-    if let (Some(rows), Some(shown)) = (&sections.merged, merged_rows) {
+    if let Some(rows) = merged_rows {
         caret = caret.or(merged_sel.map(|l| caret_row(y, l)));
         y = paint_section(
             s,
             "My merged PRs",
             status::MAUVE,
             rows.len(),
-            rows.len() - shown.len(),
             None,
             "No recent merged PRs.",
             merged_table.as_ref(),
@@ -601,12 +401,12 @@ fn paint_mine(
         y = next + 1;
         caret = caret.or(ship_caret);
     }
-    (y, caret, compact, required_width)
+    (y, caret, compact)
 }
 
 /// The Reviews view: PRs to review (with a per-row review-state glyph), then
 /// merged PRs I reviewed. Returns the next free row, the selection caret, and
-/// whether the width hid information or could not fit the mandatory columns.
+/// whether the width hid information.
 fn paint_reviews(
     s: &mut impl TextSurface,
     sections: &Sections,
@@ -615,7 +415,7 @@ fn paint_reviews(
     show_branch: bool,
     visible: Visibility,
     top: u16,
-) -> (u16, Option<u16>, bool, u16) {
+) -> (u16, Option<u16>, bool) {
     let open_table = sections
         .reviews
         .as_ref()
@@ -629,11 +429,7 @@ fn paint_reviews(
         .filter(|r| !r.is_empty())
         .map(|rows| reviews::merged_to_table(rows, ascii, show_branch));
     let tables: Vec<&render::Table> = [&open_table, &merged_table].into_iter().flatten().collect();
-    let (alignment, compact, required_width) = table_state(s, &tables);
-    if s.bounds().width < required_width {
-        return (top, None, compact, required_width);
-    }
-
+    let (alignment, compact) = table_state(s, &tables);
     // The open reviews come first, then the reviewed & merged rows, so a
     // selection index past the open rows indexes the latter.
     let (mut open_sel, mut merged_sel) = (None, None);
@@ -662,7 +458,6 @@ fn paint_reviews(
             "Reviews",
             status::LAVENDER,
             rows.len(),
-            0,
             None,
             "No PRs to review.",
             open_table.as_ref(),
@@ -680,7 +475,6 @@ fn paint_reviews(
             "Reviewed & merged",
             status::MAUVE,
             rows.len(),
-            0,
             None,
             "No reviewed PRs merged recently.",
             merged_table.as_ref(),
@@ -689,7 +483,7 @@ fn paint_reviews(
             y,
         );
     }
-    (y, caret, compact, required_width)
+    (y, caret, compact)
 }
 
 /// Paint the dashboard's body onto `s` from row `top`: the watch-only tab strip
@@ -699,8 +493,7 @@ fn paint_reviews(
 /// selects letters/parens over Nerd Font glyphs/bars; colors are written as
 /// styles and downsampled by the surface's `Profile` at encode/render time.
 ///
-/// Returns the next free row, the selection caret, whether width hid
-/// information, and the width required by all mandatory columns.
+/// Returns the next free row, the selection caret, and whether width hid information.
 #[allow(clippy::too_many_arguments)]
 fn paint_body(
     s: &mut impl TextSurface,
@@ -711,12 +504,12 @@ fn paint_body(
     tabs: bool,
     visible: Visibility,
     top: u16,
-) -> (u16, Option<u16>, bool, u16) {
+) -> (u16, Option<u16>, bool) {
     let mut y = top;
     if tabs {
         y = render::paint_tabs(s, ui.view, ascii, y) + 1;
     }
-    let (y, caret, compact, required_width) = match ui.view {
+    let (y, caret, compact) = match ui.view {
         View::Mine => paint_mine(
             s,
             sections,
@@ -734,15 +527,12 @@ fn paint_body(
     if let Some(row) = caret {
         render::highlight_row(s, row);
     }
-    (y, caret, compact, required_width)
+    (y, caret, compact)
 }
 
-/// Paint the dashboard's bottom block onto `s` from row `top`: the help legend,
-/// the optional search prompt, `error:` line, then the footer last — the legend
-/// explains the keys the footer lists, so it reads above them rather than
-/// pushing them up. Each part is separated from the previous by one blank row
-/// (the body's trailing blank serves as the first). While watching this block is
-/// pinned to the last rows of the screen.
+/// Paint the bottom block from row `top`: optional one-shot help, search prompt,
+/// status, then footer. A blank row separates each part. The watch pins the
+/// search prompt, status, and footer to the last screen rows.
 ///
 /// Returns the next free row and, while the search prompt is capturing, where
 /// the terminal's own cursor should rest (relative to `s`).
@@ -806,9 +596,9 @@ fn paint_dashboard(
     status: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
-) -> (u16, Option<Position>, u16) {
+) -> (u16, Option<Position>) {
     let visible = Visibility::all(sections);
-    let (y, _, compact, required_width) = paint_body(
+    let (y, _, compact) = paint_body(
         s,
         sections,
         ui,
@@ -830,7 +620,7 @@ fn paint_dashboard(
         compact,
         y,
     );
-    (used, caret, required_width)
+    (used, caret)
 }
 
 /// A safe upper bound on the dashboard body's height, used to size a surface
@@ -888,33 +678,63 @@ fn bottom_bound(ui: &Ui) -> u16 {
     n as u16
 }
 
-fn too_small_message(required_width: u16, required_height: u16) -> String {
-    format!("Terminal too small — need {required_width}×{required_height}.")
-}
-
-fn paint_too_small(
-    screen: &mut Screen<Stdout>,
-    width: Option<u16>,
-    required_width: u16,
-    required_height: u16,
-) {
-    if let Some(width) = width {
-        screen.resize((width, 1));
-    }
-    screen.clear();
-    render::paint_dim(
-        screen,
-        &too_small_message(required_width, required_height),
+/// Paint a watch frame at the surface's dimensions. The body scrolls to the
+/// selection; the search prompt, status, and footer stay at the bottom.
+/// Help belongs to the scrolling body so it cannot consume the entire viewport.
+/// The caller must clear the surface first.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_watch_frame(
+    screen: &mut impl TextSurface,
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    status: &str,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+) -> Option<Position> {
+    let bounds = screen.bounds();
+    let visible = Visibility::all(sections);
+    let mut body = staging_buffer(screen, bounds.width, height_bound(sections, ui).max(1));
+    let top = if ui.show_help {
+        render::paint_help(&mut body, ui.view, ascii, 0) + 1
+    } else {
+        0
+    };
+    let (body_h, selected, compact) =
+        paint_body(&mut body, sections, ui, changes, ascii, true, visible, top);
+    let bottom_h = bottom_height(ui, status, footer, false) as u16;
+    let mut bottom = staging_buffer(screen, bounds.width, bottom_h.max(1));
+    let (bottom_h, caret) = paint_bottom(
+        &mut bottom,
+        sections,
+        ui,
+        status,
+        footer,
+        ascii,
+        false,
+        visible,
+        compact,
         0,
     );
-    screen.clear_cursor_position();
+    let (top, cut) = render::compose(
+        screen,
+        &mut body,
+        body_h,
+        &mut bottom,
+        bottom_h,
+        bounds.height,
+        selected,
+    );
+    caret
+        .filter(|p| p.y >= cut)
+        .map(|p| Position::new(p.x.min(bounds.width.saturating_sub(1)), top + p.y - cut))
 }
 
 /// Paint the dashboard onto a `Screen` and render it.
 ///
 /// `pinned` is the watch layout: the screen is the whole terminal, the bottom
-/// block (search prompt, error line, footer, help) is glued to its last rows,
-/// and the body drops lower-priority sections until it fits. Unpinned
+/// block (search prompt, error line, footer) is glued to its last rows,
+/// and the body scrolls to the selected row. Unpinned
 /// — the inline interactive one-shot — the screen is instead sized to the
 /// dashboard's own height and the two are painted as one run of rows.
 ///
@@ -936,83 +756,16 @@ fn render_dashboard(
         // per frame. Refitting here would only re-query the terminal size on
         // every redraw (and, before uncurses 0.0.2, force a clear + full
         // repaint — the flicker this replaced).
-        let (w, rows) = (screen.width().max(1), screen.height().max(1));
-        let layout = responsive_layout(w, rows, sections, ui, status, footer, true, true);
-        if layout.too_small {
-            paint_too_small(screen, None, render::MIN_WIDTH, layout.required_height);
-            screen.render()?;
-            return Ok(None);
-        }
-
-        // Body and bottom are painted into their own buffers because the frame
-        // places them independently and pins the bottom to the last rows.
-        let mut body = staging_buffer(screen, w, height_bound(sections, ui).max(1));
-        let (body_h, sel, compact, required_width) = paint_body(
-            &mut body,
-            sections,
-            ui,
-            changes,
-            ascii,
-            true,
-            layout.visible,
-            0,
-        );
-        let required_width = required_width.max(render::MIN_WIDTH);
-        if w < required_width {
-            paint_too_small(screen, None, required_width, layout.required_height);
-            screen.render()?;
-            return Ok(None);
-        }
-        let mut bottom = staging_buffer(screen, w, bottom_bound(ui).max(1));
-        let (bottom_h, at) = paint_bottom(
-            &mut bottom,
-            sections,
-            ui,
-            status,
-            footer,
-            ascii,
-            layout.show_help,
-            layout.visible,
-            layout.constrained || compact,
-            0,
-        );
-
         screen.clear();
-        let (top, cut) =
-            render::compose(screen, &mut body, body_h, &mut bottom, bottom_h, rows, sel);
-        // The prompt's caret is relative to the bottom block, which just moved —
-        // and whose head may have been cut off on a short terminal, taking the
-        // prompt with it.
-        at.filter(|p| p.y >= cut)
-            .map(|p| Position::new(p.x, top + (p.y - cut)))
+        paint_watch_frame(screen, sections, ui, changes, status, footer, ascii)
     } else {
         let w = screen.width().max(1);
-        let required_height = (body_height(
-            sections,
-            ui.view,
-            Visibility::all(sections),
-            footer.is_some(),
-        ) + bottom_height(ui, status, footer, ui.show_help))
-        .min(usize::from(u16::MAX)) as u16;
-        if w < render::MIN_WIDTH {
-            paint_too_small(screen, Some(w), render::MIN_WIDTH, required_height);
-            None
-        } else {
-            // Grow tall enough to paint everything, paint, then shrink to the height
-            // actually used so the surface is exactly the dashboard's line count.
-            screen.resize((w, (height_bound(sections, ui) + bottom_bound(ui)).max(1)));
-            screen.clear();
-            let (used, caret, required_width) =
-                paint_dashboard(screen, sections, ui, changes, status, footer, ascii);
-            let required_width = required_width.max(render::MIN_WIDTH);
-            if w >= required_width {
-                screen.resize((w, used.max(1)));
-                caret
-            } else {
-                paint_too_small(screen, Some(w), required_width, required_height);
-                None
-            }
-        }
+        // Inline output keeps its full height, even on a short terminal.
+        screen.resize((w, (height_bound(sections, ui) + bottom_bound(ui)).max(1)));
+        screen.clear();
+        let (used, caret) = paint_dashboard(screen, sections, ui, changes, status, footer, ascii);
+        screen.resize((w, used.max(1)));
+        caret
     };
     // Steer the terminal's own cursor to the prompt, so the search line gets a
     // real (blinking, shape-honoring) cursor instead of a painted stand-in.
@@ -1040,15 +793,8 @@ pub fn render_to_string(
     let w = render::OUTPUT_WIDTH as u16;
     let mut canvas = TextBuffer::new(w, height_bound(sections, ui) + bottom_bound(ui));
     // One-shot output never searches, so there is no caret to place.
-    let (used, _, required_width) =
-        paint_dashboard(&mut canvas, sections, ui, changes, "", footer, ascii);
-    let required_width = required_width.max(render::MIN_WIDTH);
-    if w >= required_width {
-        canvas.resize(w, used.max(1));
-    } else {
-        canvas = TextBuffer::new(w, 1);
-        render::paint_dim(&mut canvas, &too_small_message(required_width, used), 0);
-    }
+    let (used, _) = paint_dashboard(&mut canvas, sections, ui, changes, "", footer, ascii);
+    canvas.resize(w, used.max(1));
 
     let mut out = Vec::new();
     canvas
@@ -1533,6 +1279,23 @@ impl Ui {
         } else {
             buf.insert(nav::filter(good, &self.search))
         }
+    }
+
+    fn selected_url(&self, good: &Sections) -> Option<String> {
+        let selected = self.selected?;
+        let mut filtered = None;
+        let shown = self.shown(good, &mut filtered);
+        nav::targets_visible(self.view, shown, &self.search, Visibility::all(shown))
+            .get(selected)
+            .map(|target| target.url.to_string())
+    }
+
+    fn restore_selection(&mut self, good: &Sections, url: Option<&str>) {
+        self.selected = url.and_then(|url| {
+            let mut filtered = None;
+            let shown = self.shown(good, &mut filtered);
+            nav::target_index(self.view, shown, &self.search, Visibility::all(shown), url)
+        });
     }
 
     fn targets<'a>(
@@ -2091,43 +1854,17 @@ impl<'a> App<'a> {
         };
         let mut filtered = None;
         let shown = self.ui.shown(good, &mut filtered);
-        let visible = self.visible_sections(shown);
+        let visible = Visibility::all(shown);
         nav::targets_visible(self.ui.view, shown, &self.ui.search, visible).len()
     }
 
-    fn visible_sections(&self, sections: &Sections) -> Visibility {
-        responsive_layout(
-            self.program.screen().width().max(1),
-            self.program.screen().height().max(1),
-            sections,
-            &self.ui,
-            &self.last_status,
-            Some((self.eta.as_str(), self.refreshing)),
-            true,
-            self.in_alt,
-        )
-        .visible
-    }
-
     fn selected_url(&self) -> Option<String> {
-        let selected = self.ui.selected?;
-        let good = self.last_good.as_ref()?;
-        let mut filtered = None;
-        let shown = self.ui.shown(good, &mut filtered);
-        let visible = self.visible_sections(shown);
-        nav::targets_visible(self.ui.view, shown, &self.ui.search, visible)
-            .get(selected)
-            .map(|target| target.url.to_string())
+        self.ui.selected_url(self.last_good.as_ref()?)
     }
 
     fn restore_selection(&mut self, url: Option<&str>) {
-        self.ui.selected = url.and_then(|url| {
-            let good = self.last_good.as_ref()?;
-            let mut filtered = None;
-            let shown = self.ui.shown(good, &mut filtered);
-            let visible = self.visible_sections(shown);
-            nav::target_index(self.ui.view, shown, &self.ui.search, visible, url)
-        });
+        self.ui
+            .restore_selection(self.last_good.as_ref().unwrap_or(&Sections::EMPTY), url);
     }
 
     /// The half-page movement step: half the terminal window's rows.
@@ -2144,7 +1881,7 @@ impl<'a> App<'a> {
         };
         let mut filtered = None;
         let shown = self.ui.shown(good, &mut filtered);
-        let visible = self.visible_sections(shown);
+        let visible = Visibility::all(shown);
         let Some((text, n)) = self
             .ui
             .copy_text(shown, visible, &self.cli.link_format, section)
@@ -2167,7 +1904,7 @@ impl<'a> App<'a> {
         };
         let mut filtered = None;
         let shown = self.ui.shown(good, &mut filtered);
-        let visible = self.visible_sections(shown);
+        let visible = Visibility::all(shown);
         if let Err(e) = self.ui.open_links(shown, visible, section, open::url) {
             self.last_status = format!("error: open failed: {e:#}");
             self.ui.selected = None;
@@ -2180,7 +1917,7 @@ impl<'a> App<'a> {
         let good = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
         let mut filtered = None;
         let shown = self.ui.shown(good, &mut filtered);
-        let visible = self.visible_sections(shown);
+        let visible = Visibility::all(shown);
         self.ui.mark_read(shown, visible, &mut self.unread, all);
         self.repaint_last()
     }
@@ -2247,7 +1984,7 @@ mod tests {
     /// Paint a dashboard onto an offscreen buffer and read it back as plain text.
     fn body(sections: &Sections, ui: &Ui) -> String {
         let mut canvas = TextBuffer::new(render::OUTPUT_WIDTH as u16, 64);
-        let (used, _, required_width) = paint_dashboard(
+        let (used, _) = paint_dashboard(
             &mut canvas,
             sections,
             ui,
@@ -2256,7 +1993,6 @@ mod tests {
             None,
             true,
         );
-        assert!(required_width <= render::OUTPUT_WIDTH as u16);
         canvas.resize(render::OUTPUT_WIDTH as u16, used.max(1));
         canvas.display_with(Profile::Disabled).to_string()
     }
@@ -2503,6 +2239,19 @@ mod tests {
         }
     }
 
+    fn review_row(n: i64) -> reviews::ReviewRow {
+        reviews::ReviewRow {
+            number: n,
+            title: format!("review-{n:02}"),
+            branch: String::new(),
+            author: "other".into(),
+            url: format!("https://review/{n}"),
+            state: status::ReviewState::Awaiting,
+            is_draft: false,
+            updated_at: None,
+        }
+    }
+
     #[test]
     fn mark_read_clears_only_the_selected_visible_pr() {
         let sections = Sections {
@@ -2512,22 +2261,32 @@ mod tests {
             ..Sections::EMPTY
         };
         let mut ui = ui(View::Mine);
-        let mut visible = Visibility::all(&sections);
-        visible.queue = Some(queue::VisibleRows::limited(
-            sections.queue.as_deref().unwrap(),
-            1,
-        ));
-        visible.merged = Some(1);
+        let visible = Visibility::all(&sections);
         let mut unread = Changes {
             status_changed: [1, 2].into(),
             newly_merged: [3, 4].into(),
         };
-        // The queued open PR is deduplicated and queue #2 is hidden: index 1 is #3.
-        ui.selected = Some(1);
+        // The queued open PR is deduplicated: index 2 is the first merged PR.
+        ui.selected = Some(2);
+        let frame = watch_frame(&sections, &ui, 120, 2);
+        assert!(
+            frame
+                .display_with(Profile::Disabled)
+                .to_string()
+                .contains("merged-3")
+        );
+        assert_eq!(
+            ui.copy_text(&sections, visible, "{url}", false),
+            Some(("https://merged/3".into(), 1))
+        );
+        assert_eq!(
+            ui.copy_text(&sections, visible, "{url}", true),
+            Some(("- https://merged/3\n- https://merged/4".into(), 2))
+        );
         ui.mark_read(&sections, visible, &mut unread, false);
         assert_eq!(unread.status_changed, [1, 2].into());
         assert_eq!(unread.newly_merged, [4].into());
-        assert_eq!(ui.selected, Some(1));
+        assert_eq!(ui.selected, Some(2));
 
         ui.selected = Some(0);
         ui.mark_read(&sections, visible, &mut unread, false);
@@ -2700,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn open_and_copy_honor_search_and_visible_row_limits() {
+    fn open_and_copy_include_every_offscreen_search_match() {
         let sections = Sections {
             queue: Some((0..=3).map(|n| queue_row(n, n == 0, false)).collect()),
             ..Sections::EMPTY
@@ -2712,16 +2471,12 @@ mod tests {
         };
         let mut filtered = None;
         let shown = ui.shown(&sections, &mut filtered);
-        let mut visible = Visibility::all(shown);
-        visible.queue = Some(queue::VisibleRows::limited(
-            shown.queue.as_deref().unwrap(),
-            2,
-        ));
+        let visible = Visibility::all(shown);
         assert_eq!(
             ui.copy_text(shown, visible, "[{title}]({url})", true),
             Some((
-                "- [queue-1](https://queue/1)\n- [queue-2](https://queue/2)".into(),
-                2,
+                "- [queue-1](https://queue/1)\n- [queue-2](https://queue/2)\n- [queue-3](https://queue/3)".into(),
+                3,
             ))
         );
         assert_eq!(
@@ -2730,7 +2485,10 @@ mod tests {
         );
         for (section, expected) in [
             (false, vec!["https://queue/2"]),
-            (true, vec!["https://queue/1", "https://queue/2"]),
+            (
+                true,
+                vec!["https://queue/1", "https://queue/2", "https://queue/3"],
+            ),
         ] {
             let mut opened = Vec::new();
             ui.open_links(shown, visible, section, |url| {
@@ -2873,34 +2631,60 @@ mod tests {
         .unwrap();
     }
 
-    fn visible_body(sections: &Sections, visible: Visibility) -> String {
-        let mut canvas = TextBuffer::new(render::OUTPUT_WIDTH as u16, 64);
-        let (used, _, _, required_width) = paint_body(
+    fn watch_frame(sections: &Sections, ui: &Ui, width: u16, rows: u16) -> TextBuffer {
+        let mut canvas = TextBuffer::new(width, rows);
+        paint_watch_frame(
             &mut canvas,
             sections,
-            &ui(View::Mine),
+            ui,
             &Changes::default(),
-            true,
-            true,
-            visible,
-            0,
-        );
-        assert!(required_width <= render::OUTPUT_WIDTH as u16);
-        canvas.resize(render::OUTPUT_WIDTH as u16, used.max(1));
-        canvas.display_with(Profile::Disabled).to_string()
-    }
-
-    fn mine_layout(sections: &Sections, rows: u16) -> ResponsiveLayout {
-        responsive_layout(
-            120,
-            rows,
-            sections,
-            &ui(View::Mine),
             "",
             Some(("5m", false)),
             true,
-            true,
-        )
+        );
+        canvas
+    }
+
+    #[test]
+    fn short_terminals_keep_every_section_available_for_scrolling() {
+        let sections = Sections {
+            prs: Some(
+                (1..=30)
+                    .map(|n| {
+                        let mut row = queued_open_row(n);
+                        row.queue = None;
+                        row
+                    })
+                    .collect(),
+            ),
+            queue: Some((1..=30).map(|n| queue_row(n, false, false)).collect()),
+            merged: Some((31..=40).map(merged_row).collect()),
+            commits: Some(commits::CommitStats {
+                available: true,
+                upcoming: Some(commits::Bucket {
+                    count: commits::Count {
+                        mine: 1,
+                        capped: false,
+                    },
+                    url: "https://compare/upcoming".into(),
+                }),
+                releases: vec![],
+            }),
+            ..Sections::EMPTY
+        };
+        let mut ui = ui(View::Mine);
+        let targets = nav::targets_visible(ui.view, &sections, "", Visibility::all(&sections));
+        assert_eq!(targets.len(), 71);
+        for (index, target) in targets.iter().enumerate() {
+            ui.selected = nav::moved(nav::Move::Down, ui.selected, targets.len(), 4);
+            assert_eq!(ui.selected, Some(index));
+            let frame = watch_frame(&sections, &ui, 120, 8);
+            let text = frame.display_with(Profile::Disabled).to_string();
+            assert!(text.contains(target.title), "{index}: {text}");
+            assert!(text.lines().last().unwrap().contains("^R refresh"));
+            assert!(!text.contains("Terminal too small"));
+            assert!(!text.contains("hidden"));
+        }
     }
 
     #[test]
@@ -2967,245 +2751,7 @@ mod tests {
     }
 
     #[test]
-    fn responsive_height_hides_help_before_sections() {
-        let sections = Sections {
-            prs: Some(vec![]),
-            queue: Some(vec![]),
-            merged: Some(vec![]),
-            commits: Some(commits::CommitStats::unavailable()),
-            ..Sections::EMPTY
-        };
-        let ui = Ui {
-            show_help: true,
-            ..ui(View::Mine)
-        };
-        // All four sections plus tabs and footer need 14 rows without help.
-        let layout =
-            responsive_layout(120, 14, &sections, &ui, "", Some(("5m", false)), true, true);
-        assert!(!layout.show_help);
-        assert_eq!(layout.visible, Visibility::all(&sections));
-        assert!(layout.constrained);
-        assert!(!layout.too_small);
-    }
-
-    #[test]
-    fn responsive_height_hides_low_priority_sections_in_order() {
-        let sections = Sections {
-            prs: Some(vec![]),
-            queue: Some(vec![]),
-            merged: Some(vec![]),
-            commits: Some(commits::CommitStats::unavailable()),
-            ..Sections::EMPTY
-        };
-        // After shipments, merged PRs disappear while the merge queue remains.
-        let layout = responsive_layout(
-            120,
-            9,
-            &sections,
-            &ui(View::Mine),
-            "",
-            Some(("5m", false)),
-            true,
-            true,
-        );
-        assert_eq!(
-            layout.visible,
-            Visibility {
-                prs: true,
-                queue: Some(queue::VisibleRows::ALL),
-                merged: None,
-                shipments: false,
-                reviews: false,
-                reviewed_merged: false,
-            }
-        );
-        assert!(layout.constrained);
-        assert!(!layout.too_small);
-
-        // Tabs + the empty open-PR section + footer fit exactly.
-        let layout = responsive_layout(
-            120,
-            6,
-            &sections,
-            &ui(View::Mine),
-            "",
-            Some(("5m", false)),
-            true,
-            true,
-        );
-        assert_eq!(
-            layout.visible,
-            Visibility {
-                prs: true,
-                queue: None,
-                merged: None,
-                shipments: false,
-                reviews: false,
-                reviewed_merged: false,
-            }
-        );
-        assert!(layout.constrained);
-        assert!(!layout.too_small);
-    }
-
-    #[test]
-    fn responsive_height_trims_merged_rows_to_one_before_hiding_them() {
-        let sections = Sections {
-            prs: Some(vec![]),
-            merged: Some((1..=5).map(merged_row).collect()),
-            ..Sections::EMPTY
-        };
-
-        let three = mine_layout(&sections, 13);
-        assert_eq!(three.visible.merged, Some(3));
-
-        let one = mine_layout(&sections, 11);
-        assert_eq!(one.visible.merged, Some(1));
-        let body = visible_body(&sections, one.visible);
-        assert!(body.contains("merged-1"), "newest merged PR should remain");
-        assert!(
-            !body.contains("merged-2"),
-            "older merged PR should be hidden"
-        );
-        assert!(body.contains("+4 hidden"), "hidden count should be shown");
-
-        let none = mine_layout(&sections, 10);
-        assert_eq!(none.visible.merged, None);
-    }
-
-    #[test]
-    fn responsive_height_fills_queue_space_before_hiding_rows() {
-        let sections = Sections {
-            prs: Some(
-                (101..=110)
-                    .map(|n| {
-                        let mut row = queued_open_row(n);
-                        row.queue = None;
-                        row
-                    })
-                    .collect(),
-            ),
-            queue: Some(
-                (1..=47)
-                    .map(|n| queue_row(n, [8, 15, 22, 24, 29, 43, 46].contains(&n), n <= 4))
-                    .collect(),
-            ),
-            ..Sections::EMPTY
-        };
-        let layout = mine_layout(&sections, 60);
-        let expected: Vec<_> = (1..=38)
-            .chain([43, 46])
-            .map(|n| format!("https://queue/{n}"))
-            .collect();
-        assert_eq!(
-            nav::urls(nav::section_at_visible(
-                View::Mine,
-                &sections,
-                "",
-                10,
-                layout.visible
-            )),
-            expected,
-            "use every available queue row, keep building and own PRs, and retain queue order"
-        );
-        assert_eq!(layout.required_height, 60);
-        assert!(!layout.too_small);
-        let mut canvas = TextBuffer::new(120, 60);
-        let (used, _, _, _) = paint_body(
-            &mut canvas,
-            &sections,
-            &ui(View::Mine),
-            &Changes::default(),
-            true,
-            true,
-            layout.visible,
-            0,
-        );
-        assert_eq!(used, 59, "leave only the footer row below the body");
-        let text = canvas.display_with(Profile::Disabled).to_string();
-        assert!(text.lines().nth(57).unwrap().contains("+7 hidden"));
-    }
-
-    #[test]
-    fn responsive_height_fills_single_priority_queues() {
-        for (mine, building) in [(false, false), (true, false), (false, true), (true, true)] {
-            let sections = Sections {
-                prs: Some(vec![]),
-                queue: Some((1..=40).map(|n| queue_row(n, mine, building)).collect()),
-                ..Sections::EMPTY
-            };
-            let layout = mine_layout(&sections, 20);
-            let expected: Vec<_> = (1..=10).map(|n| format!("https://queue/{n}")).collect();
-            assert_eq!(
-                nav::urls(nav::targets_visible(
-                    View::Mine,
-                    &sections,
-                    "",
-                    layout.visible
-                )),
-                expected,
-                "queue rows should fill the available height: mine={mine}, building={building}"
-            );
-            assert_eq!(layout.required_height, 20);
-            assert!(!layout.too_small);
-            assert!(visible_body(&sections, layout.visible).contains("+30 hidden"));
-        }
-    }
-
-    #[test]
-    fn responsive_height_grows_queue_by_priority_in_position_order() {
-        let sections = Sections {
-            prs: Some(vec![]),
-            queue: Some(vec![
-                queue_row(1, false, false),
-                queue_row(2, true, false),
-                queue_row(3, false, true),
-                queue_row(4, false, false),
-                queue_row(5, true, false),
-                queue_row(6, true, true),
-                queue_row(7, true, false),
-                queue_row(8, false, false),
-            ]),
-            ..Sections::EMPTY
-        };
-        for (height, numbers) in [
-            (11, vec![3]),
-            (12, vec![3, 6]),
-            (13, vec![2, 3, 6]),
-            (14, vec![2, 3, 5, 6]),
-            (15, vec![2, 3, 5, 6, 7]),
-            (16, vec![1, 2, 3, 5, 6, 7]),
-            (17, vec![1, 2, 3, 4, 5, 6, 7, 8]),
-        ] {
-            let layout = mine_layout(&sections, height);
-            let expected: Vec<_> = numbers
-                .iter()
-                .map(|n| format!("https://queue/{n}"))
-                .collect();
-            assert_eq!(
-                nav::urls(nav::targets_visible(
-                    View::Mine,
-                    &sections,
-                    "",
-                    layout.visible
-                )),
-                expected,
-                "wrong queue rows at height {height}"
-            );
-            assert_eq!(layout.required_height, height);
-            let body = visible_body(&sections, layout.visible);
-            if numbers.len() == 8 {
-                assert!(!body.contains("hidden"));
-                assert!(!layout.constrained);
-            } else {
-                assert!(body.contains(&format!("+{} hidden", 8 - numbers.len())));
-                assert!(layout.constrained);
-            }
-        }
-    }
-
-    #[test]
-    fn partial_queue_accounts_for_search_status_and_selection() {
+    fn scrolling_queue_accounts_for_search_status_and_selection() {
         let sections = Sections {
             queue: Some((0..=40).map(|n| queue_row(n, n == 0, n == 0)).collect()),
             ..Sections::EMPTY
@@ -3213,99 +2759,58 @@ mod tests {
         let ui = Ui {
             search: "other".into(),
             searching: true,
-            selected: Some(5),
+            selected: Some(39),
             ..ui(View::Mine)
         };
         let mut filtered = None;
         let shown = ui.shown(&sections, &mut filtered);
         let footer = Some(("5m", true));
         let status = "error: offline";
-        let layout = responsive_layout(120, 17, shown, &ui, status, footer, true, true);
-        let expected: Vec<_> = (1..=6).map(|n| format!("https://queue/{n}")).collect();
-        let targets = nav::targets_visible(View::Mine, shown, &ui.search, layout.visible);
+        let visible = Visibility::all(shown);
+        let expected: Vec<_> = (1..=40).map(|n| format!("https://queue/{n}")).collect();
+        let targets = nav::targets_visible(View::Mine, shown, &ui.search, visible);
         assert_eq!(nav::urls(targets), expected);
-        let section = nav::section_at_visible(View::Mine, shown, &ui.search, 5, layout.visible);
+        let section = nav::section_at_visible(View::Mine, shown, &ui.search, 39, visible);
         assert_eq!(nav::urls(section), expected);
         assert_eq!(
-            nav::target_index(
-                View::Mine,
-                shown,
-                &ui.search,
-                layout.visible,
-                "https://queue/6"
-            ),
-            Some(5)
+            nav::target_index(View::Mine, shown, &ui.search, visible, "https://queue/40"),
+            Some(39)
         );
         assert_eq!(
-            nav::target_index(
-                View::Mine,
-                shown,
-                &ui.search,
-                layout.visible,
-                "https://queue/7"
-            ),
-            None
+            nav::target_index(View::Mine, shown, &ui.search, visible, "https://queue/7"),
+            Some(6)
         );
 
-        let mut body = TextBuffer::new(120, 17);
-        let (body_h, selected, _, _) = paint_body(
-            &mut body,
+        let mut screen = TextBuffer::new(120, 8);
+        let caret = paint_watch_frame(
+            &mut screen,
             shown,
             &ui,
             &Changes::default(),
-            true,
-            true,
-            layout.visible,
-            0,
-        );
-        assert_eq!(body_h, 12);
-        let selected = selected.unwrap();
-        let text = body.display_with(Profile::Disabled).to_string();
-        assert!(
-            text.lines()
-                .nth(usize::from(selected))
-                .unwrap()
-                .contains("queue-6")
-        );
-        assert_eq!(
-            body.cell(Position::new(0, selected)).unwrap().style.bg,
-            Some(status::SURFACE)
-        );
-
-        let mut bottom = TextBuffer::new(120, 5);
-        let (bottom_h, _) = paint_bottom(
-            &mut bottom,
-            shown,
-            &ui,
             status,
             footer,
             true,
-            layout.show_help,
-            layout.visible,
-            layout.constrained,
-            0,
-        );
-        assert_eq!(bottom_h, 5);
-        let mut screen = TextBuffer::new(120, 17);
-        render::compose(
-            &mut screen,
-            &mut body,
-            body_h,
-            &mut bottom,
-            bottom_h,
-            17,
-            Some(selected),
         );
         let text = screen.display_with(Profile::Disabled).to_string();
         let lines: Vec<_> = text.lines().collect();
-        assert_eq!(lines.len(), 17);
-        assert!(lines[12].contains("/other  (6 matches)"));
-        assert!(lines[14].contains(status));
-        assert!(lines[16].contains("^R refreshing"));
+        assert_eq!(lines.len(), 8);
+        assert!(lines[..3].iter().any(|line| line.contains("queue-40")));
+        assert!(lines[3].contains("/other  (40 matches)"));
+        assert!(lines[5].contains(status));
+        assert!(lines[7].contains("^R refreshing"));
+        assert_eq!(caret, Some(Position::new(6, 3)));
+        let selected = lines
+            .iter()
+            .position(|line| line.contains("queue-40"))
+            .unwrap() as u16;
+        assert_eq!(
+            screen.cell(Position::new(0, selected)).unwrap().style.bg,
+            Some(status::SURFACE)
+        );
     }
 
     #[test]
-    fn responsive_height_prioritizes_building_and_mine_queue_rows() {
+    fn queue_order_and_targets_do_not_depend_on_terminal_size() {
         let sections = Sections {
             prs: Some(vec![]),
             queue: Some(vec![
@@ -3318,80 +2823,56 @@ mod tests {
             ..Sections::EMPTY
         };
 
-        let mine_and_building = mine_layout(&sections, 13);
-        assert_eq!(
-            nav::urls(nav::targets_visible(
-                View::Mine,
-                &sections,
-                "",
-                mine_and_building.visible
-            )),
-            ["https://queue/1", "https://queue/2", "https://queue/3"]
-        );
-        let body = visible_body(&sections, mine_and_building.visible);
-        for title in ["queue-1", "queue-2", "queue-3"] {
-            assert!(body.contains(title), "{title} should be visible");
+        for height in 2..=20 {
+            let mut ui = ui(View::Mine);
+            let targets = nav::targets_visible(ui.view, &sections, "", Visibility::all(&sections));
+            assert_eq!(
+                nav::urls(targets.clone()),
+                [
+                    "https://queue/1",
+                    "https://queue/2",
+                    "https://queue/3",
+                    "https://queue/4",
+                    "https://queue/5"
+                ]
+            );
+            for (index, target) in targets.iter().enumerate() {
+                ui.selected = Some(index);
+                let canvas = watch_frame(&sections, &ui, 120, height);
+                let text = canvas.display_with(Profile::Disabled).to_string();
+                assert!(
+                    text.contains(target.title),
+                    "height={height}, index={index}: {text}"
+                );
+                assert!(!text.contains("+ resize for more"));
+            }
         }
-        for title in ["queue-4", "queue-5"] {
-            assert!(!body.contains(title), "{title} should be hidden");
-        }
-        assert!(body.contains("+2 hidden"), "hidden count should be shown");
-
-        let building = mine_layout(&sections, 12);
-        assert_eq!(
-            nav::urls(nav::targets_visible(
-                View::Mine,
-                &sections,
-                "",
-                building.visible
-            )),
-            ["https://queue/1", "https://queue/3"]
-        );
-        let body = visible_body(&sections, building.visible);
-        for title in ["queue-1", "queue-3"] {
-            assert!(body.contains(title), "{title} should be visible");
-        }
-        assert!(
-            !body.contains("queue-2"),
-            "non-building own PR should be hidden"
-        );
-        assert!(body.contains("+3 hidden"), "hidden count should be shown");
-
-        let one = mine_layout(&sections, 11);
-        assert_eq!(
-            nav::urls(nav::targets_visible(View::Mine, &sections, "", one.visible)),
-            ["https://queue/1"]
-        );
-        assert!(visible_body(&sections, one.visible).contains("+4 hidden"));
-
-        let none = mine_layout(&sections, 8);
-        assert_eq!(none.visible.queue, None);
     }
 
     #[test]
-    fn responsive_height_keeps_marker_only_queue_before_hiding_it() {
+    fn queue_dedup_remains_consistent_in_short_frames() {
         let sections = Sections {
             prs: Some((1..=4).map(queued_open_row).collect()),
             queue: Some((1..=4).map(|n| queue_row(n, true, false)).collect()),
             ..Sections::EMPTY
         };
-        let layout = mine_layout(&sections, 9);
-
-        assert!(layout.visible.queue.is_some());
-        assert!(!layout.too_small);
-        let body = visible_body(&sections, layout.visible);
-        assert!(body.contains("Merge Queue (4)"));
-        assert!(body.contains("+4 hidden"));
-        assert!(!body.contains("No merge queue."));
-        assert!(!body.contains("open-queued-"));
-        assert!(
-            nav::targets_visible(View::Mine, &sections, "", layout.visible).is_empty(),
-            "the hidden-count row must not be navigable or copyable"
+        let visible = Visibility::all(&sections);
+        assert_eq!(
+            nav::targets_visible(View::Mine, &sections, "", visible).len(),
+            4
         );
+        let ui = Ui {
+            selected: Some(3),
+            ..ui(View::Mine)
+        };
+        let canvas = watch_frame(&sections, &ui, 120, 8);
+        let text = canvas.display_with(Profile::Disabled).to_string();
+        assert!(text.contains("queue-4"));
+        assert!(!text.contains("open-queued-"));
     }
 
     #[test]
-    fn responsive_height_protects_open_prs_or_reports_too_small() {
+    fn help_scrolls_with_the_body_without_hiding_sections() {
         let sections = Sections {
             prs: Some(vec![]),
             queue: Some(vec![]),
@@ -3399,23 +2880,30 @@ mod tests {
             commits: Some(commits::CommitStats::unavailable()),
             ..Sections::EMPTY
         };
-        let layout = responsive_layout(
-            120,
-            5,
-            &sections,
-            &ui(View::Mine),
-            "",
-            Some(("5m", false)),
-            true,
-            true,
-        );
-        assert!(layout.too_small);
-        assert_eq!(layout.visible, Visibility::default());
-        assert_eq!(layout.required_height, 6);
+        let ui = Ui {
+            show_help: true,
+            ..ui(View::Mine)
+        };
+        let canvas = watch_frame(&sections, &ui, 120, 8);
+        let text = canvas.display_with(Profile::Disabled).to_string();
+        assert!(text.starts_with("Help"));
+        assert!(text.lines().last().unwrap().contains("^R refresh"));
+        assert!(!text.contains("+ resize for more"));
+        let canvas = watch_frame(&sections, &ui, 120, 40);
+        let text = canvas.display_with(Profile::Disabled).to_string();
+        for header in [
+            "Help",
+            "My open PRs",
+            "Merge Queue",
+            "My merged PRs",
+            "Commit stats unavailable.",
+        ] {
+            assert!(text.contains(header), "{header}: {text}");
+        }
     }
 
     #[test]
-    fn hiding_queue_restores_queued_pr_to_protected_open_section() {
+    fn disabled_queue_keeps_queued_pr_in_open_section() {
         let sections = Sections {
             prs: Some(vec![prs::PrRow {
                 number: 1,
@@ -3433,65 +2921,328 @@ mod tests {
                 updated_at: None,
                 created_at: None,
             }]),
-            queue: Some(vec![]),
             ..Sections::EMPTY
         };
-        let layout = responsive_layout(
-            120,
-            7,
-            &sections,
-            &ui(View::Mine),
-            "",
-            Some(("5m", false)),
-            true,
-            true,
-        );
-        assert!(layout.visible.prs);
-        assert!(layout.visible.queue.is_none());
-        assert!(!layout.too_small);
-        assert_eq!(body_height(&sections, View::Mine, layout.visible, true), 6);
-    }
-
-    #[test]
-    fn responsive_reviews_protect_the_open_section() {
-        let sections = Sections {
-            reviews: Some(vec![]),
-            reviewed_merged: Some(vec![]),
-            ..Sections::EMPTY
+        let ui = Ui {
+            selected: Some(0),
+            ..ui(View::Mine)
         };
-        let layout = responsive_layout(
-            120,
-            6,
-            &sections,
-            &ui(View::Reviews),
-            "",
-            Some(("5m", false)),
-            true,
-            true,
-        );
-        assert!(layout.visible.reviews);
-        assert!(!layout.visible.reviewed_merged);
-        assert!(!layout.too_small);
-    }
-
-    #[test]
-    fn responsive_width_reports_too_small_below_minimum() {
-        let layout = responsive_layout(
-            render::MIN_WIDTH - 1,
-            40,
-            &Sections::EMPTY,
-            &ui(View::Mine),
-            "",
-            Some(("5m", false)),
-            true,
-            true,
-        );
-        assert!(layout.too_small);
-        assert_eq!(layout.required_height, 3);
+        let canvas = watch_frame(&sections, &ui, 120, 3);
+        let text = canvas.display_with(Profile::Disabled).to_string();
+        assert!(text.contains("queued"));
         assert_eq!(
-            too_small_message(render::MIN_WIDTH, layout.required_height),
-            "Terminal too small — need 24×3."
+            ui.copy_text(&sections, Visibility::all(&sections), "{url}", false),
+            Some(("https://pr/1".into(), 1))
         );
+    }
+
+    #[test]
+    fn reviews_scroll_to_every_open_and_merged_row() {
+        let sections = Sections {
+            reviews: Some((1..=30).map(review_row).collect()),
+            reviewed_merged: Some(
+                (31..=40)
+                    .map(|n| reviews::ReviewedMergedRow {
+                        number: n,
+                        title: format!("reviewed-{n:02}"),
+                        branch: String::new(),
+                        author: "other".into(),
+                        url: format!("https://reviewed/{n}"),
+                        merged_at: None,
+                    })
+                    .collect(),
+            ),
+            ..Sections::EMPTY
+        };
+        let mut ui = ui(View::Reviews);
+        let visible = Visibility::all(&sections);
+        let targets = nav::targets_visible(ui.view, &sections, "", visible);
+        assert_eq!(targets.len(), 40);
+        for movement in [nav::Move::Down, nav::Move::Up] {
+            ui.selected = if movement == nav::Move::Up {
+                Some(39)
+            } else {
+                None
+            };
+            for _ in 0..40 {
+                ui.selected = nav::moved(movement, ui.selected, targets.len(), 4);
+                let selected = ui.selected.unwrap();
+                let canvas = watch_frame(&sections, &ui, 120, 8);
+                let text = canvas.display_with(Profile::Disabled).to_string();
+                assert!(text.contains(targets[selected].title), "{selected}: {text}");
+                assert!(text.lines().last().unwrap().contains("^R refresh"));
+                assert_eq!(
+                    ui.copy_text(&sections, visible, "{url}", false),
+                    Some((targets[selected].url.into(), 1))
+                );
+            }
+        }
+        ui.selected = nav::moved(nav::Move::Bottom, None, targets.len(), 4);
+        let mut opened = Vec::new();
+        ui.open_links(&sections, visible, true, |url| {
+            opened.push(url.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(opened.len(), 10);
+        assert_eq!(opened.last().unwrap(), "https://reviewed/40");
+        assert_eq!(
+            ui.copy_text(&sections, visible, "{url}", true).unwrap().1,
+            10
+        );
+        ui.search = "reviewed-40".into();
+        ui.selected = Some(0);
+        let mut filtered = None;
+        let shown = ui.shown(&sections, &mut filtered);
+        let canvas = watch_frame(shown, &ui, 120, 8);
+        let text = canvas.display_with(Profile::Disabled).to_string();
+        assert!(text.contains("reviewed-40"));
+        assert!(text.contains("(1 match)"));
+    }
+
+    #[test]
+    fn narrow_and_short_frames_clip_instead_of_rejecting_the_dashboard() {
+        let sections = Sections {
+            queue: Some((1..=40).map(|n| queue_row(n, false, false)).collect()),
+            ..Sections::EMPTY
+        };
+        let ui = Ui {
+            selected: Some(39),
+            ..ui(View::Mine)
+        };
+        for width in [1, 4, 12, 23, 24, 40] {
+            for height in [1, 2, 8, 40] {
+                let canvas = watch_frame(&sections, &ui, width, height);
+                let text = canvas.display_with(Profile::Disabled).to_string();
+                assert!(
+                    !text.contains("Terminal too small"),
+                    "{width}x{height}: {text}"
+                );
+                assert_eq!(canvas.height(), height);
+                assert!(
+                    text.lines().last().unwrap().starts_with(['^', '+']),
+                    "{width}x{height}: {text}"
+                );
+                if height >= 2 {
+                    assert!(
+                        (0..height - 1).any(|y| canvas.cell(Position::new(0, y)).unwrap().style.bg
+                            == Some(status::SURFACE)),
+                        "{width}x{height}: {text}"
+                    );
+                }
+            }
+            let mut canvas = TextBuffer::new(width, 64);
+            let (used, _) = paint_dashboard(
+                &mut canvas,
+                &sections,
+                &ui,
+                &Changes::default(),
+                "",
+                None,
+                true,
+            );
+            assert_eq!(used, 43);
+            let text = canvas.display_with(Profile::Disabled).to_string();
+            assert!(text.starts_with(&"Merge Queue"[..usize::from(width).min(11)]));
+            assert!(!text.contains("Terminal too small"));
+        }
+    }
+
+    #[test]
+    fn one_shot_output_keeps_all_rows_and_help_at_full_height() {
+        let sections = Sections {
+            queue: Some((1..=40).map(|n| queue_row(n, false, false)).collect()),
+            merged: Some((41..=50).map(merged_row).collect()),
+            reviews: Some((1..=40).map(review_row).collect()),
+            ..Sections::EMPTY
+        };
+        for view in [View::Mine, View::Reviews] {
+            let ui = Ui {
+                show_help: true,
+                ..ui(view)
+            };
+            let targets = nav::targets_visible(view, &sections, "", Visibility::all(&sections));
+            let text = render_to_string(
+                &sections,
+                &ui,
+                &Changes::default(),
+                None,
+                true,
+                Profile::Disabled,
+            );
+            for target in targets {
+                assert!(text.contains(target.title), "{view:?}: {}", target.title);
+            }
+            assert!(text.contains("Help"));
+            assert!(text.contains("g/G first/last"));
+            assert!(!text.contains("hidden"));
+            assert!(!text.contains("Terminal too small"));
+            assert!(text.lines().count() > 40);
+        }
+    }
+
+    #[test]
+    fn resize_refresh_and_filter_keep_selection_attached_to_the_url() {
+        let mut sections = Sections {
+            merged: Some((1..=30).map(merged_row).collect()),
+            reviews: Some((1..=30).map(review_row).collect()),
+            ..Sections::EMPTY
+        };
+        for view in [View::Mine, View::Reviews] {
+            let mut ui = Ui {
+                selected: Some(29),
+                ..ui(view)
+            };
+            let url = ui.selected_url(&sections).unwrap();
+            let expected_targets =
+                nav::targets_visible(view, &sections, "", Visibility::all(&sections));
+            for (width, height) in [(120, 40), (120, 8), (12, 2), (1, 2), (80, 16)] {
+                ui.restore_selection(&sections, Some(&url));
+                let canvas = watch_frame(&sections, &ui, width, height);
+                assert_eq!(ui.selected, Some(29));
+                assert_eq!(ui.selected_url(&sections).as_deref(), Some(url.as_str()));
+                assert_eq!(
+                    nav::targets_visible(view, &sections, "", Visibility::all(&sections)),
+                    expected_targets
+                );
+                assert!(
+                    (0..height - 1).any(|y| canvas.cell(Position::new(0, y)).unwrap().style.bg
+                        == Some(status::SURFACE))
+                );
+            }
+            match view {
+                View::Mine => sections.merged.as_mut().unwrap().insert(0, merged_row(99)),
+                View::Reviews => sections.reviews.as_mut().unwrap().insert(0, review_row(99)),
+            }
+            ui.restore_selection(&sections, Some(&url));
+            assert_eq!(ui.selected, Some(30));
+            assert_eq!(
+                ui.copy_text(&sections, Visibility::all(&sections), "{url}", false),
+                Some((url.clone(), 1))
+            );
+            let canvas = watch_frame(&sections, &ui, 120, 8);
+            assert!(
+                canvas
+                    .display_with(Profile::Disabled)
+                    .to_string()
+                    .contains("-30")
+            );
+
+            ui.search = "30".into();
+            ui.selected = None;
+            let mut filtered = None;
+            let shown = ui.shown(&sections, &mut filtered);
+            assert_eq!(
+                nav::targets_visible(view, shown, &ui.search, Visibility::all(shown)).len(),
+                1
+            );
+            ui.restore_selection(&sections, Some(&url));
+            assert_eq!(ui.selected, Some(0));
+            assert_eq!(ui.selected_url(&sections).as_deref(), Some(url.as_str()));
+            ui.search = "no matches".into();
+            ui.restore_selection(&sections, Some(&url));
+            assert_eq!(ui.selected, None);
+        }
+    }
+
+    #[test]
+    fn movement_keys_reach_both_ends_and_half_pages_in_both_views() {
+        use uncurses::event::Key;
+
+        let sections = Sections {
+            merged: Some((1..=30).map(merged_row).collect()),
+            reviews: Some((1..=30).map(review_row).collect()),
+            ..Sections::EMPTY
+        };
+        for view in [View::Mine, View::Reviews] {
+            let mut ui = ui(view);
+            for (code, modifiers, expected) in [
+                (KeyCode::Char('G'), KeyModifiers::empty(), 29),
+                (KeyCode::Char('g'), KeyModifiers::empty(), 0),
+                (KeyCode::Char('d'), KeyModifiers::CTRL, 4),
+                (KeyCode::Char('u'), KeyModifiers::CTRL, 0),
+                (KeyCode::Down, KeyModifiers::empty(), 1),
+                (KeyCode::Up, KeyModifiers::empty(), 0),
+                (KeyCode::Char('j'), KeyModifiers::empty(), 1),
+                (KeyCode::Char('k'), KeyModifiers::empty(), 0),
+            ] {
+                let event = Event::KeyPress(Key::new(code, modifiers).normalized());
+                let Action::Move(movement) = classify(&event) else {
+                    panic!("{event:?} is not a movement");
+                };
+                ui.selected = nav::moved(movement, ui.selected, 30, 4);
+                assert_eq!(ui.selected, Some(expected), "{view:?}: {event:?}");
+                let canvas = watch_frame(&sections, &ui, 120, 8);
+                let text = canvas.display_with(Profile::Disabled).to_string();
+                let targets = nav::targets_visible(view, &sections, "", Visibility::all(&sections));
+                assert!(
+                    text.contains(targets[expected].title),
+                    "{view:?}: {event:?}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn search_status_and_footer_stay_pinned_in_both_views() {
+        let sections = Sections {
+            queue: Some((1..=40).map(|n| queue_row(n, false, false)).collect()),
+            reviews: Some((1..=40).map(review_row).collect()),
+            ..Sections::EMPTY
+        };
+        for view in [View::Mine, View::Reviews] {
+            let ui = Ui {
+                search: "other".into(),
+                searching: true,
+                selected: Some(39),
+                ..ui(view)
+            };
+            let mut filtered = None;
+            let shown = ui.shown(&sections, &mut filtered);
+            for height in [6, 8, 20] {
+                let mut canvas = TextBuffer::new(120, height);
+                let caret = paint_watch_frame(
+                    &mut canvas,
+                    shown,
+                    &ui,
+                    &Changes::default(),
+                    "error: offline",
+                    Some(("5m", true)),
+                    true,
+                );
+                let text = canvas.display_with(Profile::Disabled).to_string();
+                let lines: Vec<_> = text.lines().collect();
+                assert!(lines[usize::from(height - 5)].contains("/other  (40 matches)"));
+                assert!(lines[usize::from(height - 3)].contains("error: offline"));
+                assert!(lines[usize::from(height - 1)].contains("^R refreshing"));
+                assert_eq!(caret, Some(Position::new(6, height - 5)));
+                assert!(
+                    (0..height - 5).any(|y| canvas.cell(Position::new(0, y)).unwrap().style.bg
+                        == Some(status::SURFACE))
+                );
+            }
+            for width in [1, 4, 12] {
+                for height in 1..=8 {
+                    let mut canvas = TextBuffer::new(width, height);
+                    let caret = paint_watch_frame(
+                        &mut canvas,
+                        shown,
+                        &ui,
+                        &Changes::default(),
+                        "error: offline",
+                        Some(("5m", false)),
+                        true,
+                    );
+                    if let Some(caret) = caret {
+                        assert!(
+                            caret.x < width && caret.y < height,
+                            "{width}x{height}: {caret:?}"
+                        );
+                    }
+                    assert_eq!(caret.is_some(), height >= 5);
+                }
+            }
+        }
     }
 
     #[test]
@@ -3521,7 +3272,7 @@ mod tests {
         let highlighted = |ui: &Ui| -> Vec<String> {
             let w = render::OUTPUT_WIDTH as u16;
             let mut canvas = TextBuffer::new(w, 64);
-            let (_, _, required_width) = paint_dashboard(
+            paint_dashboard(
                 &mut canvas,
                 &sections,
                 ui,
@@ -3530,7 +3281,6 @@ mod tests {
                 None,
                 true,
             );
-            assert!(required_width <= w);
             let text: Vec<String> = canvas
                 .display_with(Profile::Disabled)
                 .to_string()
