@@ -795,6 +795,28 @@ fn required_query(pending: &[PendingRequired]) -> (String, serde_json::Value) {
     )
 }
 
+fn fetch_required_pages(
+    mut pending: Vec<PendingRequired>,
+    summaries: &mut [RequiredSummary],
+    mut fetch: impl FnMut(&str, serde_json::Value) -> Result<HashMap<String, Option<RequiredCommit>>>,
+) -> Result<()> {
+    while !pending.is_empty() {
+        for batch in pending.chunks_mut(5) {
+            let (query, variables) = required_query(batch);
+            let mut data = fetch(&query, variables)?;
+            for (alias, item) in batch.iter_mut().enumerate() {
+                let commit = data
+                    .remove(&format!("c{alias}"))
+                    .with_context(|| format!("required-check response omitted c{alias}"))?
+                    .with_context(|| format!("required-check commit c{alias} was unavailable"))?;
+                item.after = summaries[item.target].add_page(commit)?;
+            }
+        }
+        pending.retain(|item| item.after.is_some());
+    }
+    Ok(())
+}
+
 fn fetch_required(
     client: &Client,
     targets: &[RequiredTarget],
@@ -820,7 +842,7 @@ fn fetch_required(
     let mut summaries: Vec<_> = (0..targets.len())
         .map(|_| RequiredSummary::default())
         .collect();
-    let mut pending: Vec<_> = targets
+    let pending: Vec<_> = targets
         .iter()
         .enumerate()
         .filter(|(_, item)| required_only || !expected(item).is_empty())
@@ -834,21 +856,9 @@ fn fetch_required(
         })
         .collect();
 
-    while !pending.is_empty() {
-        for batch in pending.chunks_mut(5) {
-            let (query, variables) = required_query(batch);
-            let mut data: HashMap<String, Option<RequiredCommit>> =
-                client.graphql(&query, variables)?;
-            for (alias, item) in batch.iter_mut().enumerate() {
-                let commit = data
-                    .remove(&format!("c{alias}"))
-                    .with_context(|| format!("required-check response omitted c{alias}"))?
-                    .with_context(|| format!("required-check commit c{alias} was unavailable"))?;
-                item.after = summaries[item.target].add_page(commit)?;
-            }
-        }
-        pending.retain(|item| item.after.is_some());
-    }
+    fetch_required_pages(pending, &mut summaries, |query, variables| {
+        client.graphql(query, variables)
+    })?;
 
     for (target, summary) in targets.iter().zip(&mut summaries) {
         summary.include_missing(expected(target));
@@ -1649,6 +1659,124 @@ mod tests {
             assert_eq!(variables["commit0"], "COMMIT_ID");
             assert_eq!(variables["pull0"], 42);
             assert_eq!(variables["after0"], expected);
+        }
+    }
+
+    fn required_commit_page(target: usize, page: usize, next: Option<String>) -> RequiredCommit {
+        let nodes: Vec<_> = (0..=target)
+            .map(|check| {
+                serde_json::json!({
+                    "__typename": "CheckRun",
+                    "required": true,
+                    "name": format!("check-{target}-{page}-{check}"),
+                    "status": if page == 2 { "QUEUED" } else { "COMPLETED" },
+                    "conclusion": match page {
+                        0 => Some("SUCCESS"),
+                        1 => Some("FAILURE"),
+                        _ => None,
+                    }
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "statusCheckRollup": { "contexts": {
+                "pageInfo": {
+                    "hasNextPage": next.is_some(),
+                    "endCursor": next
+                },
+                "nodes": nodes
+            } }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn required_pages_batch_commits_and_preserve_each_targets_cursor_and_counts() {
+        let pages = [1usize, 2, 0, 3, 1, 2, 0, 3];
+        let pending = pages
+            .iter()
+            .enumerate()
+            .filter(|(_, pages)| **pages > 0)
+            .map(|(target, _)| PendingRequired {
+                target,
+                pull_request_number: 100 + i64::try_from(target).unwrap(),
+                commit_id: format!("commit-{target}"),
+                after: None,
+            })
+            .collect();
+        let mut summaries: Vec<_> = pages.iter().map(|_| RequiredSummary::default()).collect();
+        let mut received = [0usize; 8];
+        let mut requests = Vec::new();
+
+        fetch_required_pages(pending, &mut summaries, |query, variables| {
+            let count = query.matches(": node(id: $commit").count();
+            assert!((1..=5).contains(&count), "commit count: {count}");
+            assert_eq!(variables.as_object().unwrap().len(), count * 3);
+            let mut response = HashMap::new();
+            let mut request = Vec::new();
+            for alias in 0..count {
+                let commit = variables[format!("commit{alias}")].as_str().unwrap();
+                let target: usize = commit.strip_prefix("commit-").unwrap().parse().unwrap();
+                let page = received[target];
+                assert!(page < pages[target], "extra page for target {target}");
+                assert_eq!(
+                    variables[format!("pull{alias}")],
+                    100 + i64::try_from(target).unwrap(),
+                    "PR number for target {target}"
+                );
+                let after = (page > 0).then(|| format!("cursor-{target}-{page}"));
+                assert_eq!(
+                    variables[format!("after{alias}")],
+                    serde_json::json!(after),
+                    "cursor for target {target}, page {page}"
+                );
+                assert!(query.contains(&format!("c{alias}: node(id: $commit{alias})")));
+                assert!(query.contains(&format!("contexts(first: 100, after: $after{alias})")));
+                assert!(query.contains(&format!("isRequired(pullRequestNumber: $pull{alias})")));
+                request.push((target, page));
+                received[target] += 1;
+                let next = (received[target] < pages[target])
+                    .then(|| format!("cursor-{target}-{}", page + 1));
+                response.insert(
+                    format!("c{alias}"),
+                    Some(required_commit_page(target, page, next)),
+                );
+            }
+            requests.push(request);
+            Ok(response)
+        })
+        .unwrap();
+
+        assert_eq!(
+            requests,
+            [
+                vec![(0, 0), (1, 0), (3, 0), (4, 0), (5, 0)],
+                vec![(7, 0)],
+                vec![(1, 1), (3, 1), (5, 1), (7, 1)],
+                vec![(3, 2), (7, 2)],
+            ]
+        );
+        assert_eq!(received, pages);
+        for (target, summary) in summaries.iter().enumerate() {
+            let checks = (target + 1) as u64;
+            assert_eq!(
+                summary.checks,
+                Checks {
+                    pass: if pages[target] > 0 { checks } else { 0 },
+                    fail: if pages[target] > 1 { checks } else { 0 },
+                    running: if pages[target] > 2 { checks } else { 0 },
+                },
+                "counts for original target {target}"
+            );
+            let contexts: HashSet<_> = (0..pages[target])
+                .flat_map(|page| {
+                    (0..=target).map(move |check| format!("check-{target}-{page}-{check}"))
+                })
+                .collect();
+            assert_eq!(
+                summary.contexts, contexts,
+                "contexts for original target {target}"
+            );
         }
     }
 }
