@@ -15,8 +15,9 @@ output with `--view`):
 - **Reviews**: **Reviews** (open PRs awaiting / under my review, each with a
   per-row review-state glyph) **→ Reviewed & merged** (merged PRs I reviewed).
 
-Below the active view is an optional help legend, an optional search prompt, and
-last a `^R refresh (every 5m) - tab switch view - enter open -
+The watch puts optional help above the active view. One-shot output puts help
+below it. An optional search prompt and a
+`^R refresh (every 5m) - tab switch view - enter open -
 r/R read - y copy - / search - ? help` footer (which also shows the refresh
 interval, and reads `^R refreshing` while a fetch is in flight; `^R` means
 `Ctrl-R`). While watching, the very top shows a `my PRs / reviews` tab strip
@@ -28,7 +29,7 @@ The interactive watch runs on the
 loop: it shows an *inline* `Loading...` frame, then enters the **alternate
 screen** once the first fetch lands (or immediately when there's a
 cache to paint), where that bottom block is **pinned** to the last rows and the
-body adapts to the available height. Interactive `--once` uses an *inline* surface instead:
+body scrolls to the selection. Interactive `--once` uses an *inline* surface instead:
 a `Loading...` frame while the fetch runs (abortable with `q`), then the dashboard
 is left in the terminal. Piped/non-TTY output is plain text printed straight to
 stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
@@ -130,8 +131,8 @@ watch event loop); everything else is testable modules:
   `TableAlignment` shares the two-column gutter (marker, glyph) and PR widths
   across all
   tables in a view; when branches are shown it also shares TITLE width, so PR,
-  TITLE, and BRANCH all start on the same columns. Below 24 columns the
-  dashboard reports `Terminal too small — need W×H.` Piped output and screenshots use
+  TITLE, and BRANCH all start on the same columns. Mandatory columns clip when
+  they cannot fit; the dashboard never rejects a terminal size. Piped output and screenshots use
   `OUTPUT_WIDTH` = 120 because they have no live screen dimensions. Headers (with an optional dim
   count badge and trailing note — the queue ETA), the `tabs` view-switcher strip,
   the leading-column `change_marker` and the selected-row highlight
@@ -140,14 +141,14 @@ watch event loop); everything else is testable modules:
   hand-laid-out shipments section too, and the change marker stays visible
   underneath instead of being overwritten by a caret), the key-hint footer
   (carrying the refresh interval and the `enter open` / `/ search` hints, plus
-  `+ resize for more` when width or height hides information), the search prompt
+  `+ resize for more` when width hides information), the search prompt
   line (the `/` query + match count; it paints no cursor and instead *returns*
   the caret cell, so the watch can park the terminal's real one there), and the
   help legend
   (`paint_help(view, …)` — movement and read/refresh key lines then, contextual: the
   approval glyphs and the conflict marker for Mine, review glyphs for Reviews; the column headers
-  speak for themselves and are not repeated; first in the bottom block, above the
-  search prompt and footer) live here too, plus `render_table`
+  speak for themselves and are not repeated; first in the scrolling watch body,
+  but above the search prompt and footer in one-shot output) live here too, plus `render_table`
   (paint one table to a string, for tests) and `paint_dim`/`paint_dim_at`, the
   dim one-liners — the trailing status line flush left, an empty section's
   placeholder indented by `ROW_INDENT` so it lines up with the rows it stands in
@@ -155,17 +156,12 @@ watch event loop); everything else is testable modules:
   It also owns the watch frame's geometry: `compose(screen, body, bottom, rows,
   caret)` fills exactly `rows` rows — as much of the body as fits at the top,
   blank padding, then the bottom block glued to the last rows — and returns the
-  row that block starts on. Before composition, `responsive_layout` hides help,
-  then Shipments; progressively trims Merged to the newest row; trims Queue
-  one row at a time, retaining building rows first, then own rows, then other
-  entries (earliest queue positions first within each priority); and finally
-  hides each section. Queue rows stay in position order and fill the available
-  height through `queue::VisibleRows`' per-priority row limits.
-  Each partial section ends with `+N hidden`. The Reviews view still hides
-  Reviewed & merged as one section. Navigation, search counts, open, and copy
-  use the same `Visibility`, including its row limits. If the protected open-PR
-  section does not fit whole, the frame is replaced by
-  `Terminal too small — need W×H.`
+  row that block starts on. `paint_watch_frame` paints every enabled section
+  into the body, then calls `compose` to keep the selected row visible.
+  Help appears at the top of the scrolling body, so it cannot consume the
+  entire viewport. The search prompt, status line, and footer stay pinned.
+  Navigation, search counts, open, copy, and read operations include offscreen rows.
+  Terminal height never removes sections or rows.
   The body is drawn through
   a `uncurses::buffer::View`, which clips without translating, so blitting it maps
   the first visible body row onto the top of the screen.
@@ -191,8 +187,7 @@ watch event loop); everything else is testable modules:
   (`render::lamp_cell`), counting the speculative merge commit's checks from the
   rollup's own `checkRunCountsByState` / `statusContextCountsByState` aggregates
   (`QueueEntryNode::checks`), with unreported required checks added to `RUN`.
-  `QueueRow::missing_required_checks` preserves that count separately so missing
-  checks do not promote a waiting row into `VisibleRows`' building priority.
+  `QueueRow::missing_required_checks` preserves that count separately in cached rows.
   The rollup is a single flat connection (cheap, and
   front-loads the real check runs, unlike `checkSuites` whose first entries are
   app integrations). The `Merge Queue` header also carries the queue-level ETA
@@ -235,7 +230,7 @@ watch event loop); everything else is testable modules:
   lockstep), `moved` advances the selection cursor by a `nav::Move` (the
   input-agnostic movement type — `lib.rs::classify` maps keys onto it; lazy:
   `None` until the first move, `Bottom` enters at the last row). Refreshes and
-  resizes restore the same selected URL when it remains visible. `Target::format`
+  resizes restore the same selected URL when it still exists. `Target::format`
   substitutes `{title}` and `{url}` only in the template, not in inserted values.
   Titles are full PR titles, release tags, or `upcoming`.
 - `open.rs` — `open::url` opens a URL in the default browser via the platform
@@ -251,8 +246,7 @@ watch event loop); everything else is testable modules:
   `$XDG_CACHE_HOME/prowl` (so the watch dashboard paints instantly on startup).
   Loading re-sorts My open PRs using the current `--sort-open` value rather
   than the order saved by a previous run. Caches from before missing required
-  checks were included in the queue's `RUN` and stored separately for row
-  priority are invalidated.
+  checks were included in the queue's `RUN` and stored separately are invalidated.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 `run()` loads CLI/config settings, then creates a
@@ -288,8 +282,8 @@ output before the dashboard takes over the screen. `stop` consumes the app and c
 raw mode). Because the caller always runs `stop`, the terminal is restored on
 every path — a clean quit, a `?`-operator error, or a failed first paint (`start`
 calls `stop` itself before bailing). Each frame is painted by `redraw` →
-`render_dashboard`, which pins the frame once `in_alt` is set: `paint_body` and
-`paint_bottom` each paint into their own `TextBuffer`, and `render::compose`
+`render_dashboard`, which uses `paint_watch_frame` once `in_alt` is set: `paint_body` and
+`paint_bottom` each paint into their own `TextBuffer`, and `render::compose_scrolled`
 places them. The renderer's line-scroll capabilities (CSR/SU-SD/IL-DL) need no
 stripping: uncurses gates scroll detection on `scroll_optimize && sync_output &&
 fullscreen`, so a scroll — which moves full rows, including the pinned bottom
@@ -328,7 +322,7 @@ opens the selected row, `Shift+Enter` opens its section, `y`/`Y` copy links,
 the movement keys drive the cursor,
 `q`/`Q`/`Ctrl-C` quit (`Esc` clears the filter, or quits when there is none),
 `Ctrl-Z` suspends/resumes, `Resize` repaints. Watch interaction state lives in
-`Ui` (view, help, selection, search, `--branch`); unread markers live in
+`Ui` (view, help, selection, scroll, search, branch); unread markers use
 `App::unread`. `ctrlc` handles external SIGINT/SIGTERM/SIGHUP by asking the event
 loop to stop; the owning `Program`
 still performs all teardown through `finish`.
@@ -361,7 +355,7 @@ still performs all teardown through `finish`.
   failed, or passed check is not also counted as missing. This applies with and
   without `--required`, including commits with no rollup. Queue entries without
   a speculative commit count all expected checks in `RUN`; missing checks
-  neither start `BUILD` nor raise a waiting row's responsive-layout priority.
+  do not start `BUILD`.
   With `--required`, prowl follows those contexts page by page in a second
   batched GraphQL query and uses each context's `isRequired(pullRequestNumber:)`
   value for both the semaphore and the merge queue's BUILD start.
@@ -378,8 +372,8 @@ still performs all teardown through `finish`.
   Updated → Reviewed) then `updatedAt` desc; reviewed-and-merged by `mergedAt` desc.
 - **Queue dedup:** a PR of mine that's in the merge queue is shown only in the
   Merge Queue section, not the open-PRs list (`prs::without_queued`, applied at
-  layout time only while the queue section is visible, so `--only mine` and
-  height-driven queue hiding still list it).
+  layout time only while the queue section is enabled, so `--only mine` still
+  lists it).
 - **Drafts:** `--no-draft` hides draft PRs from both the Mine open-PRs list and
   the Reviews list (`prs::without_drafts` / `reviews::without_drafts`).
 - **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
@@ -420,15 +414,14 @@ still performs all teardown through `finish`.
   first/last,
   `Ctrl-D`/`Ctrl-U` half a page (sized from the screen's `window_cells`); Enter
   opens the selected row — the PR, or a shipments release / the upcoming compare
-  log — via `open::url`. Resize preserves the selected URL when it remains
-  visible and clears selection when responsive hiding removes it. Every row
+  log — via `open::url`. Resize preserves the selected URL at every size. Every row
   across all sections of the active view is one
   target (`nav::targets_visible`, in render order); switching views drops the cursor and
-  a refresh preserves its URL when that row remains visible. `--once`/piped
+  a refresh preserves its URL when that row still exists. `--once`/piped
   output has no selection.
   `Shift+Enter` opens the selected section, or the first non-empty section with
   no selection. `Ui::targets` shares the row/section selection with `y`/`Y`,
-  including search and responsive row limits. `Ui::open_links` opens in display
+  including search and offscreen rows. `Ui::open_links` opens in display
   order through the platform opener; the first failure stops the remaining
   opens and names the failed URL in the status line. Success leaves selection
   and unread markers unchanged. In the search prompt, `Shift+Enter` only applies
@@ -475,23 +468,20 @@ still performs all teardown through `finish`.
   marks the selected PR/all PRs as read; `Tab` switches
   view; `?` toggles the help legend (contextual to the active view —
   approval glyphs and the conflict marker for Mine, review glyphs for Reviews — hidden by
-  default, rendered at the top of the bottom block, above the search prompt and
-  footer whose keys it documents; `--no-help` only affects
+  default, rendered at the top of the scrolling body; `--no-help` only affects
   one-shot/piped output). The movement keys (`j`/`k`, arrows, `g`/`G`,
   `Ctrl-D`/`Ctrl-U`) drive the selection cursor, Enter opens it, `Shift+Enter`
   opens its section, `y`/`Y` copy it
   (row / whole section), and `/` filters.
   `q`/`Q`/`Ctrl-C` quit (as does `Esc` with no filter applied) and `Ctrl-Z`
-  suspends/resumes. The bottom block — help legend, search prompt, error line,
+  suspends/resumes. The bottom block — search prompt, error line,
   footer — is **pinned** to the last rows of the screen (`render::compose`).
-  Height pressure hides help and Shipments, trims Merged oldest-first to one
-  row, then trims Queue to the available height one row at a time, retaining
-  building PRs first, then own PRs, then other entries. Within each priority,
-  earlier queue positions stay visible first; displayed rows remain in queue
-  order. The queue disappears only when its header and hidden count cannot fit.
-  Partial sections show `+N hidden`. The Reviews view hides Reviewed & merged
-  as one section. Open PRs remain whole; if they cannot fit, the frame says
-  `Terminal too small — need W×H.` The only persistent
+  The full body scrolls vertically to keep the selected row visible.
+  Every enabled section remains available, including both reviews sections.
+  Queue entries retain position order. Optional columns still adapt to width;
+  mandatory columns clip at very narrow widths. No minimum size check replaces
+  the dashboard. One-shot and piped output retain the full content height.
+  The only persistent
   bottom line is the footer
   (`^R refresh (every 5m) - tab switch view - enter open - r/R read - y copy - / search - ?
   help`), which carries the refresh interval and progressively removes
@@ -579,7 +569,9 @@ advisories; those permissions are scoped to that job.
 through the real `render_to_string` — the same painters `--once` uses — so the
 shot can't drift from the layout, which is why `Sections`, `Ui` and
 `render_to_string` are
-`pub`, same as everything else the offline tests reach. `demo.tape` shoots it
+`pub`, same as everything else the offline tests reach. `demo -- scroll` and
+`demo -- reviews scroll` use `paint_watch_frame` to show top/bottom eight-row frames.
+`demo.tape` shoots it
 with [vhs](https://github.com/charmbracelet/vhs) (Nerd Font, Catppuccin Mocha;
 the trailing `Sleep` is required or vhs exits before writing the file), and the
 task uploads `demo.png` to GitHub's CDN and rewrites the `<img>` URL in

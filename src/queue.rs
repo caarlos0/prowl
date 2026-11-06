@@ -26,68 +26,8 @@ pub struct QueueRow {
     pub build_started_at: Option<String>,
     /// Failing / running / passing checks on the speculative merge commit.
     pub checks: Checks,
-    /// Included in RUN, but not in the building-row priority.
+    /// Required checks that have not reported yet, included in RUN.
     pub missing_required_checks: u64,
-}
-
-impl QueueRow {
-    fn is_building(&self) -> bool {
-        self.checks.running > self.missing_required_checks
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VisibleRows {
-    building: usize,
-    mine: usize,
-    other: usize,
-}
-
-impl VisibleRows {
-    pub(crate) const ALL: Self = Self {
-        building: usize::MAX,
-        mine: usize::MAX,
-        other: usize::MAX,
-    };
-
-    pub(crate) fn limited(rows: &[QueueRow], limit: usize) -> Self {
-        let building = rows
-            .iter()
-            .filter(|row| row.is_building())
-            .count()
-            .min(limit);
-        let mine = rows
-            .iter()
-            .filter(|row| row.mine && !row.is_building())
-            .count()
-            .min(limit - building);
-        Self {
-            building,
-            mine,
-            other: limit - building - mine,
-        }
-    }
-
-    pub(crate) fn count(self, rows: &[QueueRow]) -> usize {
-        self.iter(rows).count()
-    }
-
-    pub(crate) fn iter(mut self, rows: &[QueueRow]) -> impl Iterator<Item = &QueueRow> {
-        rows.iter().filter(move |row| {
-            let remaining = if row.is_building() {
-                &mut self.building
-            } else if row.mine {
-                &mut self.mine
-            } else {
-                &mut self.other
-            };
-            if *remaining == 0 {
-                return false;
-            }
-            *remaining -= 1;
-            true
-        })
-    }
 }
 
 /// Build rows ordered by queue position ascending; `mine` flags own PRs.
@@ -314,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_checks_do_not_promote_waiting_rows_to_building() {
+    fn missing_required_checks_preserve_queue_order_and_counts() {
         let mut waiting = node(1, 1, "other");
         waiting.missing_required_checks = 2;
         let mut mine = node(2, 2, "me");
@@ -329,15 +269,20 @@ mod tests {
         });
         building.missing_required_checks = 2;
         let rows = build_rows(vec![waiting, mine, building], "me");
-        for (limit, expected) in [(1, vec![3]), (2, vec![2, 3]), (3, vec![1, 2, 3])] {
-            assert_eq!(
-                VisibleRows::limited(&rows, limit)
-                    .iter(&rows)
-                    .map(|row| row.number)
-                    .collect::<Vec<_>>(),
-                expected,
-                "limit={limit}"
-            );
-        }
+        assert_eq!(
+            rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(rows.iter().all(|row| row.missing_required_checks == 2));
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.checks.running)
+                .collect::<Vec<_>>(),
+            [2, 2, 3]
+        );
+        let table = to_table(&rows, true, false);
+        assert_eq!(table.rows.len(), 3);
+        assert_eq!(table.rows[0][2].text, "#1");
+        assert_eq!(table.rows[2][2].text, "#3");
     }
 }

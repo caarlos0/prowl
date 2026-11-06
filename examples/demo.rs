@@ -8,6 +8,8 @@
 //! ```sh
 //! cargo run --quiet --example demo            # the "my PRs" view
 //! cargo run --quiet --example demo -- reviews # the reviews view
+//! cargo run --quiet --example demo -- scroll  # top/bottom eight-row frames
+//! cargo run --quiet --example demo -- reviews scroll
 //! vhs demo.tape                               # write demo.png
 //! ```
 
@@ -22,7 +24,9 @@ use prowl::prs::PrRow;
 use prowl::queue::QueueRow;
 use prowl::reviews::{ReviewRow, ReviewedMergedRow};
 use prowl::status::{Approval, Checks, ReviewState, Status};
+use uncurses::buffer::TextBuffer;
 use uncurses::color::Profile;
+use uncurses::text::Encode;
 
 const REPO: &str = "acme/rocket";
 
@@ -314,10 +318,15 @@ fn main() {
         show_help: true,
         ..Ui::once(&cli)
     };
+    let sections = sections();
+    if std::env::args().any(|arg| arg == "scroll") {
+        scroll_frames(&sections, ui, &changes);
+        return;
+    }
     println!(
         "{}",
         prowl::render_to_string(
-            &sections(),
+            &sections,
             &ui,
             &changes,
             Some(("5m", false)),
@@ -325,4 +334,59 @@ fn main() {
             Profile::TrueColor,
         )
     );
+}
+
+fn scroll_frames(sections: &prowl::Sections, mut ui: Ui, changes: &Changes) {
+    let count = match ui.view {
+        View::Mine => {
+            sections.prs.as_ref().map_or(0, |rows| {
+                rows.iter()
+                    .filter(|row| sections.queue.is_none() || row.queue.is_none())
+                    .count()
+            }) + sections.queue.as_ref().map_or(0, Vec::len)
+                + sections.merged.as_ref().map_or(0, Vec::len)
+                + sections.commits.as_ref().map_or(0, |stats| {
+                    usize::from(stats.upcoming.is_some()) + stats.releases.len()
+                })
+        }
+        View::Reviews => {
+            sections.reviews.as_ref().map_or(0, Vec::len)
+                + sections.reviewed_merged.as_ref().map_or(0, Vec::len)
+        }
+    };
+    ui.show_help = false;
+    for (label, selected) in [("TOP", 0), ("BOTTOM", count - 1)] {
+        ui.selected = Some(selected);
+        let mut frame = TextBuffer::new(120, 8);
+        prowl::paint_watch_frame(
+            &mut frame,
+            sections,
+            &ui,
+            changes,
+            "",
+            Some(("5m", false)),
+            true,
+        );
+        println!(
+            "--- {:?}: {label} (120x8, selected row {}) ---",
+            ui.view,
+            selected + 1
+        );
+        println!("{}", frame.display_with(Profile::Disabled));
+    }
+    ui.show_help = true;
+    ui.selected = None;
+    ui.scroll = Some(5);
+    let mut frame = TextBuffer::new(120, 6);
+    prowl::paint_watch_frame(
+        &mut frame,
+        sections,
+        &ui,
+        changes,
+        "",
+        Some(("5m", false)),
+        true,
+    );
+    println!("--- {:?}: HELP AFTER PgDn (120x6) ---", ui.view);
+    println!("{}", frame.display_with(Profile::Disabled));
 }
