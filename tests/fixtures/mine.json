@@ -1,6 +1,10 @@
 {
   "data": {
     "search": {
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      },
       "nodes": [
         {
           "number": 6475,

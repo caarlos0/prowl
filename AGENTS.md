@@ -371,7 +371,7 @@ still performs all teardown through `finish`.
 - **Sorting:** My open PRs by `updatedAt` desc by default; `--sort-open created`
   (or `sort-open created` in config) uses `createdAt` desc instead. Both use PR
   number desc for ties and put missing timestamps last. The chosen order is
-  also sent in the GitHub search, before its 50-result limit, and reapplied to
+  also sent in the GitHub search, across five-PR pages, and reapplied to
   cached rows at startup. It does not affect any other section:
   merged PRs by `mergedAt` desc;
   queue by `position` asc. Reviews by review-state rank (Awaiting → ReReview →
@@ -524,7 +524,7 @@ still performs all teardown through `finish`.
   `nextEntryEstimatedTimeToMerge` (the header ETA). Each entry's PR carries
   `baseRef { id }`; required-context discovery and pagination are shared with
   My PRs, using the queue entry's `headCommit` to count missing checks.
-- Open PRs: `search(is:pr is:open author:<me>)` with `mergeable`,
+- Open PRs: `search(is:pr is:open author:<me>)`, five per cursor page, with `mergeable`,
   `mergeStateStatus`, `reviewDecision`,
   `latestOpinionatedReviews(first: 100) { nodes { state } }`,
   `mergeQueueEntry`, `headRefName`, `updatedAt`, `createdAt`,
@@ -535,7 +535,7 @@ still performs all teardown through `finish`.
   `baseRef { id }` identifies each actual target branch. A separate paginated
   query reads `refUpdateRule.requiredStatusCheckContexts` and active
   `rules.parameters.requiredStatusChecks`. When any checks are expected (or
-  `--required` is set), the existing batched commit query reads all contexts,
+  `--required` is set), five-commit batches read all contexts,
   including their names and `isRequired`, to identify unreported required checks.
 - Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with
   `headRefName` and `mergedAt`

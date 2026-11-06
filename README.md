@@ -117,6 +117,9 @@ Set `sort-open created` in the config file to make it the default;
 `--sort-open updated` overrides that setting for one run. This option changes
 only My open PRs, not the merge queue, merged PRs, or either reviews list.
 
+Prowl fetches your open PRs in pages of five, instead of stopping at 50.
+It also batches check details for five PRs at a time to avoid oversized requests.
+
 While watching, press `Ctrl-R` to refresh now, `Tab` to switch between your PRs and
 your reviews, `?` to toggle the help legend, and `q` (or `Ctrl-C`) to quit;
 `Ctrl-Z` suspends it back to your shell. The dashboard takes over the alternate

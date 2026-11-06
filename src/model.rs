@@ -245,8 +245,9 @@ pub fn fetch_queue(
 // My open PRs
 // ----------------------------------------------------------------------------
 
-pub const MINE_QUERY: &str = r#"query($q: String!) {
-  search(type: ISSUE, first: 50, query: $q) {
+pub const MINE_QUERY: &str = r#"query($q: String!, $after: String) {
+  search(type: ISSUE, first: 5, after: $after, query: $q) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
         number title url mergeable mergeStateStatus isDraft updatedAt createdAt headRefName
@@ -272,6 +273,16 @@ pub struct MineData {
 #[derive(Debug, Deserialize)]
 pub struct MineNodes {
     pub nodes: Vec<PrNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+impl MineNodes {
+    fn add_to(self, nodes: &mut Vec<PrNode>) -> Result<Option<String>> {
+        let after = self.page_info.next_cursor()?;
+        nodes.extend(self.nodes);
+        Ok(after)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,8 +479,16 @@ pub fn fetch_my_prs(
     required_only: bool,
 ) -> Result<Vec<PrNode>> {
     let q = mine_search(repo, me, sort);
-    let data: MineData = client.graphql(MINE_QUERY, serde_json::json!({ "q": q }))?;
-    let mut nodes = data.search.nodes;
+    let mut nodes = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let data: MineData =
+            client.graphql(MINE_QUERY, serde_json::json!({ "q": q, "after": after }))?;
+        after = data.search.add_to(&mut nodes)?;
+        if after.is_none() {
+            break;
+        }
+    }
     let targets: Vec<_> = nodes
         .iter()
         .map(|node| RequiredTarget {
@@ -535,7 +554,7 @@ struct RefUpdateRule {
 #[derive(Debug, Deserialize)]
 struct RefRules {
     #[serde(rename = "pageInfo")]
-    page_info: RequiredPageInfo,
+    page_info: PageInfo,
     nodes: Vec<RefRule>,
 }
 
@@ -638,24 +657,23 @@ struct RequiredRollup {
 #[derive(Debug, Deserialize)]
 struct RequiredContexts {
     #[serde(rename = "pageInfo")]
-    page_info: RequiredPageInfo,
+    page_info: PageInfo,
     nodes: Vec<RequiredContext>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RequiredPageInfo {
+struct PageInfo {
     #[serde(rename = "hasNextPage")]
     has_next_page: bool,
     #[serde(rename = "endCursor")]
     end_cursor: Option<String>,
 }
 
-impl RequiredPageInfo {
+impl PageInfo {
     fn next_cursor(self) -> Result<Option<String>> {
         if self.has_next_page {
             Ok(Some(
-                self.end_cursor
-                    .context("required-check page had no end cursor")?,
+                self.end_cursor.context("GraphQL page had no end cursor")?,
             ))
         } else {
             Ok(None)
@@ -777,6 +795,28 @@ fn required_query(pending: &[PendingRequired]) -> (String, serde_json::Value) {
     )
 }
 
+fn fetch_required_pages(
+    mut pending: Vec<PendingRequired>,
+    summaries: &mut [RequiredSummary],
+    mut fetch: impl FnMut(&str, serde_json::Value) -> Result<HashMap<String, Option<RequiredCommit>>>,
+) -> Result<()> {
+    while !pending.is_empty() {
+        for batch in pending.chunks_mut(5) {
+            let (query, variables) = required_query(batch);
+            let mut data = fetch(&query, variables)?;
+            for (alias, item) in batch.iter_mut().enumerate() {
+                let commit = data
+                    .remove(&format!("c{alias}"))
+                    .with_context(|| format!("required-check response omitted c{alias}"))?
+                    .with_context(|| format!("required-check commit c{alias} was unavailable"))?;
+                item.after = summaries[item.target].add_page(commit)?;
+            }
+        }
+        pending.retain(|item| item.after.is_some());
+    }
+    Ok(())
+}
+
 fn fetch_required(
     client: &Client,
     targets: &[RequiredTarget],
@@ -802,7 +842,7 @@ fn fetch_required(
     let mut summaries: Vec<_> = (0..targets.len())
         .map(|_| RequiredSummary::default())
         .collect();
-    let mut pending: Vec<_> = targets
+    let pending: Vec<_> = targets
         .iter()
         .enumerate()
         .filter(|(_, item)| required_only || !expected(item).is_empty())
@@ -816,23 +856,9 @@ fn fetch_required(
         })
         .collect();
 
-    while !pending.is_empty() {
-        let (query, variables) = required_query(&pending);
-        let mut data: HashMap<String, Option<RequiredCommit>> =
-            client.graphql(&query, variables)?;
-        let mut next = Vec::new();
-        for (alias, mut item) in pending.into_iter().enumerate() {
-            let commit = data
-                .remove(&format!("c{alias}"))
-                .with_context(|| format!("required-check response omitted c{alias}"))?
-                .with_context(|| format!("required-check commit c{alias} was unavailable"))?;
-            item.after = summaries[item.target].add_page(commit)?;
-            if item.after.is_some() {
-                next.push(item);
-            }
-        }
-        pending = next;
-    }
+    fetch_required_pages(pending, &mut summaries, |query, variables| {
+        client.graphql(query, variables)
+    })?;
 
     for (target, summary) in targets.iter().zip(&mut summaries) {
         summary.include_missing(expected(target));
@@ -1039,6 +1065,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mine_query_uses_small_pages() {
+        assert!(
+            MINE_QUERY.contains("first: 5, after: $after"),
+            "{MINE_QUERY}"
+        );
+        assert!(MINE_QUERY.contains("$after: String"), "{MINE_QUERY}");
+        assert!(
+            MINE_QUERY.contains("pageInfo { hasNextPage endCursor }"),
+            "{MINE_QUERY}"
+        );
+    }
+
+    #[test]
+    fn mine_pages_preserve_all_prs_and_return_the_next_cursor() {
+        let mut first: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine.json")).unwrap();
+        first["data"]["search"]["pageInfo"] = serde_json::json!({
+            "hasNextPage": true,
+            "endCursor": "NEXT",
+        });
+        let first: MineData =
+            crate::github::parse_graphql(&serde_json::to_vec(&first).unwrap()).unwrap();
+        let last: MineData =
+            crate::github::parse_graphql(include_bytes!("../tests/fixtures/mine_no_rollup.json"))
+                .unwrap();
+        let mut nodes = Vec::new();
+        assert_eq!(
+            first.search.add_to(&mut nodes).unwrap().as_deref(),
+            Some("NEXT")
+        );
+        assert_eq!(last.search.add_to(&mut nodes).unwrap(), None);
+        assert_eq!(
+            nodes.iter().map(|node| node.number).collect::<Vec<_>>(),
+            [6475, 5323, 6656, 123]
+        );
+        assert_eq!(nodes[0].checks().fail, 4);
+        assert_eq!(nodes[3].review_threads.unresolved(), (1, false));
+    }
+
+    #[test]
+    fn mine_empty_page_finishes_pagination() {
+        let data: MineData =
+            crate::github::parse_graphql(include_bytes!("../tests/fixtures/mine_empty.json"))
+                .unwrap();
+        let mut nodes = Vec::new();
+        assert_eq!(data.search.add_to(&mut nodes).unwrap(), None);
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn mine_pages_do_not_stop_at_fifty_prs() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine_no_rollup.json")).unwrap();
+        let mut nodes = Vec::new();
+        for page in 0..11 {
+            let mut response = fixture.clone();
+            response["data"]["search"]["nodes"] = (0..5)
+                .map(|offset| {
+                    let mut node = fixture["data"]["search"]["nodes"][0].clone();
+                    node["number"] = (page * 5 + offset + 1).into();
+                    node
+                })
+                .collect();
+            response["data"]["search"]["pageInfo"] = serde_json::json!({
+                "hasNextPage": page < 10,
+                "endCursor": format!("PAGE_{page}"),
+            });
+            let data: MineData =
+                crate::github::parse_graphql(&serde_json::to_vec(&response).unwrap()).unwrap();
+            let after = data.search.add_to(&mut nodes).unwrap();
+            if page < 10 {
+                assert_eq!(after, Some(format!("PAGE_{page}")));
+            } else {
+                assert_eq!(after, None);
+            }
+        }
+        assert_eq!(
+            nodes.iter().map(|node| node.number).collect::<Vec<_>>(),
+            (1..=55).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mine_rejects_a_page_without_pagination_metadata() {
+        let mut fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine.json")).unwrap();
+        fixture["data"]["search"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pageInfo");
+        let err = crate::github::parse_graphql::<MineData>(&serde_json::to_vec(&fixture).unwrap())
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("missing field `pageInfo`"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn mine_search_sorts_before_the_api_page_limit() {
         let repo = Repo::parse("owner/repo").unwrap();
         for (sort, qualifier) in [
@@ -1199,14 +1324,14 @@ mod tests {
     }
 
     #[test]
-    fn required_check_pages_need_a_cursor_to_continue() {
-        let page = RequiredPageInfo {
+    fn graphql_pages_need_a_cursor_to_continue() {
+        let page = PageInfo {
             has_next_page: true,
             end_cursor: None,
         };
         assert_eq!(
             page.next_cursor().unwrap_err().to_string(),
-            "required-check page had no end cursor"
+            "GraphQL page had no end cursor"
         );
     }
 
@@ -1534,6 +1659,124 @@ mod tests {
             assert_eq!(variables["commit0"], "COMMIT_ID");
             assert_eq!(variables["pull0"], 42);
             assert_eq!(variables["after0"], expected);
+        }
+    }
+
+    fn required_commit_page(target: usize, page: usize, next: Option<String>) -> RequiredCommit {
+        let nodes: Vec<_> = (0..=target)
+            .map(|check| {
+                serde_json::json!({
+                    "__typename": "CheckRun",
+                    "required": true,
+                    "name": format!("check-{target}-{page}-{check}"),
+                    "status": if page == 2 { "QUEUED" } else { "COMPLETED" },
+                    "conclusion": match page {
+                        0 => Some("SUCCESS"),
+                        1 => Some("FAILURE"),
+                        _ => None,
+                    }
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "statusCheckRollup": { "contexts": {
+                "pageInfo": {
+                    "hasNextPage": next.is_some(),
+                    "endCursor": next
+                },
+                "nodes": nodes
+            } }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn required_pages_batch_commits_and_preserve_each_targets_cursor_and_counts() {
+        let pages = [1usize, 2, 0, 3, 1, 2, 0, 3];
+        let pending = pages
+            .iter()
+            .enumerate()
+            .filter(|(_, pages)| **pages > 0)
+            .map(|(target, _)| PendingRequired {
+                target,
+                pull_request_number: 100 + i64::try_from(target).unwrap(),
+                commit_id: format!("commit-{target}"),
+                after: None,
+            })
+            .collect();
+        let mut summaries: Vec<_> = pages.iter().map(|_| RequiredSummary::default()).collect();
+        let mut received = [0usize; 8];
+        let mut requests = Vec::new();
+
+        fetch_required_pages(pending, &mut summaries, |query, variables| {
+            let count = query.matches(": node(id: $commit").count();
+            assert!((1..=5).contains(&count), "commit count: {count}");
+            assert_eq!(variables.as_object().unwrap().len(), count * 3);
+            let mut response = HashMap::new();
+            let mut request = Vec::new();
+            for alias in 0..count {
+                let commit = variables[format!("commit{alias}")].as_str().unwrap();
+                let target: usize = commit.strip_prefix("commit-").unwrap().parse().unwrap();
+                let page = received[target];
+                assert!(page < pages[target], "extra page for target {target}");
+                assert_eq!(
+                    variables[format!("pull{alias}")],
+                    100 + i64::try_from(target).unwrap(),
+                    "PR number for target {target}"
+                );
+                let after = (page > 0).then(|| format!("cursor-{target}-{page}"));
+                assert_eq!(
+                    variables[format!("after{alias}")],
+                    serde_json::json!(after),
+                    "cursor for target {target}, page {page}"
+                );
+                assert!(query.contains(&format!("c{alias}: node(id: $commit{alias})")));
+                assert!(query.contains(&format!("contexts(first: 100, after: $after{alias})")));
+                assert!(query.contains(&format!("isRequired(pullRequestNumber: $pull{alias})")));
+                request.push((target, page));
+                received[target] += 1;
+                let next = (received[target] < pages[target])
+                    .then(|| format!("cursor-{target}-{}", page + 1));
+                response.insert(
+                    format!("c{alias}"),
+                    Some(required_commit_page(target, page, next)),
+                );
+            }
+            requests.push(request);
+            Ok(response)
+        })
+        .unwrap();
+
+        assert_eq!(
+            requests,
+            [
+                vec![(0, 0), (1, 0), (3, 0), (4, 0), (5, 0)],
+                vec![(7, 0)],
+                vec![(1, 1), (3, 1), (5, 1), (7, 1)],
+                vec![(3, 2), (7, 2)],
+            ]
+        );
+        assert_eq!(received, pages);
+        for (target, summary) in summaries.iter().enumerate() {
+            let checks = (target + 1) as u64;
+            assert_eq!(
+                summary.checks,
+                Checks {
+                    pass: if pages[target] > 0 { checks } else { 0 },
+                    fail: if pages[target] > 1 { checks } else { 0 },
+                    running: if pages[target] > 2 { checks } else { 0 },
+                },
+                "counts for original target {target}"
+            );
+            let contexts: HashSet<_> = (0..pages[target])
+                .flat_map(|page| {
+                    (0..=target).map(move |check| format!("check-{target}-{page}-{check}"))
+                })
+                .collect();
+            assert_eq!(
+                summary.contexts, contexts,
+                "contexts for original target {target}"
+            );
         }
     }
 }

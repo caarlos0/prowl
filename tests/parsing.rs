@@ -249,7 +249,10 @@ fn mine_distinguishes_required_approvals_from_any_approval() {
             "nodes": reviews.iter().map(|state| serde_json::json!({ "state": state }))
                 .collect::<Vec<_>>()
         });
-        let response = serde_json::json!({ "data": { "search": { "nodes": [node] } } });
+        let response = serde_json::json!({ "data": { "search": {
+            "pageInfo": fixture["data"]["search"]["pageInfo"],
+            "nodes": [node]
+        } } });
         let data: MineData = parse(&response.to_string());
         let rows = prs::build_rows(data.search.nodes, OpenSort::Updated);
         for (use_ascii, expected) in [(true, ascii), (false, glyph)] {
