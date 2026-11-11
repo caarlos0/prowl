@@ -234,8 +234,9 @@ watch event loop); everything else is testable modules:
   substitutes `{title}` and `{url}` only in the template, not in inserted values.
   Titles are full PR titles, release tags, or `upcoming`.
 - `open.rs` — `open::url` opens a URL in the default browser via the platform
-  opener (`open` / `xdg-open` / `cmd /C start`), spawned detached; rejects
-  non-`http(s)` URLs; no new dep.
+  opener (`open` / `xdg-open` / `rundll32 url.dll,FileProtocolHandler`), spawned detached; rejects
+  non-`http(s)` URLs; no new dep. Command construction is tested without opening
+  a browser, including on Windows.
 - `clipboard.rs` — `clipboard::copy` sets the clipboard with the OSC 52 escape
   (`ESC ] 52 ; c ; <base64> BEL`) written straight to stdout, plus the ~15-line
   base64 encoder it needs. No dep, no subprocess, and it reaches the clipboard of
@@ -561,6 +562,7 @@ and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
 The build follows the latest stable Rust, including new Clippy lints. The audit
 job has `checks: write` to publish its check run and `issues: write` to report
 advisories; those permissions are scoped to that job.
+The `windows-opener` job runs the standalone opener module tests on Windows.
 
 ## The README screenshot
 
