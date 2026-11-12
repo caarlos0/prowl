@@ -25,6 +25,16 @@ jobs:
       - run: cargo build --verbose
       - run: cargo test --verbose
 
+  windows-opener:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: stable
+      - run: rustc --edition=2024 --test src/open.rs -o opener-tests.exe
+      - run: ./opener-tests.exe
+
   audit:
     runs-on: ubuntu-latest
     permissions:
