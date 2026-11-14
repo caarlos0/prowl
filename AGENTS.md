@@ -34,6 +34,16 @@ a `Loading...` frame while the fetch runs (abortable with `q`), then the dashboa
 is left in the terminal. Piped/non-TTY output is plain text printed straight to
 stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 
+Watch mode supports mouse input. The wheel scrolls three lines without a
+selection change. A left click selects a row, opens its exact hyperlink, or
+switches tabs. `Ui::mouse_event` uses row positions from the body painters and
+the painted cell's link, with the same viewport offset as the frame composer.
+It honors search, queue deduplication, help, and the pinned bottom block.
+`App::enter_alt` enables basic `MouseTracking`; `Program` restores it across
+suspend/resume and disables it at teardown. Inline and one-shot output never
+enable mouse input.
+The dashboard still accepts input after the first fetch fails without cached data.
+
 ## Golden rules
 
 - **Transport is the native GitHub API over HTTP** (`ureq` + rustls), not the
@@ -573,6 +583,8 @@ shot can't drift from the layout, which is why `Sections`, `Ui` and
 `render_to_string` are
 `pub`, same as everything else the offline tests reach. `demo -- scroll` and
 `demo -- reviews scroll` use `paint_watch_frame` to show top/bottom eight-row frames.
+`demo -- mouse` feeds row clicks, link clicks, and wheel events through
+`Ui::mouse_event`, then prints the resulting state and frame without a browser launch.
 `demo.tape` shoots it
 with [vhs](https://github.com/charmbracelet/vhs) (Nerd Font, Catppuccin Mocha;
 the trailing `Sleep` is required or vhs exits before writing the file), and the
