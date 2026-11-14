@@ -54,13 +54,13 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use uncurses::ansi::kitty::KittyKeyboardFlags;
-use uncurses::buffer::{Bounded, SurfaceMut, TextBuffer};
+use uncurses::buffer::{Bounded, Surface, SurfaceMut, TextBuffer};
 use uncurses::color::{Color, Profile};
-use uncurses::event::Event;
+use uncurses::event::{Event, MouseButton};
 #[cfg(test)]
 use uncurses::event::{KeyCode, KeyModifiers};
 use uncurses::layout::Position;
-use uncurses::program::Program;
+use uncurses::program::{MouseTracking, Program};
 use uncurses::screen::Screen;
 use uncurses::style::Style;
 use uncurses::terminal::{Stdin, Stdout, Terminal};
@@ -306,6 +306,7 @@ fn paint_mine(
     show_branch: bool,
     visible: Visibility,
     top: u16,
+    row_positions: &mut Vec<u16>,
 ) -> (u16, Option<u16>, bool) {
     let prs_rows = sections.prs.as_deref().filter(|_| visible.prs).map(|rows| {
         if visible.queue {
@@ -342,6 +343,7 @@ fn paint_mine(
     let mut y = top;
     let mut caret = None;
     if let Some(rows) = prs_rows.as_deref() {
+        row_positions.extend((0..rows.len()).map(|local| caret_row(y, local)));
         caret = caret.or(prs_sel.map(|l| caret_row(y, l)));
         y = paint_section(
             s,
@@ -357,6 +359,7 @@ fn paint_mine(
         );
     }
     if let Some(rows) = queue_rows {
+        row_positions.extend((0..rows.len()).map(|local| caret_row(y, local)));
         // The queue-level ETA (time until a newly added entry would merge) rides
         // alongside the header as a dim note.
         caret = caret.or(queue_sel.map(|l| caret_row(y, l)));
@@ -380,6 +383,7 @@ fn paint_mine(
         );
     }
     if let Some(rows) = merged_rows {
+        row_positions.extend((0..rows.len()).map(|local| caret_row(y, local)));
         caret = caret.or(merged_sel.map(|l| caret_row(y, l)));
         y = paint_section(
             s,
@@ -397,7 +401,7 @@ fn paint_mine(
     if visible.shipments
         && let Some(stats) = &sections.commits
     {
-        let (next, ship_caret) = paint_commits(s, stats, ship_sel, ascii, y);
+        let (next, ship_caret) = paint_commits(s, stats, ship_sel, ascii, y, row_positions);
         y = next + 1;
         caret = caret.or(ship_caret);
     }
@@ -407,6 +411,7 @@ fn paint_mine(
 /// The Reviews view: PRs to review (with a per-row review-state glyph), then
 /// merged PRs I reviewed. Returns the next free row, the selection caret, and
 /// whether the width hid information.
+#[allow(clippy::too_many_arguments)]
 fn paint_reviews(
     s: &mut impl TextSurface,
     sections: &Sections,
@@ -415,6 +420,7 @@ fn paint_reviews(
     show_branch: bool,
     visible: Visibility,
     top: u16,
+    row_positions: &mut Vec<u16>,
 ) -> (u16, Option<u16>, bool) {
     let open_table = sections
         .reviews
@@ -452,6 +458,7 @@ fn paint_reviews(
     if visible.reviews
         && let Some(rows) = &sections.reviews
     {
+        row_positions.extend((0..rows.len()).map(|local| caret_row(y, local)));
         caret = open_sel.map(|l| caret_row(y, l));
         y = paint_section(
             s,
@@ -469,6 +476,7 @@ fn paint_reviews(
     if visible.reviewed_merged
         && let Some(rows) = &sections.reviewed_merged
     {
+        row_positions.extend((0..rows.len()).map(|local| caret_row(y, local)));
         caret = caret.or(merged_sel.map(|l| caret_row(y, l)));
         y = paint_section(
             s,
@@ -504,6 +512,7 @@ fn paint_body(
     tabs: bool,
     visible: Visibility,
     top: u16,
+    row_positions: &mut Vec<u16>,
 ) -> (u16, Option<u16>, bool) {
     let mut y = top;
     if tabs {
@@ -519,8 +528,18 @@ fn paint_body(
             ui.branch,
             visible,
             y,
+            row_positions,
         ),
-        View::Reviews => paint_reviews(s, sections, ui.selected, ascii, ui.branch, visible, y),
+        View::Reviews => paint_reviews(
+            s,
+            sections,
+            ui.selected,
+            ascii,
+            ui.branch,
+            visible,
+            y,
+            row_positions,
+        ),
     };
     // Highlight the selected row once the whole body is painted, so the bar
     // spans the content and covers the hand-laid-out shipments section too.
@@ -607,6 +626,7 @@ fn paint_dashboard(
         footer.is_some(),
         visible,
         0,
+        &mut Vec::new(),
     );
     let (used, caret) = paint_bottom(
         s,
@@ -684,7 +704,7 @@ fn watch_body(
     ui: &Ui,
     changes: &Changes,
     ascii: bool,
-) -> (TextBuffer, u16, Option<u16>, bool) {
+) -> (TextBuffer, u16, Option<u16>, bool, Vec<u16>) {
     let mut body = staging_buffer(
         screen,
         screen.bounds().width,
@@ -695,6 +715,7 @@ fn watch_body(
     } else {
         0
     };
+    let mut row_positions = Vec::new();
     let (body_h, selected, compact) = paint_body(
         &mut body,
         sections,
@@ -704,8 +725,9 @@ fn watch_body(
         true,
         Visibility::all(sections),
         top,
+        &mut row_positions,
     );
-    (body, body_h, selected, compact)
+    (body, body_h, selected, compact, row_positions)
 }
 
 /// Paint a watch frame with a scrollable body and a pinned bottom block.
@@ -722,7 +744,7 @@ pub fn paint_watch_frame(
 ) -> Option<Position> {
     let bounds = screen.bounds();
     let visible = Visibility::all(sections);
-    let (mut body, body_h, selected, compact) = watch_body(screen, sections, ui, changes, ascii);
+    let (mut body, body_h, selected, compact, _) = watch_body(screen, sections, ui, changes, ascii);
     let bottom_h = bottom_height(ui, status, footer, false) as u16;
     let mut bottom = staging_buffer(screen, bounds.width, bottom_h.max(1));
     let (bottom_h, caret) = paint_bottom(
@@ -997,6 +1019,7 @@ fn paint_commits(
     selected: Option<usize>,
     ascii: bool,
     top: u16,
+    row_positions: &mut Vec<u16>,
 ) -> (u16, Option<u16>) {
     if !stats.available {
         // The shipments rows lead with a 2-column gutter, not a table's marker
@@ -1071,6 +1094,9 @@ fn paint_commits(
 
     let mut caret = None;
     for (i, (label, url, value, age)) in rows.iter().enumerate() {
+        if url.is_some() {
+            row_positions.push(y);
+        }
         // The first row is the upcoming (unreleased) version; set it apart in
         // italics. The label links to the bucket's log/release page.
         let style = if i == 0 && !ascii {
@@ -1283,7 +1309,7 @@ pub struct Ui {
     /// until the user moves it), reset when switching views or changing the
     /// search, and restored by URL after a refresh or resize.
     pub selected: Option<usize>,
-    /// Explicit body offset after PageUp/PageDown; selection movement clears it.
+    /// Explicit body offset after page keys or the wheel; keyboard movement clears it.
     pub scroll: Option<u16>,
     /// The active search query; empty means no filter is applied.
     pub search: String,
@@ -1337,17 +1363,96 @@ impl Ui {
     }
 
     fn scroll_page(&mut self, down: bool, body_h: u16, available: u16, selected_row: Option<u16>) {
+        self.scroll_by(down, available.max(1), body_h, available, selected_row);
+    }
+
+    fn scroll_by(
+        &mut self,
+        down: bool,
+        step: u16,
+        body_h: u16,
+        available: u16,
+        selected_row: Option<u16>,
+    ) {
         let max = body_h.saturating_sub(available);
         let offset = self
             .scroll
             .unwrap_or_else(|| render::body_scroll_offset(body_h, available, selected_row))
             .min(max);
-        let step = available.max(1);
         self.scroll = Some(if down {
             offset.saturating_add(step).min(max)
         } else {
             offset.saturating_sub(step)
         });
+    }
+
+    /// Apply a watch-frame mouse event. Return the exact painted hyperlink,
+    /// if any, for the caller to open.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mouse_event(
+        &mut self,
+        screen: &impl TextSurface,
+        sections: &Sections,
+        status: &str,
+        footer: Option<(&str, bool)>,
+        ascii: bool,
+        event: &Event,
+    ) -> Option<String> {
+        let (mouse, down) = match event {
+            Event::MouseWheel(mouse) if mouse.button == MouseButton::WheelUp => {
+                (mouse, Some(false))
+            }
+            Event::MouseWheel(mouse) if mouse.button == MouseButton::WheelDown => {
+                (mouse, Some(true))
+            }
+            Event::MouseClick(mouse) if mouse.button == MouseButton::Left => (mouse, None),
+            _ => return None,
+        };
+        let bounds = screen.bounds();
+        let available = bounds
+            .height
+            .saturating_sub(bottom_height(self, status, footer, false) as u16);
+        let mut filtered = None;
+        let shown = self.shown(sections, &mut filtered);
+        let (body, height, selected, _, rows) =
+            watch_body(screen, shown, self, &Changes::default(), ascii);
+        if let Some(down) = down {
+            self.scroll_by(down, 3, height, available, selected);
+            return None;
+        }
+        if mouse.x >= bounds.width || mouse.y >= available {
+            return None;
+        }
+        let offset = self
+            .scroll
+            .unwrap_or_else(|| render::body_scroll_offset(height, available, selected))
+            .min(height.saturating_sub(available));
+        let y = mouse.y + offset;
+        if y >= height {
+            return None;
+        }
+        let tab_row = if self.show_help {
+            render::help_height(self.view) as u16 + 1
+        } else {
+            0
+        };
+        if y == tab_row {
+            if let Some(view) = render::tab_at(screen, self.view, ascii, mouse.x) {
+                self.view = view;
+                self.selected = None;
+                self.scroll = None;
+                self.searching = false;
+            }
+            return None;
+        }
+        if let Some(index) = rows.iter().position(|row| *row == y) {
+            self.selected = Some(index);
+            self.scroll = Some(offset);
+            self.searching = false;
+        }
+        body.cell(Position::new(mouse.x, y))
+            .and_then(|cell| cell.style.link.as_ref())
+            .map(|link| link.url.clone())
     }
 
     fn targets<'a>(
@@ -1618,6 +1723,7 @@ impl<'a> App<'a> {
             // for its row count — which we need, having just collapsed the
             // managed area to zero rows. Resize events carry their own size.
             self.program.autoresize()?;
+            self.program.enable_mouse(MouseTracking::empty())?;
             self.in_alt = true;
         }
         Ok(())
@@ -1788,6 +1894,31 @@ impl<'a> App<'a> {
                 .set_kitty_keyboard(Some(KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES))?;
             return Ok(Flow::Continue);
         }
+        if self.in_alt {
+            match ev {
+                Event::MouseClick(_) | Event::MouseWheel(_) => {
+                    let good = self.last_good.as_ref().unwrap_or(&Sections::EMPTY);
+                    let screen = self.program.screen();
+                    let ascii = ascii_mode(self.cli.ascii, screen.color_profile());
+                    let url = self.ui.mouse_event(
+                        screen,
+                        good,
+                        &self.last_status,
+                        Some((self.eta.as_str(), self.refreshing)),
+                        ascii,
+                        ev,
+                    );
+                    if let Some(url) = url
+                        && let Err(error) = open::url(&url)
+                    {
+                        self.last_status = format!("error: open failed: opening {url}: {error}");
+                    }
+                    self.repaint_last()?;
+                    return Ok(Flow::Continue);
+                }
+                _ => {}
+            }
+        }
         if self.ui.searching {
             return self.handle_search_event(ev);
         }
@@ -1946,7 +2077,8 @@ impl<'a> App<'a> {
         let sections = self.ui.shown(good, &mut filtered);
         let screen = self.program.screen();
         let ascii = ascii_mode(self.cli.ascii, screen.color_profile());
-        let (_, body_h, selected, _) = watch_body(screen, sections, &self.ui, &self.unread, ascii);
+        let (_, body_h, selected, _, _) =
+            watch_body(screen, sections, &self.ui, &self.unread, ascii);
         let bottom_h = bottom_height(
             &self.ui,
             &self.last_status,
@@ -2049,10 +2181,10 @@ impl<'a> App<'a> {
         self.redraw()
     }
 
-    /// Repaint the current frame in place (after a `?` toggle or a resize), once
-    /// there is something to show.
+    /// Repaint the dashboard, including an initial error without cached data.
+    /// Leave the inline loading frame alone until the alternate screen is active.
     fn repaint_last(&mut self) -> Result<()> {
-        if self.last_good.is_some() {
+        if self.in_alt {
             self.redraw()?;
         }
         Ok(())
@@ -2063,7 +2195,6 @@ impl<'a> App<'a> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use uncurses::buffer::Surface;
     use uncurses::text::Encode;
 
     /// Paint a dashboard onto an offscreen buffer and read it back as plain text.
@@ -2731,6 +2862,250 @@ mod tests {
         canvas
     }
 
+    fn mouse_click(
+        ui: &mut Ui,
+        sections: &Sections,
+        screen: &TextBuffer,
+        x: u16,
+        y: u16,
+    ) -> Option<String> {
+        ui.mouse_event(
+            screen,
+            sections,
+            "",
+            Some(("5m", false)),
+            true,
+            &Event::MouseClick(uncurses::event::Mouse::new(
+                x,
+                y,
+                MouseButton::Left,
+                KeyModifiers::empty(),
+            )),
+        )
+    }
+
+    fn link_position(screen: &TextBuffer, url: &str) -> Position {
+        (0..screen.height())
+            .flat_map(|y| (0..screen.width()).map(move |x| Position::new(x, y)))
+            .find(|position| {
+                screen
+                    .cell(*position)
+                    .unwrap()
+                    .style
+                    .link
+                    .as_ref()
+                    .is_some_and(|link| link.url == url)
+            })
+            .unwrap_or_else(|| panic!("missing link: {url}"))
+    }
+
+    #[test]
+    fn mouse_selects_rows_in_both_views_including_narrow_frames() {
+        let sections = Sections {
+            prs: Some(vec![queued_open_row(1)]),
+            queue: Some(vec![queue_row(1, true, false), queue_row(2, false, false)]),
+            merged: Some(vec![merged_row(3)]),
+            reviews: Some(vec![review_row(4)]),
+            reviewed_merged: Some(vec![reviews::ReviewedMergedRow {
+                number: 5,
+                title: "reviewed".into(),
+                branch: String::new(),
+                author: "other".into(),
+                url: "https://reviewed/5".into(),
+                merged_at: None,
+            }]),
+            ..Sections::EMPTY
+        };
+        for view in [View::Mine, View::Reviews] {
+            let mut ui = ui(view);
+            ui.show_help = true;
+            let screen = watch_frame(&sections, &ui, 120, 40);
+            let targets = nav::targets_visible(view, &sections, "", Visibility::all(&sections));
+            for (index, target) in targets.iter().enumerate() {
+                let position = link_position(&screen, target.url);
+                for width in [120, 1] {
+                    let narrow = TextBuffer::new(width, 40);
+                    assert_eq!(
+                        mouse_click(&mut ui, &sections, &narrow, width - 1, position.y),
+                        None
+                    );
+                    assert_eq!(ui.selected, Some(index));
+                    assert_eq!(ui.selected_url(&sections).as_deref(), Some(target.url));
+                }
+                assert_eq!(
+                    mouse_click(&mut ui, &sections, &screen, position.x, position.y).as_deref(),
+                    Some(target.url)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_opens_release_cells_instead_of_the_pr_and_skips_url_less_shipments() {
+        let mut row = merged_row(1);
+        row.release = Some(commits::ReleaseRef {
+            tag: "v1".into(),
+            url: "https://release/v1".into(),
+        });
+        let sections = Sections {
+            merged: Some(vec![row]),
+            commits: Some(commits::CommitStats {
+                available: true,
+                upcoming: None,
+                releases: vec![commits::Release {
+                    tag: "v1".into(),
+                    bucket: commits::Bucket {
+                        count: commits::Count {
+                            mine: 1,
+                            capped: false,
+                        },
+                        url: "https://release/v1".into(),
+                    },
+                    published_at: None,
+                }],
+            }),
+            ..Sections::EMPTY
+        };
+        let mut ui = ui(View::Mine);
+        let screen = watch_frame(&sections, &ui, 120, 20);
+        let release = link_position(&screen, "https://release/v1");
+        assert_eq!(
+            mouse_click(&mut ui, &sections, &screen, release.x, release.y).as_deref(),
+            Some("https://release/v1")
+        );
+        assert_eq!(
+            ui.selected_url(&sections).as_deref(),
+            Some("https://merged/1")
+        );
+        let text = screen.display_with(Profile::Disabled).to_string();
+        let upcoming = text
+            .lines()
+            .position(|line| line.contains("upcoming"))
+            .unwrap() as u16;
+        assert_eq!(mouse_click(&mut ui, &sections, &screen, 20, upcoming), None);
+        assert_eq!(ui.selected, Some(0));
+        assert_eq!(
+            mouse_click(&mut ui, &sections, &screen, 119, upcoming + 1),
+            None
+        );
+        assert_eq!(ui.selected, Some(1));
+        assert_eq!(
+            ui.selected_url(&sections).as_deref(),
+            Some("https://release/v1")
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_and_click_follow_the_filtered_viewport_not_the_pinned_footer() {
+        let sections = Sections {
+            merged: Some((1..=30).map(merged_row).collect()),
+            ..Sections::EMPTY
+        };
+        let mut ui = Ui {
+            search: "merged-2".into(),
+            searching: true,
+            selected: Some(0),
+            ..ui(View::Mine)
+        };
+        let screen = TextBuffer::new(120, 8);
+        let wheel = |button| {
+            Event::MouseWheel(uncurses::event::Mouse::new(
+                0,
+                7,
+                button,
+                KeyModifiers::empty(),
+            ))
+        };
+        ui.mouse_event(
+            &screen,
+            &sections,
+            "",
+            Some(("5m", false)),
+            true,
+            &wheel(MouseButton::WheelDown),
+        );
+        assert!(ui.scroll.is_some_and(|offset| offset > 0));
+        assert_eq!(ui.selected, Some(0));
+        assert!(ui.searching);
+        let mut filtered = None;
+        let shown = ui.shown(&sections, &mut filtered);
+        let frame = watch_frame(shown, &ui, 120, 8);
+        let text = frame.display_with(Profile::Disabled).to_string();
+        let (y, line) = text
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains("merged-2"))
+            .unwrap();
+        let number = line
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .trim_start_matches('#');
+        let url = format!("https://merged/{number}");
+        let position = link_position(&frame, &url);
+        assert_eq!(usize::from(position.y), y);
+        let offset = ui.scroll;
+        assert_eq!(
+            mouse_click(&mut ui, &sections, &frame, 119, position.y),
+            None
+        );
+        assert_eq!(ui.selected_url(&sections), Some(url));
+        assert_eq!(ui.scroll, offset);
+        assert!(!ui.searching);
+        let selected = ui.selected;
+        for (x, y) in [(0, 7), (120, 0), (0, 8)] {
+            assert_eq!(mouse_click(&mut ui, &sections, &frame, x, y), None);
+            assert_eq!(ui.selected, selected);
+        }
+        for _ in 0..20 {
+            ui.mouse_event(
+                &screen,
+                &sections,
+                "",
+                Some(("5m", false)),
+                true,
+                &wheel(MouseButton::WheelUp),
+            );
+        }
+        assert_eq!(ui.scroll, Some(0));
+        assert_eq!(ui.selected, selected);
+    }
+
+    #[test]
+    fn mouse_tabs_use_painted_labels_and_ignore_gaps_and_releases() {
+        for ascii in [false, true] {
+            let screen = TextBuffer::new(120, 20);
+            let mut ui = ui(View::Mine);
+            let event = |x, release| {
+                let mouse =
+                    uncurses::event::Mouse::new(x, 0, MouseButton::Left, KeyModifiers::empty());
+                if release {
+                    Event::MouseRelease(mouse)
+                } else {
+                    Event::MouseClick(mouse)
+                }
+            };
+            ui.mouse_event(&screen, &Sections::EMPTY, "", None, ascii, &event(9, true));
+            assert_eq!(ui.view, View::Mine);
+            ui.mouse_event(&screen, &Sections::EMPTY, "", None, ascii, &event(8, false));
+            assert_eq!(ui.view, View::Mine);
+            ui.selected = Some(0);
+            ui.mouse_event(
+                &screen,
+                &Sections::EMPTY,
+                "",
+                None,
+                ascii,
+                &event(10, false),
+            );
+            assert_eq!(ui.view, View::Reviews);
+            assert_eq!(ui.selected, None);
+            assert_eq!(ui.scroll, None);
+            ui.mouse_event(&screen, &Sections::EMPTY, "", None, ascii, &event(0, false));
+            assert_eq!(ui.view, View::Mine);
+        }
+    }
+
     #[test]
     fn page_keys_scroll_in_normal_and_search_modes() {
         use uncurses::event::Key;
@@ -2760,7 +3135,7 @@ mod tests {
                 0
             );
             let screen = TextBuffer::new(120, 6);
-            let (body, height, selected, _) =
+            let (body, height, selected, _, _) =
                 watch_body(&screen, &sections, &ui, &Changes::default(), true);
             let expected = body.display_with(Profile::Disabled).to_string();
             let mut seen = HashSet::new();

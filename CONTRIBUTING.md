@@ -53,6 +53,7 @@ cargo run --example demo             # or just print the "my PRs" view
 cargo run --example demo -- reviews  # ...and the reviews view
 cargo run --example demo -- scroll   # top/bottom eight-row watch frames
 cargo run --example demo -- reviews scroll
+cargo run --example demo -- mouse    # simulated row/link clicks and wheel input
 ```
 
 `task screenshot` needs [vhs](https://github.com/charmbracelet/vhs) (and the
