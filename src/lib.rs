@@ -188,14 +188,27 @@ fn fetch(
     } else {
         None
     };
+    let mut required_context_cache = model::RequiredContextCache::default();
     let (queue, queue_next_eta) = if want_mine && cli.show_queue() {
-        let (nodes, eta) = model::fetch_queue(client, repo, cli.required)?;
+        let (nodes, eta) = model::fetch_queue_with_context_cache(
+            client,
+            repo,
+            cli.required,
+            &mut required_context_cache,
+        )?;
         (Some(queue::build_rows(nodes, me)), eta)
     } else {
         (None, None)
     };
     let prs = if want_mine && cli.show_mine() {
-        let nodes = model::fetch_my_prs(client, repo, me, cli.sort_open, cli.required)?;
+        let nodes = model::fetch_my_prs_with_context_cache(
+            client,
+            repo,
+            me,
+            cli.sort_open,
+            cli.required,
+            &mut required_context_cache,
+        )?;
         let rows = prs::build_rows(nodes, cli.sort_open);
         let rows = if cli.no_draft {
             prs::without_drafts(rows)
