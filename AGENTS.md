@@ -439,7 +439,18 @@ still performs all teardown through `finish`.
   view, including filtered/hidden PRs. Neither action moves the selection.
   New events mark the PR again. Markers are not saved to the cache.
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
-  line, and does not ring. After a rate-limit signal, the client rejects calls
+  line, and does not ring. Fetches return each section's result independently:
+  successful sections use current data, while failed sections keep their last
+  available data and show `stale`, or show `unavailable` on a cold fetch. The
+  per-section error lines remain visible through navigation and copy/open
+  messages. Release-stat failures also mark merged release metadata; known
+  release annotations are retained while fresh merged PR rows still render.
+  Partial fetches do not write the cache, so degraded data is never saved as a
+  fresh snapshot. One-shot output renders available sections and exits with an
+  error when any section failed. If a section first becomes available after a
+  cold failure, it seeds change detection without reporting historical merges
+  as new.
+  After a rate-limit signal, the client rejects calls
   to the limited resource locally until the server's reset or retry deadline,
   with an error naming that time. An identified secondary limit without a
   deadline uses GitHub's documented one-minute minimum. Interval and manual
@@ -500,7 +511,9 @@ still performs all teardown through `finish`.
 - **Cache:** on a watch start, prowl paints the cached `Sections` immediately
   (entering the alt screen straight away), seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
-  but stays silent (no startup bell). With no cache it shows an inline
+  but stays silent (no startup bell). A refresh writes the cache only when all
+  enabled section fetches succeeded; partial data remains in memory only. With
+  no cache it shows an inline
   `Loading...` frame and enters the alt screen only once the first fetch lands.
   `--no-cache` skips both read and write.
 - **Terminal:** the watch runs on a `uncurses::Program` in the alternate screen
