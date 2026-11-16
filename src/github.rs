@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,6 +12,41 @@ use ureq::http::{HeaderMap, Response};
 
 const API: &str = "https://api.github.com";
 const USER_AGENT: &str = concat!("prowl/", env!("CARGO_PKG_VERSION"));
+const MAX_CACHED_GETS: usize = 32;
+
+#[derive(Clone)]
+struct CachedGet {
+    etag: String,
+    body: serde_json::Value,
+}
+
+#[derive(Default)]
+struct GetCache {
+    entries: HashMap<String, CachedGet>,
+    insertion_order: VecDeque<String>,
+}
+
+impl GetCache {
+    fn insert(&mut self, path: String, entry: CachedGet) {
+        if let Some(cached) = self.entries.get_mut(&path) {
+            *cached = entry;
+            return;
+        }
+        while self.entries.len() >= MAX_CACHED_GETS {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.insertion_order.push_back(path.clone());
+        self.entries.insert(path, entry);
+    }
+
+    fn remove(&mut self, path: &str) {
+        if self.entries.remove(path).is_some() {
+            self.insertion_order.retain(|cached| cached != path);
+        }
+    }
+}
 
 /// A `owner/name` repository slug.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +200,7 @@ pub struct Client {
     agent: ureq::Agent,
     token: String,
     cooldowns: Arc<Mutex<HashMap<Resource, DateTime<Utc>>>>,
+    get_cache: Arc<Mutex<GetCache>>,
     #[cfg(test)]
     fake: Option<fake::Fake>,
 }
@@ -181,6 +217,7 @@ impl Client {
             agent,
             token,
             cooldowns: Arc::default(),
+            get_cache: Arc::default(),
             #[cfg(test)]
             fake: None,
         }
@@ -206,7 +243,7 @@ impl Client {
         variables: serde_json::Value,
     ) -> Result<(T, Vec<GqlError>)> {
         let body = serde_json::json!({ "query": query, "variables": variables });
-        let mut resp = self.request("graphql", Some(&body))?;
+        let mut resp = self.request("graphql", Some(&body), None)?;
         let bytes = resp
             .body_mut()
             .read_to_vec()
@@ -242,10 +279,69 @@ impl Client {
 
     /// GET a REST path (relative to api.github.com), returning typed JSON.
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let mut resp = self.request(path, None)?;
-        resp.body_mut()
-            .read_json()
-            .with_context(|| format!("parsing response from /{path}"))
+        let cached = self.cached_get(path)?;
+        let mut resp =
+            self.request(path, None, cached.as_ref().map(|entry| entry.etag.as_str()))?;
+        if resp.status().as_u16() == 304 {
+            let cached = cached.ok_or_else(|| {
+                anyhow!("GitHub returned HTTP 304 for /{path} without a cached response")
+            })?;
+            if let Some(etag) = resp
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok())
+            {
+                self.cache_get(
+                    path,
+                    Some(CachedGet {
+                        etag: etag.to_string(),
+                        body: cached.body.clone(),
+                    }),
+                )?;
+            }
+            return serde_json::from_value(cached.body)
+                .with_context(|| format!("parsing cached response from /{path}"));
+        }
+
+        let bytes = resp
+            .body_mut()
+            .read_to_vec()
+            .with_context(|| format!("reading response from /{path}"))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing response from /{path}"))?;
+        let parsed = serde_json::from_value(value.clone())
+            .with_context(|| format!("parsing response from /{path}"))?;
+        if resp.status().is_success() {
+            let etag = resp
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            if etag.is_some() || cached.is_some() {
+                self.cache_get(path, etag.map(|etag| CachedGet { etag, body: value }))?;
+            }
+        }
+        Ok(parsed)
+    }
+
+    fn cached_get(&self, path: &str) -> Result<Option<CachedGet>> {
+        self.get_cache
+            .lock()
+            .map_err(|err| anyhow!("GitHub GET cache unavailable: {err}"))
+            .map(|cache| cache.entries.get(path).cloned())
+    }
+
+    fn cache_get(&self, path: &str, entry: Option<CachedGet>) -> Result<()> {
+        let mut cache = self
+            .get_cache
+            .lock()
+            .map_err(|err| anyhow!("GitHub GET cache unavailable: {err}"))?;
+        if let Some(entry) = entry {
+            cache.insert(path.to_string(), entry);
+        } else {
+            cache.remove(path);
+        }
+        Ok(())
     }
 
     #[allow(clippy::unused_self, reason = "tests use this client's fixture clock")]
@@ -326,6 +422,7 @@ impl Client {
         &self,
         path: &str,
         body: Option<&serde_json::Value>,
+        if_none_match: Option<&str>,
     ) -> Result<Response<ureq::Body>> {
         let resource = if body.is_some() {
             Resource::Graphql
@@ -333,7 +430,7 @@ impl Client {
             Resource::Core
         };
         self.check_cooldown(resource)?;
-        let mut resp = self.send(path, body)?;
+        let mut resp = self.send(path, body, if_none_match)?;
         let status = resp.status();
         if status.is_client_error() || status.is_server_error() {
             if matches!(status.as_u16(), 403 | 429) {
@@ -375,11 +472,16 @@ impl Client {
         Ok(resp)
     }
 
-    fn send(&self, path: &str, body: Option<&serde_json::Value>) -> Result<Response<ureq::Body>> {
+    fn send(
+        &self,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        if_none_match: Option<&str>,
+    ) -> Result<Response<ureq::Body>> {
         #[cfg(test)]
         if let Some(fake) = &self.fake {
             let method = if body.is_some() { "POST" } else { "GET" };
-            return fake.respond(format!("{method} /{path}"));
+            return fake.respond(format!("{method} /{path}"), if_none_match);
         }
         let url = format!("{API}/{path}");
         if let Some(body) = body {
@@ -391,13 +493,18 @@ impl Client {
                 .send_json(body)
                 .map_err(api_err)
         } else {
-            self.agent
+            let request = self
+                .agent
                 .get(url)
                 .header("Authorization", self.bearer())
                 .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .call()
-                .map_err(api_err)
+                .header("X-GitHub-Api-Version", "2022-11-28");
+            let request = if let Some(etag) = if_none_match {
+                request.header("If-None-Match", etag)
+            } else {
+                request
+            };
+            request.call().map_err(api_err)
         }
     }
 
@@ -442,6 +549,7 @@ pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
     use ureq::http::Response;
 
+    type ValidatorLog = Vec<(String, Option<String>)>;
     type ScheduledResponses = Arc<Mutex<HashMap<(String, usize), Response<String>>>>;
 
     #[derive(Clone)]
@@ -449,6 +557,7 @@ pub(crate) mod fake {
         routes: Arc<Mutex<HashMap<String, Response<String>>>>,
         failures: ScheduledResponses,
         requests: Arc<Mutex<Vec<String>>>,
+        validators: Arc<Mutex<ValidatorLog>>,
         calls: Arc<Mutex<HashMap<String, usize>>>,
         now: Arc<Mutex<DateTime<Utc>>>,
     }
@@ -456,6 +565,10 @@ pub(crate) mod fake {
     impl Fake {
         pub(crate) fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
+        }
+
+        pub(crate) fn validators(&self) -> Vec<(String, Option<String>)> {
+            self.validators.lock().unwrap().clone()
         }
 
         pub(crate) fn set_response(
@@ -501,8 +614,16 @@ pub(crate) mod fake {
             *self.now.lock().unwrap()
         }
 
-        pub(super) fn respond(&self, request: String) -> Result<Response<ureq::Body>> {
+        pub(super) fn respond(
+            &self,
+            request: String,
+            if_none_match: Option<&str>,
+        ) -> Result<Response<ureq::Body>> {
             self.requests.lock().unwrap().push(request.clone());
+            self.validators
+                .lock()
+                .unwrap()
+                .push((request.clone(), if_none_match.map(str::to_string)));
             let call = {
                 let mut calls = self.calls.lock().unwrap();
                 let count = calls.entry(request.clone()).or_default();
@@ -531,6 +652,7 @@ pub(crate) mod fake {
             )),
             failures: Arc::default(),
             requests: Arc::default(),
+            validators: Arc::default(),
             calls: Arc::default(),
             now: Arc::new(Mutex::new(Utc::now())),
         };
@@ -727,6 +849,87 @@ mod tests {
             assert!(blocked.unwrap_err().to_string().contains("rate limit"));
             assert_eq!(fake.requests(), [request]);
         }
+    }
+
+    #[test]
+    fn conditional_gets_reuse_body_and_replace_etag_across_clones() {
+        let (client, fake) = client();
+        fake.set_response(REST, 200, &[("etag", "v1")], USER);
+        assert_eq!(client.me().unwrap(), "me");
+
+        fake.set_response(REST, 304, &[], "");
+        assert_eq!(client.clone().me().unwrap(), "me");
+
+        fake.set_response(REST, 200, &[("etag", "v2")], r#"{"login":"changed"}"#);
+        assert_eq!(client.me().unwrap(), "changed");
+
+        fake.set_response(REST, 304, &[], "");
+        assert_eq!(client.me().unwrap(), "changed");
+        assert_eq!(fake.requests(), [REST; 4]);
+        assert_eq!(
+            fake.validators(),
+            [
+                (REST.to_string(), None),
+                (REST.to_string(), Some("v1".to_string())),
+                (REST.to_string(), Some("v1".to_string())),
+                (REST.to_string(), Some("v2".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn conditional_get_cache_is_bounded() {
+        let routes: Vec<_> = (0..=MAX_CACHED_GETS)
+            .map(|index| (format!("GET /resource/{index}"), USER.to_string()))
+            .collect();
+        let (client, fake) = fake::client(routes.clone());
+        for (request, _) in &routes {
+            fake.set_response(request, 200, &[("etag", "v1")], USER);
+            client
+                .get::<serde_json::Value>(request.trim_start_matches("GET /"))
+                .unwrap();
+        }
+
+        fake.set_response(&routes[0].0, 304, &[], "");
+        assert!(
+            client
+                .get::<serde_json::Value>("resource/0")
+                .unwrap_err()
+                .to_string()
+                .contains("without a cached response")
+        );
+        assert_eq!(fake.validators().last(), Some(&(routes[0].0.clone(), None)));
+    }
+
+    #[test]
+    fn a_304_still_observes_rate_limits_and_returns_cached_data() {
+        let (client, fake) = client();
+        fake.set_response(REST, 200, &[("etag", "v1")], USER);
+        assert_eq!(client.me().unwrap(), "me");
+
+        fake.set_response(
+            REST,
+            304,
+            &[
+                ("x-ratelimit-resource", "core"),
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", RESET),
+            ],
+            "",
+        );
+        assert_eq!(client.me().unwrap(), "me");
+        assert!(
+            client
+                .me()
+                .unwrap_err()
+                .to_string()
+                .contains("core rate limit")
+        );
+        assert_eq!(fake.requests(), [REST, REST]);
+
+        fake.set_now(DateTime::from_timestamp(NOW + 120, 0).unwrap());
+        assert_eq!(client.me().unwrap(), "me");
+        assert_eq!(fake.requests(), [REST, REST, REST]);
     }
 
     #[test]
