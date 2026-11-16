@@ -3666,42 +3666,46 @@ mod tests {
                 let mut cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
                 cli.required = required_only;
                 let mut branch = None;
-                for required in [&["test", "lint"][..], &["test", "lint", "security"][..]] {
-                    let (client, fake) =
-                        github::fake::client([required_rules_graphql(mine_ref, required)]);
+                let (client, fake) = github::fake::client([]);
+                for (index, required) in [&["test", "lint"][..], &["test", "lint", "security"][..]]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let refresh = index + 1;
+                    let (_, body) = required_rules_graphql(mine_ref, required);
+                    fake.set_response(GRAPHQL, 200, &[], &body);
                     let missing = (required.len() - 1) as u64;
                     let expected = status::Checks {
                         fail: u64::from(!required_only),
                         running: missing,
                         pass: 1,
                     };
-                    for refresh in 1..=2 {
-                        let sections =
-                            fetch(&cli, &client, &repo, "me", &mut branch, true, false).unwrap();
-                        let prs = sections.prs.unwrap();
-                        let queue = sections.queue.unwrap();
-                        assert_eq!(prs.len(), 1);
-                        assert_eq!(queue.len(), 1);
-                        assert_eq!(prs[0].checks, expected, "{case}, {required_only}");
-                        assert_eq!(queue[0].checks, expected, "{case}, {required_only}");
-                        assert_eq!(queue[0].missing_required_checks, missing);
-                        assert_eq!(
-                            queue[0].build_started_at.as_deref(),
-                            Some(if required_only {
-                                "2026-08-28T10:00:00Z"
-                            } else {
-                                "2026-08-28T09:00:00Z"
-                            })
-                        );
-                        let requests = fake.requests();
-                        println!(
-                            "RULE_REFRESH {case} required={required_only} expected_rules={} refresh={refresh} POST={} checks={expected:?}",
-                            required.len(),
-                            requests.len()
-                        );
-                        assert_eq!(requests, vec![GRAPHQL; per_refresh * refresh], "{case}");
-                        assert!(branch.is_none());
-                    }
+                    let sections =
+                        fetch(&cli, &client, &repo, "me", &mut branch, true, false).unwrap();
+                    let prs = sections.prs.unwrap();
+                    let queue = sections.queue.unwrap();
+                    assert_eq!(prs.len(), 1);
+                    assert_eq!(queue.len(), 1);
+                    assert_eq!(prs[0].checks, expected, "{case}, {required_only}");
+                    assert_eq!(queue[0].checks, expected, "{case}, {required_only}");
+                    assert_eq!(queue[0].missing_required_checks, missing);
+                    assert_eq!(
+                        queue[0].build_started_at.as_deref(),
+                        Some(if required_only {
+                            "2026-08-28T10:00:00Z"
+                        } else {
+                            "2026-08-28T09:00:00Z"
+                        })
+                    );
+                    let requests = fake.requests();
+                    println!(
+                        "RULE_REFRESH {case} required={required_only} expected_rules={} refresh={refresh} POST={} checks={:?}",
+                        required.len(),
+                        requests.len(),
+                        prs[0].checks
+                    );
+                    assert_eq!(requests, vec![GRAPHQL; per_refresh * refresh], "{case}");
+                    assert!(branch.is_none());
                 }
             }
         }
