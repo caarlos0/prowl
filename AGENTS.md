@@ -117,9 +117,11 @@ watch event loop); everything else is testable modules:
   (reuses `merged_query`, now carrying `author`). Watch mode combines its two
   merged searches in one aliased POST and reports errors per merged section;
   one-shot keeps its selected view's single merged-search request. My PRs and
-  Merge Queue share `fetch_required`, which reads required
+  Merge Queue share a refresh-scoped cache of complete required rule contexts.
+  It reads required
   context names from each distinct base ref's `refUpdateRule` and all pages of
-  active `rules`. Missing required contexts are added to `RUN` in both normal
+  active `rules`, once per distinct ref across the enabled sections. Missing
+  required contexts are added to `RUN` in both normal
   and required-only mode, after comparing them with the commit's paginated
   `isRequired` contexts (the speculative commit for queue entries, not the PR
   head). Entries without a speculative commit count all expected checks as
@@ -379,7 +381,8 @@ still performs all teardown through `finish`.
   reported on the relevant commit (PR head or speculative merge).
   Required context names come from the actual base branch's
   classic protection and active repository/organization rulesets, fetched once
-  per distinct base ref per section fetch and de-duplicated. All reported required
+  per distinct base ref per refresh across the enabled My PRs and Merge Queue
+  sections. All reported required
   contexts are paginated before counting missing ones, so a queued, running,
   failed, or passed check is not also counted as missing. This applies with and
   without `--required`, including commits with no rollup. Queue entries without
