@@ -1,10 +1,14 @@
 //! Native GitHub API transport over HTTP (replaces shelling out to `gh`).
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use ureq::http::{HeaderMap, Response};
 
 const API: &str = "https://api.github.com";
 const USER_AGENT: &str = concat!("prowl/", env!("CARGO_PKG_VERSION"));
@@ -82,6 +86,8 @@ struct Envelope<T> {
 #[derive(Debug, Deserialize)]
 struct GqlError {
     message: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 /// Parse a GraphQL `{"data": ...}` envelope. GitHub returns partial `data`
@@ -97,20 +103,53 @@ struct GqlError {
 pub fn parse_graphql<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     let env: Envelope<serde_json::Value> =
         serde_json::from_slice(bytes).context("failed to parse GraphQL JSON")?;
-    let first_error = env.errors.as_ref().and_then(|e| e.first());
-    if let Some(data) = env.data {
-        return match serde_json::from_value(data) {
-            Ok(typed) => Ok(typed),
-            Err(err) => match first_error {
-                Some(gql) => bail!("GraphQL error: {}", gql.message),
-                None => Err(err).context("failed to parse GraphQL data"),
-            },
+    env.into_data()
+}
+
+impl Envelope<serde_json::Value> {
+    fn into_data<T: DeserializeOwned>(self) -> Result<T> {
+        let first_error = self.errors.as_ref().and_then(|e| e.first());
+        if let Some(data) = self.data {
+            return match serde_json::from_value(data) {
+                Ok(typed) => Ok(typed),
+                Err(err) => match first_error {
+                    Some(gql) => bail!("GraphQL error: {}", gql.message),
+                    None => Err(err).context("failed to parse GraphQL data"),
+                },
+            };
+        }
+        if let Some(gql) = first_error {
+            bail!("GraphQL error: {}", gql.message);
+        }
+        bail!("GraphQL response had no data")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Resource {
+    Core,
+    Graphql,
+    Secondary,
+}
+
+impl Resource {
+    fn error(self, reset: DateTime<Utc>) -> anyhow::Error {
+        let name = match self {
+            Self::Core => "core",
+            Self::Graphql => "graphql",
+            Self::Secondary => "secondary",
         };
+        anyhow!(
+            "GitHub {name} rate limit; retry after {}",
+            reset.format("%Y-%m-%dT%H:%M:%S%.fZ")
+        )
     }
-    if let Some(gql) = first_error {
-        bail!("GraphQL error: {}", gql.message);
-    }
-    bail!("GraphQL response had no data")
+}
+
+fn secondary_limit(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("secondary rate limit")
 }
 
 /// An authenticated GitHub API client.
@@ -118,6 +157,7 @@ pub fn parse_graphql<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 pub struct Client {
     agent: ureq::Agent,
     token: String,
+    cooldowns: Arc<Mutex<HashMap<Resource, DateTime<Utc>>>>,
     #[cfg(test)]
     fake: Option<fake::Fake>,
 }
@@ -127,11 +167,13 @@ impl Client {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .user_agent(USER_AGENT)
             .timeout_global(Some(Duration::from_secs(30)))
+            .http_status_as_error(false)
             .build()
             .into();
         Client {
             agent,
             token,
+            cooldowns: Arc::default(),
             #[cfg(test)]
             fake: None,
         }
@@ -147,44 +189,200 @@ impl Client {
         query: &str,
         variables: serde_json::Value,
     ) -> Result<T> {
-        #[cfg(test)]
-        if let Some(fake) = &self.fake {
-            return parse_graphql(fake.respond("POST /graphql".to_string())?.as_bytes());
-        }
         let body = serde_json::json!({ "query": query, "variables": variables });
-        let mut resp = self
-            .agent
-            .post(format!("{API}/graphql"))
-            .header("Authorization", self.bearer())
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send_json(&body)
-            .map_err(api_err)?;
+        let mut resp = self.request("graphql", Some(&body))?;
         let bytes = resp
             .body_mut()
             .read_to_vec()
             .context("reading GraphQL response")?;
-        parse_graphql(&bytes)
+        let env: Envelope<serde_json::Value> =
+            serde_json::from_slice(&bytes).context("failed to parse GraphQL JSON")?;
+        let secondary = env
+            .errors
+            .iter()
+            .flatten()
+            .any(|err| secondary_limit(&err.message));
+        let limited = secondary
+            || env
+                .errors
+                .iter()
+                .flatten()
+                .any(|err| err.kind.as_deref() == Some("RATE_LIMITED"));
+        if limited {
+            let secondary = secondary
+                || (resp.headers().contains_key("retry-after")
+                    && resp
+                        .headers()
+                        .get("x-ratelimit-remaining")
+                        .is_none_or(|value| value != "0"));
+            self.observe_limit(Resource::Graphql, resp.headers(), secondary)?;
+        }
+        let data = env.into_data();
+        if data.is_err() && limited {
+            self.check_cooldown(Resource::Graphql)?;
+        }
+        data
     }
 
     /// GET a REST path (relative to api.github.com), returning typed JSON.
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        #[cfg(test)]
-        if let Some(fake) = &self.fake {
-            return serde_json::from_str(fake.respond(format!("GET /{path}"))?)
-                .with_context(|| format!("parsing response from /{path}"));
-        }
-        let mut resp = self
-            .agent
-            .get(format!("{API}/{path}"))
-            .header("Authorization", self.bearer())
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .call()
-            .map_err(api_err)?;
+        let mut resp = self.request(path, None)?;
         resp.body_mut()
             .read_json()
             .with_context(|| format!("parsing response from /{path}"))
+    }
+
+    #[allow(clippy::unused_self, reason = "tests use this client's fixture clock")]
+    fn now(&self) -> DateTime<Utc> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.now();
+        }
+        Utc::now()
+    }
+
+    fn check_cooldown(&self, resource: Resource) -> Result<()> {
+        let now = self.now();
+        let cooldowns = self
+            .cooldowns
+            .lock()
+            .map_err(|err| anyhow!("GitHub rate-limit state unavailable: {err}"))?;
+        if let Some((resource, reset)) = [resource, Resource::Secondary]
+            .into_iter()
+            .filter_map(|resource| cooldowns.get(&resource).map(|reset| (resource, *reset)))
+            .filter(|(_, reset)| *reset > now)
+            .max_by_key(|(_, reset)| *reset)
+        {
+            return Err(resource.error(reset));
+        }
+        Ok(())
+    }
+
+    fn observe_limit(
+        &self,
+        resource: Resource,
+        headers: &HeaderMap,
+        secondary: bool,
+    ) -> Result<()> {
+        let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
+        let exhausted = header("x-ratelimit-remaining") == Some("0");
+        let reset = header("x-ratelimit-reset")
+            .and_then(|value| value.parse().ok())
+            .and_then(|seconds| DateTime::from_timestamp(seconds, 0));
+        let now = self.now();
+        let retry = header("retry-after")
+            .and_then(|value| value.parse().ok())
+            .and_then(|seconds| TimeDelta::from_std(Duration::from_secs(seconds)).ok())
+            .and_then(|delay| now.checked_add_signed(delay));
+        let primary_resource = match header("x-ratelimit-resource") {
+            Some("core") => Some(Resource::Core),
+            Some("graphql") => Some(Resource::Graphql),
+            None => Some(resource),
+            Some(_) => None,
+        };
+        let primary = if exhausted {
+            primary_resource.zip(reset.max(retry))
+        } else {
+            None
+        };
+        let secondary = secondary.then(|| {
+            (
+                Resource::Secondary,
+                retry
+                    .or(if exhausted { reset } else { None })
+                    .unwrap_or(now + TimeDelta::minutes(1)),
+            )
+        });
+        let mut cooldowns = self
+            .cooldowns
+            .lock()
+            .map_err(|err| anyhow!("GitHub rate-limit state unavailable: {err}"))?;
+        for (resource, reset) in primary.into_iter().chain(secondary) {
+            cooldowns
+                .entry(resource)
+                .and_modify(|previous| *previous = (*previous).max(reset))
+                .or_insert(reset);
+        }
+        Ok(())
+    }
+
+    fn request(
+        &self,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<Response<ureq::Body>> {
+        let resource = if body.is_some() {
+            Resource::Graphql
+        } else {
+            Resource::Core
+        };
+        self.check_cooldown(resource)?;
+        let mut resp = self.send(path, body)?;
+        let status = resp.status();
+        if status.is_client_error() || status.is_server_error() {
+            if matches!(status.as_u16(), 403 | 429) {
+                let retry = resp.headers().contains_key("retry-after")
+                    && resp
+                        .headers()
+                        .get("x-ratelimit-remaining")
+                        .is_none_or(|value| value != "0");
+                self.observe_limit(resource, resp.headers(), retry)?;
+                let bytes = resp
+                    .body_mut()
+                    .read_to_vec()
+                    .with_context(|| format!("reading GitHub HTTP {status} error response"))?;
+                let secondary =
+                    serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|body| {
+                        body.get("message")
+                            .and_then(|msg| msg.as_str())
+                            .is_some_and(secondary_limit)
+                            || body
+                                .get("errors")
+                                .and_then(|errors| errors.as_array())
+                                .is_some_and(|errors| {
+                                    errors.iter().any(|error| {
+                                        error
+                                            .get("message")
+                                            .and_then(|msg| msg.as_str())
+                                            .is_some_and(secondary_limit)
+                                    })
+                                })
+                    });
+                if secondary {
+                    self.observe_limit(resource, resp.headers(), true)?;
+                }
+                self.check_cooldown(resource)?;
+            }
+            return Err(api_err(ureq::Error::StatusCode(status.as_u16())));
+        }
+        self.observe_limit(resource, resp.headers(), false)?;
+        Ok(resp)
+    }
+
+    fn send(&self, path: &str, body: Option<&serde_json::Value>) -> Result<Response<ureq::Body>> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            let method = if body.is_some() { "POST" } else { "GET" };
+            return fake.respond(format!("{method} /{path}"));
+        }
+        let url = format!("{API}/{path}");
+        if let Some(body) = body {
+            self.agent
+                .post(url)
+                .header("Authorization", self.bearer())
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send_json(body)
+                .map_err(api_err)
+        } else {
+            self.agent
+                .get(url)
+                .header("Authorization", self.bearer())
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .call()
+                .map_err(api_err)
+        }
     }
 
     /// The authenticated user's login.
@@ -218,18 +416,21 @@ fn api_err(e: ureq::Error) -> anyhow::Error {
 
 /// An in-memory GitHub API for tests. `Client::get` and `Client::graphql` ask
 /// it instead of the network: it answers `METHOD /path?query` with canned JSON,
-/// fails unknown requests like a 404, and logs every request attempt in order.
+/// fails unknown requests like a 404, and logs dispatches past the cooldown gate.
 #[cfg(test)]
 pub(crate) mod fake {
     use super::Client;
     use anyhow::{Result, anyhow};
+    use chrono::{DateTime, Utc};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    use ureq::http::Response;
 
     #[derive(Clone)]
     pub(crate) struct Fake {
-        routes: Arc<HashMap<String, String>>,
+        routes: Arc<Mutex<HashMap<String, Response<String>>>>,
         requests: Arc<Mutex<Vec<String>>>,
+        now: Arc<Mutex<DateTime<Utc>>>,
     }
 
     impl Fake {
@@ -237,18 +438,54 @@ pub(crate) mod fake {
             self.requests.lock().unwrap().clone()
         }
 
-        pub(super) fn respond(&self, request: String) -> Result<&str> {
-            let body = self.routes.get(&request).map(String::as_str);
-            let body = body.ok_or_else(|| anyhow!("GitHub request failed: 404 for {request}"));
-            self.requests.lock().unwrap().push(request);
-            body
+        pub(crate) fn set_response(
+            &self,
+            request: &str,
+            status: u16,
+            headers: &[(&str, &str)],
+            body: &str,
+        ) {
+            let mut response = Response::builder().status(status);
+            for (name, value) in headers {
+                response = response.header(*name, *value);
+            }
+            self.routes.lock().unwrap().insert(
+                request.to_string(),
+                response.body(body.to_string()).unwrap(),
+            );
+        }
+
+        pub(crate) fn set_now(&self, now: DateTime<Utc>) {
+            *self.now.lock().unwrap() = now;
+        }
+
+        pub(super) fn now(&self) -> DateTime<Utc> {
+            *self.now.lock().unwrap()
+        }
+
+        pub(super) fn respond(&self, request: String) -> Result<Response<ureq::Body>> {
+            self.requests.lock().unwrap().push(request.clone());
+            let response = self
+                .routes
+                .lock()
+                .unwrap()
+                .get(&request)
+                .cloned()
+                .ok_or_else(|| anyhow!("GitHub request failed: 404 for {request}"))?;
+            Ok(response.map(|body| ureq::Body::builder().data(body)))
         }
     }
 
     pub(crate) fn client(routes: impl IntoIterator<Item = (String, String)>) -> (Client, Fake) {
         let fake = Fake {
-            routes: Arc::new(routes.into_iter().collect()),
+            routes: Arc::new(Mutex::new(
+                routes
+                    .into_iter()
+                    .map(|(route, body)| (route, Response::new(body)))
+                    .collect(),
+            )),
             requests: Arc::default(),
+            now: Arc::new(Mutex::new(Utc::now())),
         };
         let mut client = Client::new(String::new());
         client.fake = Some(fake.clone());
@@ -259,6 +496,328 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOW: i64 = 1_700_000_000;
+    const RESET: &str = "1700000120";
+    const REST: &str = "GET /user";
+    const GRAPHQL: &str = "POST /graphql";
+    const USER: &str = r#"{"login":"me"}"#;
+    const DATA: &str = r#"{"data":{"login":"me"}}"#;
+    const PRIMARY: &str =
+        r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}"#;
+    const SECONDARY: &str = r#"{"message":"You have exceeded a secondary rate limit."}"#;
+    const SECONDARY_GQL: &str = r#"{"errors":[{"type":"RATE_LIMITED","message":"You have exceeded a secondary rate limit."}]}"#;
+
+    fn client() -> (Client, fake::Fake) {
+        let (client, fake) = fake::client([
+            (REST.to_string(), USER.to_string()),
+            (GRAPHQL.to_string(), DATA.to_string()),
+        ]);
+        fake.set_now(DateTime::from_timestamp(NOW, 0).unwrap());
+        (client, fake)
+    }
+
+    fn graphql(client: &Client) -> Result<serde_json::Value> {
+        client.graphql("query { viewer { login } }", serde_json::json!({}))
+    }
+
+    #[test]
+    fn rest_primary_cooldown_preserves_graphql_and_expires() {
+        for status in [403, 429] {
+            let (client, fake) = client();
+            let clone = client.clone();
+            fake.set_response(
+                REST,
+                status,
+                &[
+                    ("x-ratelimit-resource", "core"),
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", RESET),
+                ],
+                r#"{"message":"API rate limit exceeded"}"#,
+            );
+            for elapsed in [0, 0, 30, 119] {
+                fake.set_now(DateTime::from_timestamp(NOW + elapsed, 0).unwrap());
+                let err = clone.get::<serde_json::Value>("user").unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    "GitHub core rate limit; retry after 2023-11-14T22:15:20Z",
+                    "status={status}, elapsed={elapsed}"
+                );
+            }
+            assert_eq!(fake.requests(), [REST], "status={status}");
+            assert_eq!(graphql(&client).unwrap()["login"], "me");
+            fake.set_response(REST, 200, &[], USER);
+            fake.set_now(DateTime::from_timestamp(NOW + 120, 0).unwrap());
+            assert_eq!(clone.me().unwrap(), "me");
+            assert_eq!(fake.requests(), [REST, GRAPHQL, REST]);
+        }
+    }
+
+    #[test]
+    fn graphql_primary_cooldown_preserves_rest_and_expires() {
+        let (client, fake) = client();
+        let clone = client.clone();
+        fake.set_response(
+            GRAPHQL,
+            200,
+            &[
+                ("x-ratelimit-resource", "graphql"),
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", RESET),
+            ],
+            PRIMARY,
+        );
+        for elapsed in [0, 0, 30, 119] {
+            fake.set_now(DateTime::from_timestamp(NOW + elapsed, 0).unwrap());
+            let err = graphql(&clone).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "GitHub graphql rate limit; retry after 2023-11-14T22:15:20Z",
+                "elapsed={elapsed}"
+            );
+        }
+        assert_eq!(fake.requests(), [GRAPHQL]);
+        assert_eq!(client.me().unwrap(), "me");
+        fake.set_response(GRAPHQL, 200, &[], DATA);
+        fake.set_now(DateTime::from_timestamp(NOW + 120, 0).unwrap());
+        assert_eq!(graphql(&clone).unwrap()["login"], "me");
+        assert_eq!(fake.requests(), [GRAPHQL, REST, GRAPHQL]);
+        println!(
+            "GraphQL RATE_LIMITED: 4 pre-reset calls, 1 dispatch; unrestricted REST and post-reset GraphQL each dispatch once"
+        );
+    }
+
+    #[test]
+    fn secondary_cooldown_spans_both_resources() {
+        for (request, status, headers, body, wait) in [
+            (
+                REST,
+                403,
+                vec![
+                    ("retry-after", "90"),
+                    ("x-ratelimit-remaining", "1"),
+                    ("x-ratelimit-reset", RESET),
+                ],
+                SECONDARY,
+                90,
+            ),
+            (GRAPHQL, 200, vec![("retry-after", "90")], SECONDARY_GQL, 90),
+            (
+                REST,
+                429,
+                vec![("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", RESET)],
+                SECONDARY,
+                120,
+            ),
+            (
+                GRAPHQL,
+                403,
+                vec![("x-ratelimit-remaining", "1"), ("x-ratelimit-reset", RESET)],
+                SECONDARY_GQL,
+                60,
+            ),
+            (GRAPHQL, 200, vec![], SECONDARY_GQL, 60),
+            (
+                REST,
+                429,
+                vec![("retry-after", "90")],
+                "Too many requests",
+                90,
+            ),
+        ] {
+            let (client, fake) = client();
+            fake.set_response(request, status, &headers, body);
+            let err = if request == REST {
+                client.get::<serde_json::Value>("user")
+            } else {
+                graphql(&client)
+            }
+            .unwrap_err();
+            assert!(err.to_string().contains("rate limit"), "{request}: {err}");
+            let reset = DateTime::from_timestamp(NOW + wait, 0).unwrap();
+            let expected = Resource::Secondary.error(reset).to_string();
+            for elapsed in [0, wait - 1] {
+                fake.set_now(DateTime::from_timestamp(NOW + elapsed, 0).unwrap());
+                for err in [
+                    client.clone().me().unwrap_err(),
+                    graphql(&client.clone()).unwrap_err(),
+                ] {
+                    assert_eq!(err.to_string(), expected, "{request}, status={status}");
+                }
+            }
+            assert_eq!(fake.requests(), [request], "{request}, status={status}");
+            fake.set_response(REST, 200, &[], USER);
+            fake.set_response(GRAPHQL, 200, &[], DATA);
+            fake.set_now(reset);
+            assert_eq!(client.me().unwrap(), "me");
+            assert_eq!(graphql(&client).unwrap()["login"], "me");
+            assert_eq!(fake.requests(), [request, REST, GRAPHQL]);
+        }
+    }
+
+    #[test]
+    fn successful_last_response_keeps_its_data() {
+        for (request, body) in [(REST, USER), (GRAPHQL, DATA)] {
+            let (client, fake) = client();
+            fake.set_response(
+                request,
+                200,
+                &[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", RESET)],
+                body,
+            );
+            let result = if request == REST {
+                client.get::<serde_json::Value>("user")
+            } else {
+                graphql(&client)
+            };
+            assert_eq!(result.unwrap()["login"], "me");
+            let blocked = if request == REST {
+                client.get::<serde_json::Value>("user")
+            } else {
+                graphql(&client)
+            };
+            assert!(blocked.unwrap_err().to_string().contains("rate limit"));
+            assert_eq!(fake.requests(), [request]);
+        }
+    }
+
+    #[test]
+    fn secondary_expiry_does_not_clear_a_longer_primary_limit() {
+        let (client, fake) = client();
+        fake.set_response(
+            REST,
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", RESET),
+                ("retry-after", "90"),
+            ],
+            SECONDARY,
+        );
+        assert!(client.me().is_err());
+        assert!(
+            graphql(&client)
+                .unwrap_err()
+                .to_string()
+                .contains("secondary")
+        );
+        assert_eq!(fake.requests(), [REST]);
+        fake.set_now(DateTime::from_timestamp(NOW + 90, 0).unwrap());
+        assert_eq!(graphql(&client).unwrap()["login"], "me");
+        assert!(client.me().unwrap_err().to_string().contains("core"));
+        assert_eq!(fake.requests(), [REST, GRAPHQL]);
+        fake.set_response(REST, 200, &[], USER);
+        fake.set_now(DateTime::from_timestamp(NOW + 120, 0).unwrap());
+        assert_eq!(client.me().unwrap(), "me");
+        assert_eq!(fake.requests(), [REST, GRAPHQL, REST]);
+    }
+
+    #[test]
+    fn success_and_low_remaining_counts_do_not_throttle() {
+        for remaining in ["1", "4999"] {
+            let (client, fake) = client();
+            for (request, body) in [(REST, USER), (GRAPHQL, DATA)] {
+                fake.set_response(
+                    request,
+                    200,
+                    &[
+                        ("x-ratelimit-remaining", remaining),
+                        ("x-ratelimit-reset", RESET),
+                        ("retry-after", "90"),
+                    ],
+                    body,
+                );
+            }
+            for _ in 0..2 {
+                assert_eq!(client.me().unwrap(), "me");
+                assert_eq!(graphql(&client).unwrap()["login"], "me");
+            }
+            assert_eq!(fake.requests(), [REST, GRAPHQL, REST, GRAPHQL]);
+        }
+    }
+
+    #[test]
+    fn ordinary_http_errors_keep_their_guidance_and_do_not_throttle() {
+        for status in [401, 403, 404, 500] {
+            for (request, body) in [(REST, USER), (GRAPHQL, DATA)] {
+                let (client, fake) = client();
+                fake.set_response(
+                    request,
+                    status,
+                    &[("x-ratelimit-remaining", "1"), ("x-ratelimit-reset", RESET)],
+                    r#"{"message":"Resource not accessible by integration"}"#,
+                );
+                let err = if request == REST {
+                    client.get::<serde_json::Value>("user")
+                } else {
+                    graphql(&client)
+                }
+                .unwrap_err();
+                if status == 401 {
+                    assert_eq!(
+                        err.to_string(),
+                        "GitHub rejected the token (401); run `prowl --login`"
+                    );
+                } else {
+                    assert!(
+                        err.to_string().starts_with("GitHub request failed:")
+                            && err.to_string().contains(&status.to_string()),
+                        "{request}, status={status}: {err}"
+                    );
+                }
+                fake.set_response(request, 200, &[], body);
+                let result = if request == REST {
+                    client.get::<serde_json::Value>("user")
+                } else {
+                    graphql(&client)
+                };
+                assert_eq!(result.unwrap()["login"], "me");
+                assert_eq!(fake.requests(), [request, request]);
+            }
+        }
+    }
+
+    #[test]
+    fn graphql_errors_and_partial_data_keep_their_semantics() {
+        let (client, fake) = client();
+        fake.set_response(
+            GRAPHQL,
+            200,
+            &[("x-ratelimit-remaining", "1"), ("x-ratelimit-reset", RESET)],
+            r#"{"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration"}]}"#,
+        );
+        assert_eq!(
+            graphql(&client).unwrap_err().to_string(),
+            "GraphQL error: Resource not accessible by integration"
+        );
+        fake.set_response(
+            GRAPHQL,
+            200,
+            &[],
+            r#"{"data":{"login":"me"},"errors":[{"message":"An optional field is inaccessible"}]}"#,
+        );
+        assert_eq!(graphql(&client).unwrap()["login"], "me");
+        fake.set_response(GRAPHQL, 200, &[], "not JSON");
+        assert_eq!(
+            graphql(&client).unwrap_err().to_string(),
+            "failed to parse GraphQL JSON"
+        );
+        assert_eq!(fake.requests(), [GRAPHQL; 3]);
+    }
+
+    #[test]
+    fn primary_limit_without_a_deadline_does_not_guess_one() {
+        let (client, fake) = client();
+        fake.set_response(GRAPHQL, 200, &[("x-ratelimit-remaining", "0")], PRIMARY);
+        for _ in 0..2 {
+            assert_eq!(
+                graphql(&client).unwrap_err().to_string(),
+                "GraphQL error: API rate limit exceeded"
+            );
+        }
+        assert_eq!(fake.requests(), [GRAPHQL; 2]);
+    }
 
     #[test]
     fn parses_remote_forms() {

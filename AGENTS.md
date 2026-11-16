@@ -34,6 +34,18 @@ a `Loading...` frame while the fetch runs (abortable with `q`), then the dashboa
 is left in the terminal. Piped/non-TTY output is plain text printed straight to
 stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 
+Watch mode supports mouse input. The wheel scrolls three lines without a
+selection change. A left click selects a row, opens its exact hyperlink, or
+switches tabs. `Ui::mouse_event` uses row positions from the body painters,
+with the same viewport offset as the frame composer. It reads hyperlinks
+directly from the displayed screen cells, even when width negotiation changes
+the width policy before a repaint.
+It honors search, queue deduplication, help, and the pinned bottom block.
+`App::enter_alt` enables basic `MouseTracking`; `Program` restores it across
+suspend/resume and disables it at teardown. Inline and one-shot output never
+enable mouse input.
+The dashboard still accepts input after the first fetch fails without cached data.
+
 ## Golden rules
 
 - **Transport is the native GitHub API over HTTP** (`ureq` + rustls), not the
@@ -91,8 +103,13 @@ watch event loop); everything else is testable modules:
   not on refresh.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
-  `parse_graphql()`. The test-only `github::fake` answers `get()`/`graphql()`
-  from memory and logs each request attempt (`METHOD /path?query`).
+  `parse_graphql()`. Client clones share rate-limit deadlines: primary REST
+  core and GraphQL budgets stay separate, while secondary limits block both.
+  HTTP status, headers, and GraphQL errors identify limits; a successful last
+  response with zero remaining quota still returns its data. The test-only
+  `github::fake` supplies in-memory responses and a controlled clock through
+  the same response/error/cooldown path, logging each dispatch past the gate
+  (`METHOD /path?query`).
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
@@ -418,7 +435,13 @@ still performs all teardown through `finish`.
   view, including filtered/hidden PRs. Neither action moves the selection.
   New events mark the PR again. Markers are not saved to the cache.
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
-  line, and does not ring.
+  line, and does not ring. After a rate-limit signal, the client rejects calls
+  to the limited resource locally until the server's reset or retry deadline,
+  with an error naming that time. An identified secondary limit without a
+  deadline uses GitHub's documented one-minute minimum. Interval and manual
+  refreshes use the same gate; there are no automatic retries, sleeps, or new
+  refresh timers. The next call after expiry proceeds normally. Cooldowns are
+  shared only by clones of that client, not persisted or shared across processes.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
   until the first movement key, then the chosen row is painted with the
   selection background (`status::SURFACE`) edge to edge across the full width
@@ -590,6 +613,8 @@ shot can't drift from the layout, which is why `Sections`, `Ui` and
 `render_to_string` are
 `pub`, same as everything else the offline tests reach. `demo -- scroll` and
 `demo -- reviews scroll` use `paint_watch_frame` to show top/bottom eight-row frames.
+`demo -- mouse` feeds row clicks, link clicks, and wheel events through
+`Ui::mouse_event`, then prints the resulting state and frame without a browser launch.
 `demo.tape` shoots it
 with [vhs](https://github.com/charmbracelet/vhs) (Nerd Font, Catppuccin Mocha;
 the trailing `Sleep` is required or vhs exits before writing the file), and the
@@ -620,10 +645,12 @@ crafted queue) drive parsing → rows → render in `tests/parsing.rs`, plus
 per-module unit tests. `tests/config.rs` exercises startup config paths, errors,
 and help/version without network calls. No network in tests: to pin the
 requests a fetch path sends, build the client with `github::fake::client`
-(canned JSON by `METHOD /path?query`) and assert its request log. It counts
-`Client::get`/`graphql` calls before they reach ureq, not wire requests
-(ureq can follow redirects); it does not exercise ureq or GraphQL rate-limit
-cost.
+(canned JSON by `METHOD /path?query`) and assert its request log. Fixtures can
+replace status, headers, and body with `set_response`, and control time with
+`set_now`. The log counts dispatches after the cooldown gate, not all
+`Client::get`/`graphql` calls or wire requests (ureq can follow redirects).
+Fixtures exercise the common response/error/gate path without sockets; they
+do not measure production quota savings or GraphQL point costs.
 
 ## Conventions
 

@@ -142,6 +142,13 @@ cursor only appears once you start moving it, and stays on the same URL when the
 terminal is resized or refreshed if that URL still exists.
 One-shot and piped output keep the full dashboard height.
 
+Use the mouse wheel to scroll three lines without a selection change.
+Click a row to select it. Click a PR number, release tag, or `upcoming` link
+to open that exact URL. Click a tab to switch views.
+Mouse controls work during a refresh and while the search prompt is open.
+They apply only to watch mode; one-shot output keeps the terminal's normal link behavior.
+Most terminals let you hold `Shift` to bypass mouse controls for text selection.
+
 Press `Shift+Enter` to open every matching link in the selected section, like
 `Y` does for copying. It uses the first non-empty section when nothing is
 selected and honors the current filter, including offscreen rows. Links open in
