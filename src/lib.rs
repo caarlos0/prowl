@@ -282,6 +282,27 @@ fn bottom_height(ui: &Ui, status: &str, footer: Option<(&str, bool)>, show_help:
     content_lines + help + gaps
 }
 
+fn fetch_merged_release_map(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    nodes: &[model::MergedNode],
+    issues: &mut Vec<FetchIssue>,
+) -> commits::ReleaseMap {
+    let prs: Vec<_> = nodes
+        .iter()
+        .take(cli.merged_limit)
+        .map(|node| node.number)
+        .collect();
+    section(
+        FetchScope::ReleaseMetadata,
+        commits::fetch_release_map(client, repo, me, cli.include_pre_releases, &prs),
+        issues,
+    )
+    .unwrap_or_default()
+}
+
 /// Fetch the sections for the requested views. `want_mine` covers the Mine view
 /// (open PRs, queue, merged, shipments, honoring `--only`); `want_reviews`
 /// covers the Reviews view (PRs to review, reviewed-and-merged). In watch mode
@@ -306,7 +327,7 @@ fn fetch(
             .as_str()
     });
 
-    let (commit_stats, release_map) = fetch_release_data(
+    let (commit_stats, mut release_map) = fetch_release_data(
         cli,
         client,
         repo,
@@ -316,22 +337,18 @@ fn fetch(
         &mut issues,
     );
 
-    let (merged, reviewed_merged) = if want_mine && cli.show_merged() && want_reviews {
-        fetch_merged_pair_sections(cli, client, repo, me, &release_map, &mut issues)
+    let (merged_nodes, reviewed_merged) = if want_mine && cli.show_merged() {
+        fetch_merged_nodes(cli, client, repo, me, want_reviews, &mut issues)
     } else {
-        let merged = if want_mine && cli.show_merged() {
-            let since = timefmt::since_date(&cli.merged_window);
-            section(
-                FetchScope::Merged,
-                model::fetch_merged(client, repo, me, &since, cli.merged_limit)
-                    .map(|nodes| merged::build_rows(nodes, cli.merged_limit, &release_map)),
-                &mut issues,
-            )
-        } else {
-            None
-        };
-        (merged, None)
+        (None, None)
     };
+    if !cli.show_shipments()
+        && let Some(nodes) = merged_nodes.as_deref()
+    {
+        release_map = fetch_merged_release_map(cli, client, repo, me, nodes, &mut issues);
+    }
+    let merged =
+        merged_nodes.map(|nodes| merged::build_rows(nodes, cli.merged_limit, &release_map));
     let mut required_context_cache = model::RequiredContextCache::default();
     let (queue, queue_next_eta) = if want_mine && cli.show_queue() {
         section(
@@ -409,15 +426,12 @@ fn fetch_release_data(
     want_mine: bool,
     issues: &mut Vec<FetchIssue>,
 ) -> (Option<commits::CommitStats>, commits::ReleaseMap) {
-    // Release counts and merged-row annotations share this lookup. Shipments
-    // need the upcoming count; merged rows only need the release map.
-    if want_mine && (cli.show_shipments() || cli.show_merged()) {
+    // Shipment counts also supply merged-row release annotations.
+    if want_mine && cli.show_shipments() {
         match commits::fetch(client, repo, me, default_branch, cli.include_pre_releases) {
             Ok((stats, release_map)) => (Some(stats), release_map),
             Err(error) => {
-                if cli.show_shipments() {
-                    issues.push(FetchIssue::new(FetchScope::Shipments, &error));
-                }
+                issues.push(FetchIssue::new(FetchScope::Shipments, &error));
                 if cli.show_merged() {
                     issues.push(FetchIssue::new(FetchScope::ReleaseMetadata, &error));
                 }
@@ -429,26 +443,31 @@ fn fetch_release_data(
     }
 }
 
-fn fetch_merged_pair_sections(
+fn fetch_merged_nodes(
     cli: &Cli,
     client: &Client,
     repo: &Repo,
     me: &str,
-    release_map: &commits::ReleaseMap,
+    want_reviews: bool,
     issues: &mut Vec<FetchIssue>,
 ) -> (
-    Option<Vec<merged::MergedRow>>,
+    Option<Vec<model::MergedNode>>,
     Option<Result<Vec<model::MergedNode>>>,
 ) {
     let since = timefmt::since_date(&cli.merged_window);
-    match model::fetch_merged_pair(client, repo, me, &since, cli.merged_limit) {
-        Ok(pair) => (
+    if !want_reviews {
+        return (
             section(
                 FetchScope::Merged,
-                pair.mine
-                    .map(|nodes| merged::build_rows(nodes, cli.merged_limit, release_map)),
+                model::fetch_merged(client, repo, me, &since, cli.merged_limit),
                 issues,
             ),
+            None,
+        );
+    }
+    match model::fetch_merged_pair(client, repo, me, &since, cli.merged_limit) {
+        Ok(pair) => (
+            section(FetchScope::Merged, pair.mine, issues),
             Some(pair.reviewed),
         ),
         Err(error) => {
@@ -4276,7 +4295,7 @@ mod tests {
     }
 
     /// Releases v2 and v1: PR 3 is unreleased, PR 2 shipped in v2, PR 1 in v1.
-    fn tagged() -> Vec<(String, String)> {
+    fn tagged_with_merged(numbers: &[i64]) -> Vec<(String, String)> {
         let routes = [
             (RELEASES, serde_json::json!([release("v2"), release("v1")])),
             (
@@ -4298,12 +4317,20 @@ mod tests {
         routes
             .into_iter()
             .map(|(route, body)| (route.to_string(), body.to_string()))
-            .chain([graphql(&[3, 2, 1])])
+            .chain([graphql(numbers)])
             .collect()
     }
 
+    fn tagged() -> Vec<(String, String)> {
+        tagged_with_merged(&[3, 2, 1])
+    }
+
     fn tagged_watch() -> Vec<(String, String)> {
-        let mut routes = tagged();
+        tagged_watch_with_merged(&[3, 2, 1])
+    }
+
+    fn tagged_watch_with_merged(numbers: &[i64]) -> Vec<(String, String)> {
+        let mut routes = tagged_with_merged(numbers);
         let body = &mut routes
             .iter_mut()
             .find(|(route, _)| route == GRAPHQL)
@@ -4445,6 +4472,42 @@ mod tests {
         assert_eq!(outcome.issues.len(), 1);
         assert_eq!(outcome.issues[0].scope, FetchScope::Shipments);
         assert!(outcome.status().contains("My Shipments unavailable"));
+    }
+
+    #[test]
+    fn hidden_release_failure_is_reported_without_hiding_merged_rows() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "merged"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged());
+        fake.set_response(
+            RELEASES,
+            500,
+            &[],
+            r#"{"message":"injected release failure"}"#,
+        );
+
+        let outcome = fetch(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            false,
+        );
+
+        assert_eq!(fake.requests(), [GRAPHQL, RELEASES]);
+        assert_eq!(outcome.issues.len(), 1);
+        assert_eq!(outcome.issues[0].scope, FetchScope::ReleaseMetadata);
+        assert!(
+            outcome
+                .status()
+                .contains("Merged release metadata unavailable")
+        );
+        assert_eq!(
+            shipped(&outcome.sections),
+            [(3, None), (2, None), (1, None)]
+        );
     }
 
     #[test]
@@ -4909,32 +4972,38 @@ mod tests {
         }]);
         *body = response.to_string();
 
-        let (client, fake) = github::fake::client(routes);
-        let outcome = fetch(
-            &Cli::try_parse_from(["prowl"]).unwrap(),
-            &client,
-            &Repo::parse("o/r").unwrap(),
-            "me",
-            &mut Some("main".to_string()),
-            true,
-            true,
-        );
+        for (args, posts) in [(&["prowl"][..], 4), (&["prowl", "--only", "merged"][..], 2)] {
+            let (client, fake) = github::fake::client(routes.clone());
+            let outcome = fetch(
+                &Cli::try_parse_from(args).unwrap(),
+                &client,
+                &Repo::parse("o/r").unwrap(),
+                "me",
+                &mut Some("main".to_string()),
+                true,
+                true,
+            );
 
-        assert_eq!(outcome.issues.len(), 1);
-        assert_eq!(outcome.issues[0].scope, FetchScope::Merged);
-        assert_eq!(
-            outcome.issues[0].message,
-            "GraphQL error: Mine search unavailable"
-        );
-        assert!(outcome.sections.merged.is_none());
-        assert_eq!(outcome.sections.reviewed_merged.unwrap().len(), 3);
-        assert_eq!(
-            fake.requests()
-                .iter()
-                .filter(|request| request.as_str() == GRAPHQL)
-                .count(),
-            4
-        );
+            assert_eq!(outcome.issues.len(), 1);
+            assert_eq!(outcome.issues[0].scope, FetchScope::Merged);
+            assert_eq!(
+                outcome.issues[0].message,
+                "GraphQL error: Mine search unavailable"
+            );
+            assert!(outcome.sections.merged.is_none());
+            assert_eq!(outcome.sections.reviewed_merged.unwrap().len(), 3);
+            let requests = fake.requests();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.as_str() == GRAPHQL)
+                    .count(),
+                posts
+            );
+            if posts == 2 {
+                assert_eq!(requests, [GRAPHQL, GRAPHQL]);
+            }
+        }
     }
 
     #[test]
@@ -5031,10 +5100,10 @@ mod tests {
         assert_eq!(
             requests,
             [
+                GRAPHQL,
                 RELEASES,
                 "GET /repos/o/r/compare/v1...v2",
                 "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
-                GRAPHQL,
             ]
         );
         assert_eq!(
@@ -5048,9 +5117,74 @@ mod tests {
         assert!(sections.commits.is_none());
 
         let (sections, requests) = fetch_offline(&["prowl", "--only", "merged"], untagged());
-        assert_eq!(requests, [RELEASES, GRAPHQL]);
+        assert_eq!(requests, [GRAPHQL, RELEASES]);
         assert_eq!(shipped(&sections), [(1, None)]);
         assert!(sections.commits.is_none());
+    }
+
+    #[test]
+    fn hidden_shipments_scan_only_until_displayed_prs_are_mapped() {
+        let (sections, requests) =
+            fetch_offline(&["prowl", "--only", "merged"], tagged_with_merged(&[]));
+        assert_eq!(requests, [GRAPHQL]);
+        assert_eq!(shipped(&sections), Vec::<(i64, Option<String>)>::new());
+
+        let (sections, requests) = fetch_offline(
+            &["prowl", "--only", "merged", "--merged-limit", "0"],
+            tagged_with_merged(&[2]),
+        );
+        assert_eq!(requests, [GRAPHQL]);
+        assert_eq!(shipped(&sections), Vec::<(i64, Option<String>)>::new());
+
+        let (sections, requests) =
+            fetch_offline(&["prowl", "--only", "merged"], tagged_with_merged(&[2]));
+        assert_eq!(
+            requests,
+            [GRAPHQL, RELEASES, "GET /repos/o/r/compare/v1...v2",]
+        );
+        assert_eq!(shipped(&sections), [(2, Some("v2".to_string()))]);
+
+        let (sections, requests) =
+            fetch_offline(&["prowl", "--only", "merged"], tagged_with_merged(&[3]));
+        assert_eq!(
+            requests,
+            [
+                GRAPHQL,
+                RELEASES,
+                "GET /repos/o/r/compare/v1...v2",
+                "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+            ]
+        );
+        assert_eq!(shipped(&sections), [(3, None)]);
+    }
+
+    #[test]
+    fn hidden_shipments_watch_reuses_the_batched_merged_rows() {
+        let args = ["prowl", "--only", "merged"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        for numbers in [&[][..], &[2][..], &[3][..]] {
+            let (once, mut requests) = fetch_offline(&args, tagged_with_merged(numbers));
+            let (client, fake) = github::fake::client(tagged_watch_with_merged(numbers));
+            let watch = fetch(
+                &cli,
+                &client,
+                &repo,
+                "me",
+                &mut Some("main".to_string()),
+                true,
+                true,
+            );
+
+            assert!(watch.issues.is_empty(), "{:?}", watch.issues);
+            requests.push(GRAPHQL.to_string());
+            assert_eq!(fake.requests(), requests);
+            assert_eq!(
+                serde_json::to_value(&watch.sections.merged).unwrap(),
+                serde_json::to_value(&once.merged).unwrap()
+            );
+            assert_eq!(watch.sections.reviewed_merged.unwrap().len(), numbers.len());
+        }
     }
 
     #[test]
