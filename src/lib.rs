@@ -2023,8 +2023,7 @@ impl<'a> App<'a> {
         let changes = self
             .prev
             .as_ref()
-            .map(|p| tracker.diff(p))
-            .unwrap_or_default();
+            .map_or_else(Changes::default, |p| tracker.diff(p));
         let bell = changes.any();
         self.unread.extend(changes);
 
