@@ -140,6 +140,24 @@ fn bottom_height(ui: &Ui, status: &str, footer: Option<(&str, bool)>, show_help:
     lines + help + gaps
 }
 
+fn fetch_merged_release_data(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+) -> Result<(Vec<model::MergedNode>, Option<commits::ReleaseMap>)> {
+    let since = timefmt::since_date(&cli.merged_window);
+    let nodes = model::fetch_merged(client, repo, me, &since, cli.merged_limit)?;
+    let prs: Vec<_> = nodes
+        .iter()
+        .take(cli.merged_limit)
+        .map(|node| node.number)
+        .collect();
+    let release_map =
+        commits::fetch_release_map(client, repo, me, cli.include_pre_releases, &prs).ok();
+    Ok((nodes, release_map))
+}
+
 /// Fetch the sections for the requested views. `want_mine` covers the Mine view
 /// (open PRs, queue, merged, shipments, honoring `--only`); `want_reviews`
 /// covers the Reviews view (PRs to review, reviewed-and-merged). In watch mode
@@ -167,31 +185,17 @@ fn fetch(
     // column. Without shipments, only scan ranges needed by displayed merged
     // PRs. Best-effort failures leave shipment stats unavailable and release
     // cells blank rather than taking down the dashboard.
-    let merged_nodes = if want_mine && cli.show_merged() && !cli.show_shipments() {
-        let since = timefmt::since_date(&cli.merged_window);
-        Some(model::fetch_merged(
-            client,
-            repo,
-            me,
-            &since,
-            cli.merged_limit,
-        )?)
-    } else {
-        None
-    };
+    let (merged_nodes, merged_release_map) =
+        if want_mine && cli.show_merged() && !cli.show_shipments() {
+            let (nodes, release_map) = fetch_merged_release_data(cli, client, repo, me)?;
+            (Some(nodes), release_map)
+        } else {
+            (None, None)
+        };
     let (commit_stats, release_map) = if want_mine && cli.show_shipments() {
         commits::fetch(client, repo, me, default_branch, cli.include_pre_releases).ok()
-    } else if let Some(nodes) = &merged_nodes {
-        let prs: Vec<_> = nodes
-            .iter()
-            .take(cli.merged_limit)
-            .map(|node| node.number)
-            .collect();
-        commits::fetch_release_map(client, repo, me, cli.include_pre_releases, &prs)
-            .ok()
-            .map(|release_map| (commits::CommitStats::unavailable(), release_map))
     } else {
-        None
+        merged_release_map.map(|release_map| (commits::CommitStats::unavailable(), release_map))
     }
     .unwrap_or_else(|| {
         (
