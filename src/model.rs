@@ -1388,13 +1388,13 @@ mod tests {
         .to_string()
     }
 
-    fn required_rule_page(after: Option<&str>) -> RequiredRefData {
+    fn required_rule_page(after: Option<&str>) -> serde_json::Value {
         let (has_next_page, end_cursor, context) = if after.is_none() {
             (true, Some("NEXT"), "test")
         } else {
             (false, Some("LAST"), "lint")
         };
-        serde_json::from_value(serde_json::json!({
+        serde_json::json!({
             "node": {
                 "refUpdateRule": if after.is_none() {
                     serde_json::json!({ "requiredStatusCheckContexts": ["classic"] })
@@ -1411,8 +1411,7 @@ mod tests {
                     }]
                 }
             }
-        }))
-        .unwrap()
+        })
     }
 
     #[test]
@@ -1450,6 +1449,48 @@ mod tests {
     }
 
     #[test]
+    fn required_rule_paginated_dispatches_across_refreshes() {
+        for (case, refs, per_refresh) in [
+            ("shared", ["ref-1", "ref-1"], 2),
+            ("disjoint", ["ref-1", "ref-2"], 4),
+        ] {
+            let (first, first_log) = crate::github::fake::client([(
+                "POST /graphql".to_string(),
+                serde_json::json!({ "data": required_rule_page(None) }).to_string(),
+            )]);
+            let (last, last_log) = crate::github::fake::client([(
+                "POST /graphql".to_string(),
+                serde_json::json!({ "data": required_rule_page(Some("NEXT")) }).to_string(),
+            )]);
+            for refresh in 1..=2 {
+                let mut cache = RequiredContextCache::default();
+                for id in refs {
+                    cache
+                        .fetch_if_missing(id, || {
+                            fetch_required_contexts(id, |query, variables| {
+                                assert_eq!(variables["id"], id);
+                                let client = match variables["after"].as_str() {
+                                    None => &first,
+                                    Some("NEXT") => &last,
+                                    cursor => panic!("unexpected rules cursor: {cursor:?}"),
+                                };
+                                client.graphql(query, variables)
+                            })
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        cache.contexts[id],
+                        HashSet::from(["classic".into(), "test".into(), "lint".into()])
+                    );
+                }
+                let requests = first_log.requests().len() + last_log.requests().len();
+                println!("PAGINATED_RULES {case} refresh={refresh} POST={requests}");
+                assert_eq!(requests, per_refresh * refresh, "{case}");
+            }
+        }
+    }
+
+    #[test]
     fn required_rule_cache_only_stores_complete_paginated_results() {
         let mut cache = RequiredContextCache::default();
         let mut failed_cursors = Vec::new();
@@ -1461,7 +1502,7 @@ mod tests {
                 if after.is_some() {
                     anyhow::bail!("second rules page failed");
                 }
-                Ok(required_rule_page(after.as_deref()))
+                Ok(serde_json::from_value(required_rule_page(after.as_deref())).unwrap())
             })
         });
         assert!(error.is_err());
@@ -1475,7 +1516,7 @@ mod tests {
                     assert_eq!(query, REQUIRED_CONTEXTS_QUERY);
                     let after = variables["after"].as_str().map(str::to_string);
                     retried_cursors.push(after.clone());
-                    Ok(required_rule_page(after.as_deref()))
+                    Ok(serde_json::from_value(required_rule_page(after.as_deref())).unwrap())
                 })
             })
             .unwrap();
