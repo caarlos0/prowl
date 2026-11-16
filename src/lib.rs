@@ -163,14 +163,33 @@ fn fetch(
             .as_str()
     });
 
-    // Release data powers both the "My Shipments" counts and the merged
-    // "RELEASE" column, so fetch it once when either section is shown. Only
-    // My Shipments shows the upcoming count, so skip that scan without it.
-    // Best-effort: a failure (no releases, empty repo, ...) degrades to an
-    // "unavailable" shipments line and blank release cells rather than taking
-    // down the whole dashboard.
-    let (commit_stats, release_map) = if want_mine && (cli.show_shipments() || cli.show_merged()) {
+    // Release data powers the "My Shipments" counts and merged "RELEASE"
+    // column. Without shipments, only scan ranges needed by displayed merged
+    // PRs. Best-effort failures leave shipment stats unavailable and release
+    // cells blank rather than taking down the dashboard.
+    let merged_nodes = if want_mine && cli.show_merged() && !cli.show_shipments() {
+        let since = timefmt::since_date(&cli.merged_window);
+        Some(model::fetch_merged(
+            client,
+            repo,
+            me,
+            &since,
+            cli.merged_limit,
+        )?)
+    } else {
+        None
+    };
+    let (commit_stats, release_map) = if want_mine && cli.show_shipments() {
         commits::fetch(client, repo, me, default_branch, cli.include_pre_releases).ok()
+    } else if let Some(nodes) = &merged_nodes {
+        let prs: Vec<_> = nodes
+            .iter()
+            .take(cli.merged_limit)
+            .map(|node| node.number)
+            .collect();
+        commits::fetch_release_map(client, repo, me, cli.include_pre_releases, &prs)
+            .ok()
+            .map(|release_map| (commits::CommitStats::unavailable(), release_map))
     } else {
         None
     }
@@ -181,7 +200,9 @@ fn fetch(
         )
     });
 
-    let merged = if want_mine && cli.show_merged() {
+    let merged = if let Some(nodes) = merged_nodes {
+        Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
+    } else if want_mine && cli.show_merged() {
         let since = timefmt::since_date(&cli.merged_window);
         let nodes = model::fetch_merged(client, repo, me, &since, cli.merged_limit)?;
         Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
@@ -3960,7 +3981,7 @@ mod tests {
     }
 
     /// Releases v2 and v1: PR 3 is unreleased, PR 2 shipped in v2, PR 1 in v1.
-    fn tagged() -> Vec<(String, String)> {
+    fn tagged_with_merged(numbers: &[i64]) -> Vec<(String, String)> {
         let routes = [
             (RELEASES, serde_json::json!([release("v2"), release("v1")])),
             (
@@ -3982,8 +4003,12 @@ mod tests {
         routes
             .into_iter()
             .map(|(route, body)| (route.to_string(), body.to_string()))
-            .chain([graphql(&[3, 2, 1])])
+            .chain([graphql(numbers)])
             .collect()
+    }
+
+    fn tagged() -> Vec<(String, String)> {
+        tagged_with_merged(&[3, 2, 1])
     }
 
     /// No releases, so the upcoming count pages through every commit of mine.
@@ -4204,10 +4229,10 @@ mod tests {
         assert_eq!(
             requests,
             [
+                GRAPHQL,
                 RELEASES,
                 "GET /repos/o/r/compare/v1...v2",
                 "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
-                GRAPHQL,
             ]
         );
         assert_eq!(
@@ -4221,9 +4246,45 @@ mod tests {
         assert!(sections.commits.is_none());
 
         let (sections, requests) = fetch_offline(&["prowl", "--only", "merged"], untagged());
-        assert_eq!(requests, [RELEASES, GRAPHQL]);
+        assert_eq!(requests, [GRAPHQL, RELEASES]);
         assert_eq!(shipped(&sections), [(1, None)]);
         assert!(sections.commits.is_none());
+    }
+
+    #[test]
+    fn hidden_shipments_scan_only_until_displayed_prs_are_mapped() {
+        let (sections, requests) =
+            fetch_offline(&["prowl", "--only", "merged"], tagged_with_merged(&[]));
+        assert_eq!(requests, [GRAPHQL]);
+        assert!(shipped(&sections).is_empty());
+
+        let (sections, requests) = fetch_offline(
+            &["prowl", "--only", "merged", "--merged-limit", "0"],
+            tagged_with_merged(&[2]),
+        );
+        assert_eq!(requests, [GRAPHQL]);
+        assert!(shipped(&sections).is_empty());
+
+        let (sections, requests) =
+            fetch_offline(&["prowl", "--only", "merged"], tagged_with_merged(&[2]));
+        assert_eq!(
+            requests,
+            [GRAPHQL, RELEASES, "GET /repos/o/r/compare/v1...v2",]
+        );
+        assert_eq!(shipped(&sections), [(2, Some("v2".to_string()))]);
+
+        let (sections, requests) =
+            fetch_offline(&["prowl", "--only", "merged"], tagged_with_merged(&[3]));
+        assert_eq!(
+            requests,
+            [
+                GRAPHQL,
+                RELEASES,
+                "GET /repos/o/r/compare/v1...v2",
+                "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+            ]
+        );
+        assert_eq!(shipped(&sections), [(3, None)]);
     }
 
     #[test]
