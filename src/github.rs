@@ -118,6 +118,8 @@ pub fn parse_graphql<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 pub struct Client {
     agent: ureq::Agent,
     token: String,
+    #[cfg(test)]
+    fake: Option<fake::Fake>,
 }
 
 impl Client {
@@ -127,7 +129,12 @@ impl Client {
             .timeout_global(Some(Duration::from_secs(30)))
             .build()
             .into();
-        Client { agent, token }
+        Client {
+            agent,
+            token,
+            #[cfg(test)]
+            fake: None,
+        }
     }
 
     fn bearer(&self) -> String {
@@ -140,6 +147,10 @@ impl Client {
         query: &str,
         variables: serde_json::Value,
     ) -> Result<T> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return parse_graphql(fake.respond("POST /graphql".to_string())?.as_bytes());
+        }
         let body = serde_json::json!({ "query": query, "variables": variables });
         let mut resp = self
             .agent
@@ -158,6 +169,11 @@ impl Client {
 
     /// GET a REST path (relative to api.github.com), returning typed JSON.
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return serde_json::from_str(fake.respond(format!("GET /{path}"))?)
+                .with_context(|| format!("parsing response from /{path}"));
+        }
         let mut resp = self
             .agent
             .get(format!("{API}/{path}"))
@@ -198,6 +214,46 @@ fn api_err(e: ureq::Error) -> anyhow::Error {
         return anyhow!("GitHub rejected the token (401); run `prowl --login`");
     }
     anyhow!("GitHub request failed: {e}")
+}
+
+/// An in-memory GitHub API for tests. `Client::get` and `Client::graphql` ask
+/// it instead of the network: it answers `METHOD /path?query` with canned JSON,
+/// fails unknown requests like a 404, and logs every request attempt in order.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::Client;
+    use anyhow::{Result, anyhow};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    pub(crate) struct Fake {
+        routes: Arc<HashMap<String, String>>,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Fake {
+        pub(crate) fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        pub(super) fn respond(&self, request: String) -> Result<&str> {
+            let body = self.routes.get(&request).map(String::as_str);
+            let body = body.ok_or_else(|| anyhow!("GitHub request failed: 404 for {request}"));
+            self.requests.lock().unwrap().push(request);
+            body
+        }
+    }
+
+    pub(crate) fn client(routes: impl IntoIterator<Item = (String, String)>) -> (Client, Fake) {
+        let fake = Fake {
+            routes: Arc::new(routes.into_iter().collect()),
+            requests: Arc::default(),
+        };
+        let mut client = Client::new(String::new());
+        client.fake = Some(fake.clone());
+        (client, fake)
+    }
 }
 
 #[cfg(test)]
