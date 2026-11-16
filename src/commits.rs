@@ -306,6 +306,7 @@ pub fn fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::fake;
 
     fn node(login: Option<&str>, message: &str) -> CommitNode {
         CommitNode {
@@ -347,5 +348,91 @@ mod tests {
     fn flags_capped_when_range_truncated() {
         let (count, _) = mine_in(&[node(Some("caarlos0"), "x (#1)")], 300, "caarlos0");
         assert!(count.capped);
+    }
+
+    #[test]
+    fn conditional_shipment_requests_reuse_unchanged_data() {
+        const RELEASES: &str = r#"[
+            {"tag_name":"v1.4","draft":false,"prerelease":false},
+            {"tag_name":"v1.3","draft":false,"prerelease":false},
+            {"tag_name":"v1.2","draft":false,"prerelease":false},
+            {"tag_name":"v1.1","draft":false,"prerelease":false}
+        ]"#;
+        const COMPARE: &str = r#"{
+            "total_commits":1,
+            "commits":[{"author":{"login":"me"},"commit":{"message":"feat (#1)"}}]
+        }"#;
+        const COMMITS: &str = r#"[{"author":{"login":"me"},"commit":{"message":"feat (#1)"}}]"#;
+        const RELEASES_PATH: &str = "GET /repos/owner/repo/releases?per_page=50&page=1";
+        const UPCOMING_PATH: &str = "GET /repos/owner/repo/compare/v1.4...main";
+        const RELEASE_1_PATH: &str = "GET /repos/owner/repo/compare/v1.3...v1.4";
+        const RELEASE_2_PATH: &str = "GET /repos/owner/repo/compare/v1.2...v1.3";
+        const RELEASE_3_PATH: &str = "GET /repos/owner/repo/compare/v1.1...v1.2";
+        const COMMITS_PATH: &str =
+            "GET /repos/owner/repo/commits?sha=v1.1&author=me&per_page=100&page=1";
+        let routes = [
+            (RELEASES_PATH, RELEASES),
+            (UPCOMING_PATH, COMPARE),
+            (RELEASE_1_PATH, COMPARE),
+            (RELEASE_2_PATH, COMPARE),
+            (RELEASE_3_PATH, COMPARE),
+            (COMMITS_PATH, COMMITS),
+        ];
+        let (client, fake) = fake::client(
+            routes
+                .iter()
+                .map(|(path, body)| (path.to_string(), body.to_string())),
+        );
+        for (path, body) in routes {
+            fake.set_response(path, 200, &[("etag", "v1")], body);
+        }
+
+        let repo = Repo::parse("owner/repo").unwrap();
+        let first = fetch(&client, &repo, "me", Some("main"), false).unwrap();
+        let first_requests = fake.requests();
+        assert_eq!(first_requests, routes.map(|(path, _)| path.to_string()));
+        assert_eq!(
+            fake.validators()[..routes.len()],
+            routes.map(|(path, _)| (path.to_string(), None))
+        );
+
+        for (path, _) in routes {
+            fake.set_response(path, 304, &[], "");
+        }
+        let second = fetch(&client, &repo, "me", Some("main"), false).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(fake.requests()[6..], first_requests);
+        assert_eq!(
+            fake.validators()[routes.len()..],
+            routes.map(|(path, _)| (path.to_string(), Some("v1".to_string())))
+        );
+
+        fake.set_response(
+            UPCOMING_PATH,
+            200,
+            &[("etag", "v2")],
+            r#"{"total_commits":2,"commits":[{"author":{"login":"me"},"commit":{"message":"feat (#1)"}}]}"#,
+        );
+        let third = fetch(&client, &repo, "me", Some("main"), false).unwrap();
+        assert_ne!(third, second);
+        assert_eq!(fake.requests()[12..], first_requests);
+
+        for (path, _) in routes {
+            fake.set_response(path, 304, &[], "");
+        }
+        let fourth = fetch(&client, &repo, "me", Some("main"), false).unwrap();
+        assert_eq!(fourth, third);
+        assert_eq!(fake.requests()[18..], first_requests);
+        assert_eq!(
+            fake.validators()[18..],
+            [
+                (RELEASES_PATH.to_string(), Some("v1".to_string())),
+                (UPCOMING_PATH.to_string(), Some("v2".to_string())),
+                (RELEASE_1_PATH.to_string(), Some("v1".to_string())),
+                (RELEASE_2_PATH.to_string(), Some("v1".to_string())),
+                (RELEASE_3_PATH.to_string(), Some("v1".to_string())),
+                (COMMITS_PATH.to_string(), Some("v1".to_string())),
+            ]
+        );
     }
 }

@@ -105,11 +105,15 @@ watch event loop); everything else is testable modules:
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
   `parse_graphql()`. Client clones share rate-limit deadlines: primary REST
   core and GraphQL budgets stay separate, while secondary limits block both.
+  Clones also share a per-client, in-memory cache of up to 32 successful REST
+  GET responses with ETags. Matching GETs send `If-None-Match`; a `304` reuses
+  the cached body. It does not reduce HTTP request count, is isolated between
+  clients/tokens, and does not apply to GraphQL.
   HTTP status, headers, and GraphQL errors identify limits; a successful last
   response with zero remaining quota still returns its data. The test-only
   `github::fake` supplies in-memory responses and a controlled clock through
   the same response/error/cooldown path, logging each dispatch past the gate
-  (`METHOD /path?query`).
+  (`METHOD /path?query`) and the `If-None-Match` value.
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
@@ -581,7 +585,9 @@ still performs all teardown through `finish`.
   merged:>=<since>)` (reuses the merged query/limit).
 - Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
   The upcoming range (latest tag → default branch, or all of the default
-  branch without a tag) is fetched only while My Shipments is shown.
+  branch without a tag) is fetched only while My Shipments is shown. Repeated
+  GETs use the `github::Client` ETag cache; `304` responses preserve the parsed
+  shipment data while still using one HTTP request per refresh.
 
 ## Build / test / lint
 
@@ -647,7 +653,8 @@ and help/version without network calls. No network in tests: to pin the
 requests a fetch path sends, build the client with `github::fake::client`
 (canned JSON by `METHOD /path?query`) and assert its request log. Fixtures can
 replace status, headers, and body with `set_response`, and control time with
-`set_now`. The log counts dispatches after the cooldown gate, not all
+`set_now`. The log counts dispatches after the cooldown gate and records
+conditional request headers, not all
 `Client::get`/`graphql` calls or wire requests (ureq can follow redirects).
 Fixtures exercise the common response/error/gate path without sockets; they
 do not measure production quota savings or GraphQL point costs.
