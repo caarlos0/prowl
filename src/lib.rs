@@ -3692,6 +3692,6 @@ mod tests {
                 url: "https://github.com/o/r/commits/main".to_string(),
             })
         );
-        assert!(stats.releases.is_empty());
+        assert_eq!(stats.releases, []);
     }
 }
