@@ -205,6 +205,32 @@ fn resolve_merged_nodes(
     }
 }
 
+fn fetch_review_sections(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    merged_nodes: Option<Result<Vec<model::MergedNode>>>,
+    errors: &mut Vec<MergedFetchError>,
+) -> Result<(
+    Option<Vec<reviews::ReviewRow>>,
+    Option<Vec<reviews::ReviewedMergedRow>>,
+)> {
+    let data = model::fetch_reviews(client, repo, me, cli.review_scope.qualifier())?;
+    let open = reviews::build_open_rows(data);
+    let open = if cli.no_draft {
+        reviews::without_drafts(open)
+    } else {
+        open
+    };
+    let merged_nodes = resolve_merged_nodes(merged_nodes, MergedSection::Reviewed, errors, || {
+        let since = timefmt::since_date(&cli.merged_window);
+        model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)
+    })?;
+    let merged = reviews::build_merged_rows(merged_nodes, cli.merged_limit);
+    Ok((Some(open), Some(merged)))
+}
+
 fn fetch_sections(
     cli: &Cli,
     client: &Client,
@@ -303,24 +329,7 @@ fn fetch_sections(
 
     // Reviews view: PRs awaiting / under my review, plus merged PRs I reviewed.
     let (reviews, reviewed_merged) = if want_reviews {
-        let data = model::fetch_reviews(client, repo, me, cli.review_scope.qualifier())?;
-        let open = reviews::build_open_rows(data);
-        let open = if cli.no_draft {
-            reviews::without_drafts(open)
-        } else {
-            open
-        };
-        let merged_nodes = resolve_merged_nodes(
-            reviewed_merged.take(),
-            MergedSection::Reviewed,
-            &mut errors,
-            || {
-                let since = timefmt::since_date(&cli.merged_window);
-                model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)
-            },
-        )?;
-        let merged_reviews = reviews::build_merged_rows(merged_nodes, cli.merged_limit);
-        (Some(open), Some(merged_reviews))
+        fetch_review_sections(cli, client, repo, me, reviewed_merged.take(), &mut errors)?
     } else {
         (None, None)
     };

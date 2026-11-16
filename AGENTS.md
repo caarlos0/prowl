@@ -118,10 +118,9 @@ watch event loop); everything else is testable modules:
   merged searches in one aliased POST and reports errors per merged section;
   one-shot keeps its selected view's single merged-search request. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
-  It reads required
-  context names from each distinct base ref's `refUpdateRule` and all pages of
-  active `rules`, once per distinct ref across the enabled sections. Missing
-  required contexts are added to `RUN` in both normal
+  It reads required context names from each distinct base ref's `refUpdateRule`
+  and all pages of active `rules`, once per distinct ref across the enabled
+  sections. Missing required contexts are added to `RUN` in both normal
   and required-only mode, after comparing them with the commit's paginated
   `isRequired` contexts (the speculative commit for queue entries, not the PR
   head). Entries without a speculative commit count all expected checks as
