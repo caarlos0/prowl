@@ -214,9 +214,13 @@ watch event loop); everything else is testable modules:
   shipped it, parsed from each commit subject's trailing `(#NNN)`, the squash /
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
-  The upcoming scan runs only when `fetch` is asked to count it; `lib::fetch`
-  asks only while My Shipments is shown, because the release ranges alone
-  build the `ReleaseMap`.
+  The upcoming scan runs only when `fetch` receives a default branch;
+  `lib::fetch` resolves and passes it only when fetching My Shipments, because
+  the release ranges alone build the `ReleaseMap`. The lookup is skipped for
+  one-shot Reviews and Mine selections without shipments, including merged-only.
+  Watch mode still resolves it when shipments are enabled, even if the initial
+  tab is Reviews, and reuses it on refresh. Lookup failures still fall back to
+  `main`.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
@@ -278,9 +282,10 @@ pattern**: the struct owns the `uncurses::Program` plus all dashboard state, and
 app.stop()?; result`. `start` builds the screen from the `Terminal` and brings it
 up (raw mode, hidden cursor, keeping the terminal's detected color profile), then
 paints the startup frame: a cached dashboard if one exists (entering the alt screen
-straight away), otherwise an **inline** `Loading...` frame. `run` resolves
-`me`/default branch then loops fetch → paint → wait, returning `Ok(())` on a quit
-key. The first live paint calls `enter_alt` (once), which drops the inline frame to
+straight away), otherwise an **inline** `Loading...` frame. `run` loops fetch →
+paint → wait, resolving `me` on the first fetch and the default branch only if
+shipments are enabled, and returning `Ok(())` on a quit key. The first live paint
+calls `enter_alt` (once), which drops the inline frame to
 zero rows and switches to the alt screen — so loading looks like ordinary command
 output before the dashboard takes over the screen. `stop` consumes the app and calls
 **`Program::finish`** (the idiomatic teardown: exit alt-screen, show cursor, leave
@@ -493,8 +498,9 @@ still performs all teardown through `finish`.
   low-priority labels/hints to fit narrow widths instead of clipping; a failed refresh adds a dim
   `error: …` line above it (the same slot a copy's `copied N links`
   confirmation uses). While a fetch is in flight the footer reads `^R refreshing` with the
-  `^R` glyph dimmed. Every fetch (and the one-time `me`/default-branch resolution)
-  runs on a **detached background thread** and returns over a channel; the main
+  `^R` glyph dimmed. Every fetch (and the one-time `me` and optional
+  default-branch resolution) runs on a **detached background thread** and
+  returns over a channel; the main
   thread only polls input and paints, so network I/O never blocks the UI —
   navigation, search, `r`/`R`, `Tab`, `?`, resize and suspend stay live mid-refresh and
   **quit is instant** (a quit abandons the in-flight request, which is reaped at
