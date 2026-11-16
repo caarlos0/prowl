@@ -91,7 +91,8 @@ watch event loop); everything else is testable modules:
   not on refresh.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
-  `parse_graphql()`.
+  `parse_graphql()`. The test-only `github::fake` answers `get()`/`graphql()`
+  from memory and logs each request attempt (`METHOD /path?query`).
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
@@ -601,7 +602,11 @@ notarization.
 Tests are offline: JSON fixtures under `tests/fixtures/` (real captures + a
 crafted queue) drive parsing → rows → render in `tests/parsing.rs`, plus
 per-module unit tests. `tests/config.rs` exercises startup config paths, errors,
-and help/version without network calls. No network in tests.
+and help/version without network calls. No network in tests: to pin the
+requests a fetch path sends, build the client with `github::fake::client`
+(canned JSON by `METHOD /path?query`) and assert its request log. It counts
+`Client::get`/`graphql` calls, one HTTP request each in production; it does not
+exercise ureq or GraphQL rate-limit cost.
 
 ## Conventions
 
