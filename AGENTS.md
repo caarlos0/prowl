@@ -118,13 +118,15 @@ watch event loop); everything else is testable modules:
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
   two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
-  (reuses `merged_query`, now carrying `author`). My PRs and Merge Queue share a
-  refresh-scoped cache of complete required rule contexts. It reads required
-  context names from each distinct base ref's `refUpdateRule` and all pages of
-  active `rules`, in groups of up to five refs per GraphQL request, once per
-  distinct ref across the enabled sections. Each ref advances its own rules
-  cursor. Missing required contexts are added to `RUN` in both normal and
-  required-only mode, after comparing them with the commit's paginated
+  (reuses `merged_query`, now carrying `author`). Watch mode combines its two
+  merged searches in one aliased POST and reports errors per merged section;
+  one-shot keeps its selected view's single merged-search request. My PRs and
+  Merge Queue share a refresh-scoped cache of complete required rule contexts.
+  It reads required context names from each distinct base ref's `refUpdateRule`
+  and all pages of active `rules`, in groups of up to five refs per GraphQL
+  request, once per distinct ref across the enabled sections. Each ref advances
+  its own rules cursor. Missing required contexts are added to `RUN` in both
+  normal and required-only mode, after comparing them with the commit's paginated
   `isRequired` contexts (the speculative commit for queue entries, not the PR
   head). Entries without a speculative commit count all expected checks as
   missing but have no BUILD start.
@@ -247,6 +249,8 @@ watch event loop); everything else is testable modules:
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
+  An unknown Mine merged baseline stays silent on recovery while open-PR status
+  changes remain tracked.
 - `nav.rs` — watch-mode row navigation + search: `groups(view, &Sections, query, visible)`
   is the matching rows' `Target { number, title, url }` values bucketed by rendered section;
   `number` is `Some(PR number)` for PRs and `None` for shipments, so marking read
@@ -414,8 +418,9 @@ still performs all teardown through `finish`.
 - **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
   one-shot output with `--view` and toggled live with `Tab`. While watching,
   prowl fetches **both** views every refresh so Tab switches instantly from
-  `last_good` (no refetch); `--once`/piped fetches only the selected view. A
-  top tab strip marks the active view.
+  `last_good` (no refetch); the two merged searches share one aliased POST.
+  `--once`/piped fetches only the selected view. A top tab strip marks the
+  active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
   reviewed by me), `ReReview` (requested again after I reviewed), `Updated` (I
   reviewed; last commit `committedDate` > my latest review `submittedAt`), or
@@ -587,7 +592,9 @@ still performs all teardown through `finish`.
   `headRefName` and `mergedAt`
   (fetched `sort:updated-desc`, since search can't sort by merge time, then
   re-sorted by `mergedAt` for display). Now also fetches `author` (used by the
-  reviewed-and-merged section; the Mine merged section ignores it).
+  reviewed-and-merged section; the Mine merged section ignores it). In watch
+  mode the Mine and reviewed-by-me searches are aliases in one POST; an error
+  on one alias leaves the other section usable and names the failed section.
 - Reviews (one POST, two aliased searches): `requested: search(is:pr is:open
   <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
   reviewed-by:<me> -author:<me>)`, each node carrying `author`, `headRefName`,
