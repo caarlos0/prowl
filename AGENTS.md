@@ -120,12 +120,15 @@ watch event loop); everything else is testable modules:
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   It reads required context names from each distinct base ref's `refUpdateRule`
   and all pages of active `rules`, in groups of up to five refs per GraphQL
-  request, once per distinct ref across the enabled sections. Each ref advances
-  its own rules cursor. Missing required contexts are added to `RUN` in both
-  normal and required-only mode, after comparing them with the commit's paginated
-  `isRequired` contexts (the speculative commit for queue entries, not the PR
-  head). Entries without a speculative commit count all expected checks as
-  missing but have no BUILD start.
+  request, once per distinct ref across the enabled sections. The queue request
+  seeds the default ref's first page; when the queue is off, the first Mine
+  search page does so. Remaining pages are fetched only if an enabled section
+  uses that ref. Each ref advances its own rules cursor. Missing required
+  contexts are added to `RUN` in both normal and required-only mode, after
+  comparing them with the commit's paginated `isRequired` contexts (the
+  speculative commit for queue entries, not the PR head). Entries without a
+  speculative commit count all expected checks as missing but have no BUILD
+  start.
 - `status.rs` — **the** palette: `Approval` (RequiredApproved/Approved/Pending)
   with `approval_of` (`reviewDecision: APPROVED` means all required reviews are
   approved; otherwise any `latestOpinionatedReviews` approval means Approved),
@@ -383,16 +386,18 @@ still performs all teardown through `finish`.
   no phantom zero-run check suites and no truncated page to compensate for.
   In My PRs and Merge Queue, `RUN` also includes required checks that have not
   reported on the relevant commit (PR head or speculative merge).
-  Required context names come from the actual base branch's
-  classic protection and active repository/organization rulesets, fetched in
-  GraphQL batches of up to five refs, once per distinct base ref per refresh
-  across the enabled My PRs and Merge Queue sections. Each ref's active-rule
-  pages use an independent cursor. All reported required contexts are paginated
-  before counting missing ones, so a queued, running,
-  failed, or passed check is not also counted as missing. This applies with and
-  without `--required`, including commits with no rollup. Queue entries without
-  a speculative commit count all expected checks in `RUN`; missing checks
-  do not start `BUILD`.
+  Required context names come from the actual base branch's classic protection
+  and active repository/organization rulesets. The refresh seeds the default
+  branch's first rules page from the queue request, or from the first Mine
+  search page when the queue is off; remaining pages are fetched only when an
+  enabled PR section uses that ref. Other base refs are fetched in GraphQL
+  batches of up to five, once per distinct base ref per refresh across My PRs
+  and Merge Queue. Each ref's active-rule pages use an independent cursor. All
+  reported required checks are paginated before counting missing ones, so a
+  queued, running, failed, or passed check is not also counted as missing. This
+  applies with and without `--required`, including commits with no rollup. Queue
+  entries without a speculative commit count all expected checks in `RUN`;
+  missing checks do not start `BUILD`.
   With `--required`, prowl follows those contexts page by page in a second
   batched GraphQL query and uses each context's `isRequired(pullRequestNumber:)`
   value for both the semaphore and the merge queue's BUILD start.
@@ -564,14 +569,19 @@ still performs all teardown through `finish`.
 
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
-- Merge queue: `repository.mergeQueue.entries` (vars `owner`, `name`), each
-  entry carrying `headRefName`, `enqueuedAt` (WAIT) and `headCommit.statusCheckRollup.contexts`
+- Merge queue: `repository.defaultBranchRef` returns the default ref ID, classic
+  required contexts, and its first active-rules page.
+  `repository.mergeQueue.entries` (vars `owner`, `name`) returns each entry
+  carrying `headRefName`, `enqueuedAt` (WAIT) and
+  `headCommit.statusCheckRollup.contexts`
   check-run `startedAt` timestamps (BUILD = now − the earliest) plus that same
   connection's `checkRunCountsByState` / `statusContextCountsByState` aggregates
   (the FAIL/RUN/PASS semaphore), plus the queue-level
   `nextEntryEstimatedTimeToMerge` (the header ETA). Each entry's PR carries
   `baseRef { id }`; required-context discovery and pagination are shared with
-  My PRs, using the queue entry's `headCommit` to count missing checks.
+  My PRs, using the queue entry's `headCommit` to count missing checks. When
+  the queue is off, the first Mine search page requests the same default-branch
+  rules fields.
 - Open PRs: `search(is:pr is:open author:<me>)`, five per cursor page, with `mergeable`,
   `mergeStateStatus`, `reviewDecision`,
   `latestOpinionatedReviews(first: 100) { nodes { state } }`,

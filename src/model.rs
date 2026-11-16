@@ -17,6 +17,21 @@ use std::fmt::Write as _;
 
 pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
+    defaultBranchRef {
+      id
+      refUpdateRule { requiredStatusCheckContexts }
+      rules(first: 100) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          parameters {
+            __typename
+            ... on RequiredStatusChecksParameters {
+              requiredStatusChecks { context }
+            }
+          }
+        }
+      }
+    }
     mergeQueue {
       nextEntryEstimatedTimeToMerge
       entries(first: 100) {
@@ -47,6 +62,8 @@ pub struct QueueData {
 
 #[derive(Debug, Deserialize)]
 pub struct QueueRepo {
+    #[serde(rename = "defaultBranchRef")]
+    default_branch_ref: Option<DefaultBranchRef>,
     #[serde(rename = "mergeQueue")]
     pub merge_queue: Option<MergeQueue>,
 }
@@ -238,10 +255,15 @@ pub(crate) fn fetch_queue_with_context_cache(
     required_only: bool,
     context_cache: &mut RequiredContextCache,
 ) -> Result<(Vec<QueueEntryNode>, Option<i64>)> {
-    let data: QueueData = client.graphql(
+    let mut data: QueueData = client.graphql(
         QUEUE_QUERY,
         serde_json::json!({ "owner": repo.owner, "name": repo.name }),
     )?;
+    let default_branch_ref = data
+        .repository
+        .as_mut()
+        .and_then(|repository| repository.default_branch_ref.take());
+    seed_default_branch_ref(default_branch_ref, context_cache)?;
     let eta = queue_next_eta(&data);
     let mut nodes = queue_nodes(data);
     let targets: Vec<_> = nodes.iter().map(QueueEntryNode::required_target).collect();
@@ -260,7 +282,24 @@ pub(crate) fn fetch_queue_with_context_cache(
 // My open PRs
 // ----------------------------------------------------------------------------
 
-pub const MINE_QUERY: &str = r#"query($q: String!, $after: String) {
+pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeDefaultBranchRef: Boolean!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef @include(if: $includeDefaultBranchRef) {
+      id
+      refUpdateRule { requiredStatusCheckContexts }
+      rules(first: 100) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          parameters {
+            __typename
+            ... on RequiredStatusChecksParameters {
+              requiredStatusChecks { context }
+            }
+          }
+        }
+      }
+    }
+  }
   search(type: ISSUE, first: 5, after: $after, query: $q) {
     pageInfo { hasNextPage endCursor }
     nodes {
@@ -282,7 +321,14 @@ pub const MINE_QUERY: &str = r#"query($q: String!, $after: String) {
 
 #[derive(Debug, Deserialize)]
 pub struct MineData {
+    repository: Option<DefaultBranchRepository>,
     pub search: MineNodes,
+}
+
+#[derive(Debug, Deserialize)]
+struct DefaultBranchRepository {
+    #[serde(rename = "defaultBranchRef")]
+    default_branch_ref: Option<DefaultBranchRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -515,8 +561,25 @@ pub(crate) fn fetch_my_prs_with_context_cache(
     let mut nodes = Vec::new();
     let mut after: Option<String> = None;
     loop {
-        let data: MineData =
-            client.graphql(MINE_QUERY, serde_json::json!({ "q": q, "after": after }))?;
+        let include_default_branch_ref =
+            after.is_none() && context_cache.default_branch_ref_id.is_none();
+        let data: MineData = client.graphql(
+            MINE_QUERY,
+            serde_json::json!({
+                "owner": repo.owner,
+                "name": repo.name,
+                "q": q,
+                "after": after,
+                "includeDefaultBranchRef": include_default_branch_ref,
+            }),
+        )?;
+        if include_default_branch_ref {
+            seed_default_branch_ref(
+                data.repository
+                    .and_then(|repository| repository.default_branch_ref),
+                context_cache,
+            )?;
+        }
         after = data.search.add_to(&mut nodes)?;
         if after.is_none() {
             break;
@@ -562,6 +625,13 @@ struct RequiredRef {
     #[serde(rename = "refUpdateRule")]
     update_rule: Option<RefUpdateRule>,
     rules: RefRules,
+}
+
+#[derive(Debug, Deserialize)]
+struct DefaultBranchRef {
+    id: String,
+    #[serde(flatten)]
+    required: RequiredRef,
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,6 +693,8 @@ struct RequiredTarget {
 #[derive(Debug, Default)]
 pub(crate) struct RequiredContextCache {
     contexts: HashMap<String, HashSet<String>>,
+    pending: HashMap<String, String>,
+    default_branch_ref_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -804,11 +876,14 @@ fn fetch_required_contexts(
     let mut seen = HashSet::new();
     let mut pending: Vec<_> = ids
         .iter()
-        .filter(|id| !context_cache.contexts.contains_key(*id) && seen.insert(id.as_str()))
+        .filter(|id| {
+            (!context_cache.contexts.contains_key(*id) || context_cache.pending.contains_key(*id))
+                && seen.insert(id.as_str())
+        })
         .map(|id| PendingRequiredRules {
             id: id.clone(),
-            after: None,
-            contexts: HashSet::new(),
+            after: context_cache.pending.get(id).cloned(),
+            contexts: context_cache.contexts.get(id).cloned().unwrap_or_default(),
         })
         .collect();
 
@@ -836,10 +911,29 @@ fn fetch_required_contexts(
                 context_cache
                     .contexts
                     .insert(item.id.clone(), std::mem::take(&mut item.contexts));
+                context_cache.pending.remove(&item.id);
                 false
             }
         });
     }
+    Ok(())
+}
+
+fn seed_default_branch_ref(
+    branch: Option<DefaultBranchRef>,
+    context_cache: &mut RequiredContextCache,
+) -> Result<()> {
+    let Some(branch) = branch else {
+        return Ok(());
+    };
+    if !context_cache.contexts.contains_key(&branch.id) {
+        let mut contexts = HashSet::new();
+        if let Some(after) = branch.required.add_to(&mut contexts)? {
+            context_cache.pending.insert(branch.id.clone(), after);
+        }
+        context_cache.contexts.insert(branch.id.clone(), contexts);
+    }
+    context_cache.default_branch_ref_id = Some(branch.id);
     Ok(())
 }
 
@@ -1359,7 +1453,9 @@ mod tests {
     #[test]
     fn every_pr_query_requests_the_head_branch() {
         assert!(QUEUE_QUERY.contains("headRefName"));
+        assert!(QUEUE_QUERY.contains("defaultBranchRef"));
         assert!(MINE_QUERY.contains("headRefName"));
+        assert!(MINE_QUERY.contains("defaultBranchRef @include(if: $includeDefaultBranchRef)"));
         assert!(merged_query(20).contains("headRefName"));
         assert!(REVIEWS_QUERY.contains("headRefName"));
     }
@@ -1525,6 +1621,61 @@ mod tests {
                 "security".into()
             ])
         );
+    }
+
+    #[test]
+    fn default_branch_rules_resume_after_the_inline_page_when_used() {
+        let branch: DefaultBranchRef = serde_json::from_value(serde_json::json!({
+            "id": "default",
+            "refUpdateRule": { "requiredStatusCheckContexts": ["classic"] },
+            "rules": {
+                "pageInfo": { "hasNextPage": true, "endCursor": "NEXT" },
+                "nodes": [{
+                    "parameters": {
+                        "__typename": "RequiredStatusChecksParameters",
+                        "requiredStatusChecks": [{ "context": "inline" }]
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+        let mut cache = RequiredContextCache::default();
+        seed_default_branch_ref(Some(branch), &mut cache).unwrap();
+        assert_eq!(cache.pending["default"], "NEXT");
+
+        let mut cursors = Vec::new();
+        fetch_required_contexts(&["default".to_string()], &mut cache, |query, variables| {
+            assert!(query.contains("rules(first: 100, after: $after0)"));
+            assert_eq!(variables["id0"], "default");
+            let after = variables["after0"].as_str().map(str::to_string);
+            cursors.push(after.clone());
+            assert_eq!(after.as_deref(), Some("NEXT"));
+            Ok(RequiredRefsData {
+                refs: HashMap::from([(
+                    "r0".to_string(),
+                    serde_json::json!({
+                        "refUpdateRule": null,
+                        "rules": {
+                            "pageInfo": { "hasNextPage": false, "endCursor": null },
+                            "nodes": [{
+                                "parameters": {
+                                    "__typename": "RequiredStatusChecksParameters",
+                                    "requiredStatusChecks": [{ "context": "later" }]
+                                }
+                            }]
+                        }
+                    }),
+                )]),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(cursors, [Some("NEXT".to_string())]);
+        assert_eq!(
+            cache.contexts["default"],
+            HashSet::from(["classic".into(), "inline".into(), "later".into()])
+        );
+        assert!(!cache.pending.contains_key("default"));
     }
 
     fn required_rules_response() -> String {
