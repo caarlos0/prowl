@@ -4375,14 +4375,14 @@ mod tests {
         let (sections, requests) =
             fetch_offline(&["prowl", "--only", "merged"], tagged_with_merged(&[]));
         assert_eq!(requests, [GRAPHQL]);
-        assert!(shipped(&sections).is_empty());
+        assert_eq!(shipped(&sections), Vec::<(i64, Option<String>)>::new());
 
         let (sections, requests) = fetch_offline(
             &["prowl", "--only", "merged", "--merged-limit", "0"],
             tagged_with_merged(&[2]),
         );
         assert_eq!(requests, [GRAPHQL]);
-        assert!(shipped(&sections).is_empty());
+        assert_eq!(shipped(&sections), Vec::<(i64, Option<String>)>::new());
 
         let (sections, requests) =
             fetch_offline(&["prowl", "--only", "merged"], tagged_with_merged(&[2]));
