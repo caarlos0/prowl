@@ -54,7 +54,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use uncurses::ansi::kitty::KittyKeyboardFlags;
-use uncurses::buffer::{Bounded, Surface, SurfaceMut, TextBuffer};
+use uncurses::buffer::{Bounded, SurfaceMut, TextBuffer};
 use uncurses::color::{Color, Profile};
 use uncurses::event::{Event, MouseButton};
 #[cfg(test)]
@@ -1414,7 +1414,7 @@ impl Ui {
             .saturating_sub(bottom_height(self, status, footer, false) as u16);
         let mut filtered = None;
         let shown = self.shown(sections, &mut filtered);
-        let (body, height, selected, _, rows) =
+        let (_, height, selected, _, rows) =
             watch_body(screen, shown, self, &Changes::default(), ascii);
         if let Some(down) = down {
             self.scroll_by(down, 3, height, available, selected);
@@ -1450,7 +1450,8 @@ impl Ui {
             self.scroll = Some(offset);
             self.searching = false;
         }
-        body.cell(Position::new(mouse.x, y))
+        screen
+            .cell(Position::new(mouse.x, mouse.y))
             .and_then(|cell| cell.style.link.as_ref())
             .map(|link| link.url.clone())
     }
@@ -2194,6 +2195,7 @@ impl<'a> App<'a> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use uncurses::buffer::Surface;
     use uncurses::text::Encode;
 
     /// Paint a dashboard onto an offscreen buffer and read it back as plain text.
@@ -2991,6 +2993,53 @@ mod tests {
         assert_eq!(
             ui.selected_url(&sections).as_deref(),
             Some("https://release/v1")
+        );
+    }
+
+    #[test]
+    fn mouse_opens_the_displayed_link_after_a_width_policy_change() {
+        use uncurses::text::WidthMode;
+
+        let sections = Sections {
+            commits: Some(commits::CommitStats {
+                available: true,
+                upcoming: Some(commits::Bucket {
+                    count: commits::Count {
+                        mine: 1,
+                        capped: false,
+                    },
+                    url: "https://upcoming".into(),
+                }),
+                releases: vec![commits::Release {
+                    tag: "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}v1".into(),
+                    bucket: commits::Bucket {
+                        count: commits::Count {
+                            mine: 1,
+                            capped: false,
+                        },
+                        url: "https://release/v1".into(),
+                    },
+                    published_at: None,
+                }],
+            }),
+            ..Sections::EMPTY
+        };
+        let mut ui = ui(View::Mine);
+        let mut screen = watch_frame(&sections, &ui, 120, 20);
+        assert_eq!(screen.width_mode(), WidthMode::Wc);
+        let position = link_position(&screen, "https://upcoming");
+        let last = Position::new(position.x + 7, position.y);
+        assert_eq!(screen.cell(last).unwrap().content(), "g");
+
+        screen.set_width_mode(WidthMode::Grapheme);
+
+        assert_eq!(
+            mouse_click(&mut ui, &sections, &screen, last.x, last.y).as_deref(),
+            Some("https://upcoming")
+        );
+        assert_eq!(
+            mouse_click(&mut ui, &sections, &screen, position.x - 1, position.y),
+            None
         );
     }
 

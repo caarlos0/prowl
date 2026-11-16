@@ -36,8 +36,10 @@ stdout, so the dashboard stays pipe-friendly and URLs can be OSC-8 hyperlinks.
 
 Watch mode supports mouse input. The wheel scrolls three lines without a
 selection change. A left click selects a row, opens its exact hyperlink, or
-switches tabs. `Ui::mouse_event` uses row positions from the body painters and
-the painted cell's link, with the same viewport offset as the frame composer.
+switches tabs. `Ui::mouse_event` uses row positions from the body painters,
+with the same viewport offset as the frame composer. It reads hyperlinks
+directly from the displayed screen cells, even when width negotiation changes
+the width policy before a repaint.
 It honors search, queue deduplication, help, and the pinned bottom block.
 `App::enter_alt` enables basic `MouseTracking`; `Program` restores it across
 suspend/resume and disables it at teardown. Inline and one-shot output never
