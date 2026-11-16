@@ -329,14 +329,8 @@ fn fetch(
     want_reviews: bool,
 ) -> FetchOutcome {
     let mut issues = Vec::new();
-    let branch_error = if want_mine && cli.show_shipments() && default_branch.is_none() {
-        match client.default_branch(repo) {
-            Ok(branch) => {
-                *default_branch = Some(branch);
-                None
-            }
-            Err(error) => Some(error),
-        }
+    let branch_error = if want_mine && cli.show_shipments() {
+        resolve_default_branch(client, repo, default_branch)
     } else {
         None
     };
@@ -436,6 +430,23 @@ fn fetch(
             reviewed_merged,
         },
         issues,
+    }
+}
+
+fn resolve_default_branch(
+    client: &Client,
+    repo: &Repo,
+    branch: &mut Option<String>,
+) -> Option<anyhow::Error> {
+    if branch.is_some() {
+        return None;
+    }
+    match client.default_branch(repo) {
+        Ok(resolved) => {
+            *branch = Some(resolved);
+            None
+        }
+        Err(error) => Some(error),
     }
 }
 
