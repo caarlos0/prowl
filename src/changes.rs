@@ -56,9 +56,18 @@ impl Tracker {
         }
     }
 
+    pub(crate) fn advance(previous: &mut Option<Tracker>, current: Tracker) -> Changes {
+        let changes = previous
+            .as_ref()
+            .map_or_else(Changes::default, |previous| current.diff(previous));
+        *previous = Some(current);
+        changes
+    }
+
     /// Changes from `prev` (previous refresh) to `self` (current refresh). A PR
     /// must exist in both refreshes to count as a status change; a PR appearing
-    /// in `merged` for the first time counts as newly merged.
+    /// in `merged` for the first time counts as newly merged when both snapshots
+    /// contain a valid merged baseline.
     pub fn diff(&self, prev: &Tracker) -> Changes {
         let status_changed = if self.open_known && prev.open_known {
             self.open_status
@@ -141,6 +150,23 @@ mod tests {
         let c = after.diff(&before);
         assert!(c.any());
         assert_eq!(c.newly_merged, HashSet::from([7]));
+    }
+
+    #[test]
+    fn recovery_after_partial_failures_tracks_open_prs_without_new_merge_alerts() {
+        let mut previous = None;
+        let first_failure = Tracker::build(Some(&[pr(1, Some(Status::Pending))]), None);
+        assert!(!Tracker::advance(&mut previous, first_failure).any());
+
+        let second_failure = Tracker::build(Some(&[pr(1, Some(Status::Pass))]), None);
+        let changes = Tracker::advance(&mut previous, second_failure);
+        assert_eq!(changes.status_changed, HashSet::from([1]));
+        assert!(changes.newly_merged.is_empty());
+
+        let recovered = Tracker::build(Some(&[pr(1, Some(Status::Pass))]), Some(&[merged(7)]));
+        let changes = Tracker::advance(&mut previous, recovered);
+        assert!(changes.status_changed.is_empty());
+        assert!(changes.newly_merged.is_empty());
     }
 
     #[test]

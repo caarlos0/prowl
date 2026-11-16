@@ -83,11 +83,12 @@ struct Envelope<T> {
     errors: Option<Vec<GqlError>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GqlError {
-    message: String,
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GqlError {
+    pub(crate) message: String,
     #[serde(rename = "type")]
     kind: Option<String>,
+    pub(crate) path: Option<Vec<serde_json::Value>>,
 }
 
 /// Parse a GraphQL `{"data": ...}` envelope. GitHub returns partial `data`
@@ -108,15 +109,21 @@ pub fn parse_graphql<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 
 impl Envelope<serde_json::Value> {
     fn into_data<T: DeserializeOwned>(self) -> Result<T> {
-        let first_error = self.errors.as_ref().and_then(|e| e.first());
+        self.into_data_with_errors().map(|(data, _)| data)
+    }
+
+    fn into_data_with_errors<T: DeserializeOwned>(self) -> Result<(T, Vec<GqlError>)> {
+        let errors = self.errors.unwrap_or_default();
+        let first_error = errors.first();
         if let Some(data) = self.data {
-            return match serde_json::from_value(data) {
-                Ok(typed) => Ok(typed),
+            let typed = match serde_json::from_value(data) {
+                Ok(typed) => typed,
                 Err(err) => match first_error {
                     Some(gql) => bail!("GraphQL error: {}", gql.message),
-                    None => Err(err).context("failed to parse GraphQL data"),
+                    None => return Err(err).context("failed to parse GraphQL data"),
                 },
             };
+            return Ok((typed, errors));
         }
         if let Some(gql) = first_error {
             bail!("GraphQL error: {}", gql.message);
@@ -189,6 +196,15 @@ impl Client {
         query: &str,
         variables: serde_json::Value,
     ) -> Result<T> {
+        self.graphql_with_errors(query, variables)
+            .map(|(data, _)| data)
+    }
+
+    pub(crate) fn graphql_with_errors<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<(T, Vec<GqlError>)> {
         let body = serde_json::json!({ "query": query, "variables": variables });
         let mut resp = self.request("graphql", Some(&body))?;
         let bytes = resp
@@ -217,7 +233,7 @@ impl Client {
                         .is_none_or(|value| value != "0"));
             self.observe_limit(Resource::Graphql, resp.headers(), secondary)?;
         }
-        let data = env.into_data();
+        let data = env.into_data_with_errors();
         if data.is_err() && limited {
             self.check_cooldown(Resource::Graphql)?;
         }

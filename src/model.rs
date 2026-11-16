@@ -4,9 +4,9 @@
 //! commit lookups.
 
 use crate::cli::OpenSort;
-use crate::github::{Client, Repo};
+use crate::github::{Client, GqlError, Repo};
 use crate::status::{self, Approval, Checks};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -1105,6 +1105,20 @@ pub fn merged_query(limit: usize) -> String {
     )
 }
 
+pub(crate) fn merged_watch_query(limit: usize) -> String {
+    let first = limit.clamp(1, 100);
+    format!(
+        r#"query($mine: String!, $reviewed: String!) {{
+  mine: search(type: ISSUE, first: {first}, query: $mine) {{
+    nodes {{ ... on PullRequest {{ number title url headRefName mergedAt author {{ login }} }} }}
+  }}
+  reviewed: search(type: ISSUE, first: {first}, query: $reviewed) {{
+    nodes {{ ... on PullRequest {{ number title url headRefName mergedAt author {{ login }} }} }}
+  }}
+}}"#
+    )
+}
+
 pub fn merged_search(repo: &Repo, me: &str, since: &str) -> String {
     // GitHub search can't sort by merge time, but a merge bumps `updatedAt` and
     // later edits only bump it further, so `updated-desc` still surfaces the most
@@ -1147,6 +1161,61 @@ pub fn fetch_reviewed_merged(
     let q = reviewed_merged_search(repo, me, since);
     let data: MergedData = client.graphql(&merged_query(limit), serde_json::json!({ "q": q }))?;
     Ok(data.search.nodes)
+}
+
+pub(crate) struct MergedPair {
+    pub(crate) mine: Result<Vec<MergedNode>>,
+    pub(crate) reviewed: Result<Vec<MergedNode>>,
+}
+
+pub(crate) fn fetch_merged_pair(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    since: &str,
+    limit: usize,
+) -> Result<MergedPair> {
+    let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
+        &merged_watch_query(limit),
+        serde_json::json!({
+            "mine": merged_search(repo, me, since),
+            "reviewed": reviewed_merged_search(repo, me, since),
+        }),
+    )?;
+    Ok(MergedPair {
+        mine: merged_alias(&data, &errors, "mine"),
+        reviewed: merged_alias(&data, &errors, "reviewed"),
+    })
+}
+
+fn merged_alias(
+    data: &serde_json::Value,
+    errors: &[GqlError],
+    alias: &str,
+) -> Result<Vec<MergedNode>> {
+    let errors = errors
+        .iter()
+        .filter(|error| {
+            error
+                .path
+                .as_ref()
+                .and_then(|path| path.first())
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|root| root == alias || !matches!(root, "mine" | "reviewed"))
+        })
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        return Err(anyhow!("GraphQL error: {}", errors.join("; ")));
+    }
+
+    let search = data
+        .get(alias)
+        .filter(|search| !search.is_null())
+        .ok_or_else(|| anyhow!("GraphQL response omitted `{alias}` merged search"))?;
+    let search: MergedNodes = serde_json::from_value(search.clone())
+        .with_context(|| format!("parsing `{alias}` merged search"))?;
+    Ok(search.nodes)
 }
 
 // ----------------------------------------------------------------------------
@@ -1389,6 +1458,63 @@ mod tests {
         assert!(MINE_QUERY.contains("defaultBranchRef @include(if: $includeDefaultBranchRef)"));
         assert!(merged_query(20).contains("headRefName"));
         assert!(REVIEWS_QUERY.contains("headRefName"));
+    }
+
+    #[test]
+    fn merged_watch_fetch_keeps_the_successful_alias_on_partial_error() {
+        let response = serde_json::json!({
+            "data": {
+                "mine": null,
+                "reviewed": {
+                    "nodes": [{
+                        "number": 42,
+                        "title": "reviewed",
+                        "url": "https://github.com/o/r/pull/42",
+                        "headRefName": "branch",
+                        "mergedAt": "2026-01-01T00:00:00Z",
+                        "author": { "login": "author" }
+                    }]
+                }
+            },
+            "errors": [{
+                "message": "Mine search unavailable",
+                "path": ["mine"]
+            }]
+        });
+        let (client, fake) =
+            crate::github::fake::client([("POST /graphql".to_string(), response.to_string())]);
+        let pair = fetch_merged_pair(
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            "2026-01-01",
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(
+            pair.mine.unwrap_err().to_string(),
+            "GraphQL error: Mine search unavailable"
+        );
+        assert_eq!(pair.reviewed.unwrap()[0].number, 42);
+        assert_eq!(fake.requests(), ["POST /graphql"]);
+    }
+
+    #[test]
+    fn merged_watch_query_preserves_search_filters_and_page_limit() {
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(
+            merged_search(&repo, "me", "2026-01-01"),
+            "repo:o/r is:pr is:merged author:me merged:>=2026-01-01 sort:updated-desc"
+        );
+        assert_eq!(
+            reviewed_merged_search(&repo, "me", "2026-01-01"),
+            "repo:o/r is:pr is:merged reviewed-by:me -author:me merged:>=2026-01-01 sort:updated-desc"
+        );
+        let query = merged_watch_query(200);
+        assert!(query.contains("mine: search(type: ISSUE, first: 100, query: $mine)"));
+        assert!(query.contains("reviewed: search(type: ISSUE, first: 100, query: $reviewed)"));
+        assert!(query.contains("number title url headRefName mergedAt author { login }"));
     }
 
     #[test]
