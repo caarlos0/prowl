@@ -149,10 +149,20 @@ fn fetch(
     client: &Client,
     repo: &Repo,
     me: &str,
-    default_branch: &str,
+    default_branch: &mut Option<String>,
     want_mine: bool,
     want_reviews: bool,
 ) -> Result<Sections> {
+    let default_branch = (want_mine && cli.show_shipments()).then(|| {
+        default_branch
+            .get_or_insert_with(|| {
+                client
+                    .default_branch(repo)
+                    .unwrap_or_else(|_| "main".to_string())
+            })
+            .as_str()
+    });
+
     // Release data powers both the "My Shipments" counts and the merged
     // "RELEASE" column, so fetch it once when either section is shown. Only
     // My Shipments shows the upcoming count, so skip that scan without it.
@@ -160,15 +170,7 @@ fn fetch(
     // "unavailable" shipments line and blank release cells rather than taking
     // down the whole dashboard.
     let (commit_stats, release_map) = if want_mine && (cli.show_shipments() || cli.show_merged()) {
-        commits::fetch(
-            client,
-            repo,
-            me,
-            default_branch,
-            cli.include_pre_releases,
-            cli.show_shipments(),
-        )
-        .ok()
+        commits::fetch(client, repo, me, default_branch, cli.include_pre_releases).ok()
     } else {
         None
     }
@@ -896,23 +898,20 @@ fn run_once_session(
     paint_loading(program.screen_mut())?;
 
     // Fetch off-thread so `q` stays live during network I/O. `me` and the
-    // default branch are resolved here too, so even the first round-trip never
-    // blocks the abort key.
+    // default branch (when shipments need it) are resolved here too, so even
+    // the first round-trip never blocks the abort key.
     let (cli2, client2, repo2) = (cli.clone(), client.clone(), repo.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let fetched = (|| {
             let me = client2.me()?;
-            let default_branch = client2
-                .default_branch(&repo2)
-                .unwrap_or_else(|_| "main".to_string());
             // Only the selected view: `--once` output has no Tab to switch.
             fetch(
                 &cli2,
                 &client2,
                 &repo2,
                 &me,
-                &default_branch,
+                &mut None,
                 cli2.view == View::Mine,
                 cli2.view == View::Reviews,
             )
@@ -1459,9 +1458,6 @@ pub fn run() -> Result<()> {
     // the frame to stdout, and exit. No screen, no loading UI.
     if !interactive {
         let me = client.me()?;
-        let default_branch = client
-            .default_branch(&repo)
-            .unwrap_or_else(|_| "main".to_string());
         // Only the selected view's sections are fetched (you can't Tab in
         // one-shot output).
         let sections = fetch(
@@ -1469,7 +1465,7 @@ pub fn run() -> Result<()> {
             &client,
             &repo,
             &me,
-            &default_branch,
+            &mut None,
             cli.view == View::Mine,
             cli.view == View::Reviews,
         )?;
@@ -1510,7 +1506,7 @@ struct App<'a> {
     client: &'a Client,
     repo: &'a Repo,
     me: String,
-    default_branch: String,
+    default_branch: Option<String>,
     /// The constant next-refresh ETA shown in the key-hint footer.
     eta: String,
     /// Change-detection baseline and the last successfully fetched sections.
@@ -1562,7 +1558,7 @@ impl<'a> App<'a> {
             client,
             repo,
             me: String::new(),
-            default_branch: String::new(),
+            default_branch: None,
             prev: None,
             last_good: None,
             unread: Changes::default(),
@@ -1694,9 +1690,9 @@ impl<'a> App<'a> {
     /// input, so quit/`?`/resize stay live and no network I/O ever blocks the UI.
     /// The result arrives over a channel; pressing quit returns immediately and
     /// abandons the in-flight request (the thread is reaped at process exit).
-    /// `me` and the default branch are resolved here too (once), so even the
-    /// first round-trip never freezes input. `Ctrl-R` is ignored — a fetch is already
-    /// in flight.
+    /// `me` and the default branch (when shipments need it) are resolved here
+    /// too (once), so even the first round-trip never freezes input. `Ctrl-R`
+    /// is ignored — a fetch is already in flight.
     fn fetch_responsive(&mut self) -> Result<Flow> {
         // The footer says `^R refreshing` (with `^R` dimmed) for the duration.
         self.refreshing = true;
@@ -1719,12 +1715,9 @@ impl<'a> App<'a> {
             let fetched = (|| {
                 if resolve {
                     me = client.me()?;
-                    default_branch = client
-                        .default_branch(&repo)
-                        .unwrap_or_else(|_| "main".to_string());
                 }
                 // Both views every refresh, so Tab switches instantly.
-                let sections = fetch(&cli, &client, &repo, &me, &default_branch, true, true)?;
+                let sections = fetch(&cli, &client, &repo, &me, &mut default_branch, true, true)?;
                 Ok((me, default_branch, sections))
             })();
             let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
@@ -3515,8 +3508,8 @@ mod tests {
         serde_json::json!({ "author": { "login": login }, "commit": { "message": message } })
     }
 
-    /// One GraphQL answer for the merged, queue, and open-PR queries: each
-    /// node parses as both a merged PR and an open PR, and the queue is null.
+    /// One GraphQL answer for the PR queries: each node parses as an open,
+    /// merged, or review PR, and the queue is null.
     fn graphql(numbers: &[i64]) -> (String, String) {
         let nodes: Vec<_> = numbers
             .iter()
@@ -3529,12 +3522,15 @@ mod tests {
                     "isDraft": false,
                     "reviewThreads": { "totalCount": 0, "nodes": [] },
                     "commits": { "nodes": [] },
+                    "reviews": { "nodes": [] },
                 })
             })
             .collect();
         let data = serde_json::json!({ "data": {
             "search": { "nodes": nodes, "pageInfo": { "hasNextPage": false, "endCursor": null } },
             "repository": { "mergeQueue": null },
+            "requested": { "nodes": nodes },
+            "reviewed": { "nodes": [] },
         }});
         (GRAPHQL.to_string(), data.to_string())
     }
@@ -3587,8 +3583,186 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
         let (client, fake) = github::fake::client(routes);
         let repo = Repo::parse("o/r").unwrap();
-        let sections = fetch(&cli, &client, &repo, "me", "main", true, false).unwrap();
+        let sections = fetch(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            false,
+        )
+        .unwrap();
         (sections, fake.requests())
+    }
+
+    #[test]
+    fn default_branch_startup_requests() {
+        let cases: &[(&str, &[&str], bool, usize, usize)] = &[
+            ("once_reviews", &["--view", "reviews"], false, 1, 2),
+            ("once_queue", &["--only", "queue"], false, 1, 1),
+            ("once_mine", &["--only", "mine"], false, 1, 1),
+            ("once_merged", &["--only", "merged"], false, 4, 1),
+            ("once_shipments", &["--only", "shipments"], false, 6, 0),
+            ("once_mine_view", &[], false, 6, 3),
+            ("watch_mine_view", &[], true, 6, 5),
+            ("watch_reviews", &["--view", "reviews"], true, 6, 5),
+            ("watch_mine_only", &["--only", "mine"], true, 1, 3),
+        ];
+        let repo = Repo::parse("o/r").unwrap();
+        for &(name, args, watch, expected_gets, posts) in cases {
+            let cli =
+                Cli::try_parse_from(std::iter::once("prowl").chain(args.iter().copied())).unwrap();
+            let mut routes = tagged();
+            routes.push(("GET /user".to_string(), r#"{"login":"me"}"#.to_string()));
+            routes.push((
+                "GET /repos/o/r".to_string(),
+                r#"{"default_branch":"trunk"}"#.to_string(),
+            ));
+            for (route, _) in &mut routes {
+                *route = route.replace("...main", "...trunk");
+            }
+            let (client, fake) = github::fake::client(routes);
+            let me = client.me().unwrap();
+            let mut branch = None;
+            let want_mine = watch || cli.view == View::Mine;
+            let want_reviews = watch || cli.view == View::Reviews;
+            let sections = fetch(
+                &cli,
+                &client,
+                &repo,
+                &me,
+                &mut branch,
+                want_mine,
+                want_reviews,
+            )
+            .unwrap();
+            let requests = fake.requests();
+            let gets = requests.iter().filter(|r| r.starts_with("GET ")).count();
+            let graphql_count = requests.iter().filter(|r| r.as_str() == GRAPHQL).count();
+            println!("REQUEST_COUNTS {name}: GET={gets} POST={graphql_count}");
+            println!(
+                "SECTIONS {name}: {}",
+                serde_json::to_string(&sections).unwrap()
+            );
+            assert_eq!(gets, expected_gets, "{name}: {requests:?}");
+            assert_eq!(graphql_count, posts, "{name}: {requests:?}");
+            let branch_gets = usize::from(sections.commits.is_some());
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| r.as_str() == "GET /repos/o/r")
+                    .count(),
+                branch_gets,
+                "{name}: {requests:?}"
+            );
+            if let Some(stats) = &sections.commits {
+                assert!(stats.available, "{name}: {requests:?}");
+                assert_eq!(
+                    stats.upcoming,
+                    Some(commits::Bucket {
+                        count: commits::Count {
+                            mine: 1,
+                            capped: false
+                        },
+                        url: "https://github.com/o/r/compare/v2...trunk".to_string(),
+                    }),
+                    "{name}"
+                );
+            }
+            let refreshed = fetch(
+                &cli,
+                &client,
+                &repo,
+                &me,
+                &mut branch,
+                want_mine,
+                want_reviews,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&sections).unwrap(),
+                serde_json::to_value(&refreshed).unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                &fake.requests()[requests.len()..],
+                &requests[1 + branch_gets..],
+                "{name}: refresh must reuse the resolved branch"
+            );
+        }
+    }
+
+    #[test]
+    fn default_branch_shipment_sources() {
+        let cases = [
+            ("tagged_fallback", tagged(), None, 6, 1, "compare/v2...main"),
+            (
+                "untagged_fallback",
+                untagged(),
+                None,
+                5,
+                101,
+                "commits/main",
+            ),
+            (
+                "untagged_trunk",
+                untagged(),
+                Some("trunk"),
+                5,
+                101,
+                "commits/trunk",
+            ),
+        ];
+        let cli = Cli::try_parse_from(["prowl", "--only", "shipments"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        for (name, mut routes, resolved, gets, mine, path) in cases {
+            routes.push(("GET /user".to_string(), r#"{"login":"me"}"#.to_string()));
+            if let Some(branch) = resolved {
+                routes.push((
+                    "GET /repos/o/r".to_string(),
+                    serde_json::json!({ "default_branch": branch }).to_string(),
+                ));
+                for (route, _) in &mut routes {
+                    *route = route.replace("sha=main", &format!("sha={branch}"));
+                }
+            }
+            let (client, fake) = github::fake::client(routes);
+            let me = client.me().unwrap();
+            let mut branch = None;
+            let sections = fetch(&cli, &client, &repo, &me, &mut branch, true, false).unwrap();
+            let requests = fake.requests();
+            println!("REQUEST_COUNTS {name}: GET={} POST=0", requests.len());
+            println!(
+                "SECTIONS {name}: {}",
+                serde_json::to_string(&sections).unwrap()
+            );
+            assert_eq!(requests.len(), gets, "{name}: {requests:?}");
+            assert!(
+                requests.iter().all(|r| r.starts_with("GET ")),
+                "{name}: {requests:?}"
+            );
+            let stats = sections.commits.as_ref().unwrap();
+            assert!(stats.available, "{name}: {requests:?}");
+            assert_eq!(
+                stats.upcoming,
+                Some(commits::Bucket {
+                    count: commits::Count {
+                        mine,
+                        capped: false
+                    },
+                    url: format!("https://github.com/o/r/{path}"),
+                }),
+                "{name}"
+            );
+            let refreshed = fetch(&cli, &client, &repo, &me, &mut branch, true, false).unwrap();
+            assert_eq!(
+                serde_json::to_value(&sections).unwrap(),
+                serde_json::to_value(&refreshed).unwrap(),
+                "{name}"
+            );
+            assert_eq!(&fake.requests()[requests.len()..], &requests[2..], "{name}");
+        }
     }
 
     fn shipped(sections: &Sections) -> Vec<(i64, Option<String>)> {
