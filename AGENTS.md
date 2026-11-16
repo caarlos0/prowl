@@ -119,9 +119,10 @@ watch event loop); everything else is testable modules:
   one-shot keeps its selected view's single merged-search request. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   It reads required context names from each distinct base ref's `refUpdateRule`
-  and all pages of active `rules`, once per distinct ref across the enabled
-  sections. Missing required contexts are added to `RUN` in both normal
-  and required-only mode, after comparing them with the commit's paginated
+  and all pages of active `rules`, in groups of up to five refs per GraphQL
+  request, once per distinct ref across the enabled sections. Each ref advances
+  its own rules cursor. Missing required contexts are added to `RUN` in both
+  normal and required-only mode, after comparing them with the commit's paginated
   `isRequired` contexts (the speculative commit for queue entries, not the PR
   head). Entries without a speculative commit count all expected checks as
   missing but have no BUILD start.
@@ -379,10 +380,11 @@ still performs all teardown through `finish`.
   In My PRs and Merge Queue, `RUN` also includes required checks that have not
   reported on the relevant commit (PR head or speculative merge).
   Required context names come from the actual base branch's
-  classic protection and active repository/organization rulesets, fetched once
-  per distinct base ref per refresh across the enabled My PRs and Merge Queue
-  sections. All reported required
-  contexts are paginated before counting missing ones, so a queued, running,
+  classic protection and active repository/organization rulesets, fetched in
+  GraphQL batches of up to five refs, once per distinct base ref per refresh
+  across the enabled My PRs and Merge Queue sections. Each ref's active-rule
+  pages use an independent cursor. All reported required contexts are paginated
+  before counting missing ones, so a queued, running,
   failed, or passed check is not also counted as missing. This applies with and
   without `--required`, including commits with no rollup. Queue entries without
   a speculative commit count all expected checks in `RUN`; missing checks
@@ -561,10 +563,11 @@ still performs all teardown through `finish`.
   aggregate exists, hence the page + a `+` when capped), and the last commit's
   `statusCheckRollup { contexts(first: 1) { checkRunCountsByState
   statusContextCountsByState } }` — the aggregates only, no context nodes.
-  `baseRef { id }` identifies each actual target branch. A separate paginated
-  query reads `refUpdateRule.requiredStatusCheckContexts` and active
-  `rules.parameters.requiredStatusChecks`. When any checks are expected (or
-  `--required` is set), five-commit batches read all contexts,
+  `baseRef { id }` identifies each actual target branch. A paginated query
+  batches up to five refs to read `refUpdateRule.requiredStatusCheckContexts`
+  and active `rules.parameters.requiredStatusChecks`, with an independent
+  cursor per ref. When any checks are expected (or `--required` is set),
+  five-commit batches read all contexts,
   including their names and `isRequired`, to identify unreported required checks.
 - Merged: `search(is:pr is:merged author:<me> merged:>=<since>)` with
   `headRefName` and `mergedAt`
