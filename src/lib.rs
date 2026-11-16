@@ -4665,6 +4665,14 @@ mod tests {
                 }
             }] }
         });
+        response["data"]["repository"]["defaultBranchRef"] = serde_json::json!({
+            "id": "ref-1",
+            "refUpdateRule": { "requiredStatusCheckContexts": required },
+            "rules": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": []
+            }
+        });
         response["data"]["r0"] = serde_json::json!({
             "refUpdateRule": { "requiredStatusCheckContexts": required },
             "rules": {
@@ -4679,7 +4687,7 @@ mod tests {
     #[test]
     fn required_rules_follow_the_production_refresh_lifetime() {
         let repo = Repo::parse("o/r").unwrap();
-        for (case, mine_ref, per_refresh) in [("shared", "ref-1", 5), ("disjoint", "ref-2", 6)] {
+        for (case, mine_ref, per_refresh) in [("shared", "ref-1", 4), ("disjoint", "ref-2", 5)] {
             for required_only in [false, true] {
                 let mut cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
                 cli.required = required_only;
@@ -4757,6 +4765,64 @@ mod tests {
             &before[1 + branch_gets..],
             "{name}: refresh must reuse the resolved branch"
         );
+    }
+
+    #[test]
+    fn required_rules_are_seeded_by_the_first_mine_request() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (_, body) = required_rules_graphql("ref-1", &["test", "lint"]);
+        let (client, fake) = github::fake::client([]);
+        fake.set_response(GRAPHQL, 200, &[], &body);
+
+        let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        assert_eq!(outcome.sections.prs.unwrap()[0].checks.running, 1);
+        assert_eq!(
+            fake.requests(),
+            [GRAPHQL, GRAPHQL],
+            "Mine's inline default rules plus one commit-context request"
+        );
+    }
+
+    #[test]
+    fn unprotected_default_branch_needs_no_rules_request() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (_, body) = required_rules_graphql("ref-1", &[]);
+        let mut response: serde_json::Value = serde_json::from_str(&body).unwrap();
+        response["data"]["repository"]["defaultBranchRef"]["refUpdateRule"] =
+            serde_json::Value::Null;
+        let (client, fake) = github::fake::client([]);
+        fake.set_response(GRAPHQL, 200, &[], &response.to_string());
+
+        let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        assert_eq!(fake.requests(), [GRAPHQL]);
+    }
+
+    #[test]
+    fn empty_sections_do_not_paginate_default_branch_rules() {
+        let repo = Repo::parse("o/r").unwrap();
+        for args in [["prowl", "--only", "mine"], ["prowl", "--only", "queue"]] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let (_, body) = required_rules_graphql("ref-1", &["test"]);
+            let mut response: serde_json::Value = serde_json::from_str(&body).unwrap();
+            response["data"]["search"]["nodes"] = serde_json::json!([]);
+            response["data"]["repository"]["mergeQueue"]["entries"]["nodes"] =
+                serde_json::json!([]);
+            response["data"]["repository"]["defaultBranchRef"]["rules"]["pageInfo"] =
+                serde_json::json!({ "hasNextPage": true, "endCursor": "NEXT" });
+            let (client, fake) = github::fake::client([]);
+            fake.set_response(GRAPHQL, 200, &[], &response.to_string());
+
+            let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+
+            assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+            assert_eq!(fake.requests(), [GRAPHQL], "{args:?}");
+        }
     }
 
     #[test]
