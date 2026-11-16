@@ -214,6 +214,9 @@ watch event loop); everything else is testable modules:
   shipped it, parsed from each commit subject's trailing `(#NNN)`, the squash /
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
+  The upcoming scan runs only when `fetch` is asked to count it; `lib::fetch`
+  asks only while My Shipments is shown, because the release ranges alone
+  build the `ReleaseMap`.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
@@ -543,6 +546,8 @@ still performs all teardown through `finish`.
 - Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
   merged:>=<since>)` (reuses the merged query/limit).
 - Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
+  The upcoming range (latest tag → default branch, or all of the default
+  branch without a tag) is fetched only while My Shipments is shown.
 
 ## Build / test / lint
 

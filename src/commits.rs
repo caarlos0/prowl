@@ -13,7 +13,8 @@ pub struct CommitStats {
     /// False when the stats could not be computed (kept best-effort so a
     /// failure here never takes down the rest of the dashboard).
     pub available: bool,
-    /// My work heading into the next, still-unreleased version.
+    /// My work heading into the next, still-unreleased version; `None` when
+    /// it was not counted.
     pub upcoming: Option<Bucket>,
     /// The most recent stable releases (newest first) with my work in them.
     pub releases: Vec<Release>,
@@ -236,17 +237,19 @@ fn range_mine(
     }
 }
 
-/// Compute the commit stats for `repo` (my work in the next unreleased version
-/// and each of the last [`RELEASES`] releases — stable only, or including
-/// prereleases when `include_prereleases` is set), plus a map from PR number to
-/// the release that shipped it (for annotating the merged section). PRs merged
-/// since the latest release are absent from the map (not yet shipped).
+/// Compute the commit stats for `repo` (my work in each of the last
+/// [`RELEASES`] releases — stable only, or including prereleases when
+/// `include_prereleases` is set — and, when `count_upcoming` is set, in the next
+/// unreleased version), plus a map from PR number to the release that shipped
+/// it (for annotating the merged section). PRs merged since the latest release
+/// are absent from the map (not yet shipped).
 pub fn fetch(
     client: &Client,
     repo: &Repo,
     me: &str,
     default_branch: &str,
     include_prereleases: bool,
+    count_upcoming: bool,
 ) -> Result<(CommitStats, ReleaseMap)> {
     let tags = release_tags(client, repo, include_prereleases)?;
     let base_url = format!("https://github.com/{}/{}", repo.owner, repo.name);
@@ -255,15 +258,19 @@ pub fn fetch(
     // The next release is everything since the latest tag (or the whole default
     // branch when there are no releases yet); its label links to that log. Its
     // PRs are unreleased, so they are not added to the map.
-    let latest = tags.first().map(|t| t.name.as_str());
-    let (count, _) = range_mine(client, repo, me, latest, default_branch)?;
-    let upcoming = Some(Bucket {
-        count,
-        url: match latest {
-            Some(latest) => format!("{base_url}/compare/{latest}...{default_branch}"),
-            None => format!("{base_url}/commits/{default_branch}"),
-        },
-    });
+    let upcoming = if count_upcoming {
+        let latest = tags.first().map(|t| t.name.as_str());
+        let (count, _) = range_mine(client, repo, me, latest, default_branch)?;
+        Some(Bucket {
+            count,
+            url: match latest {
+                Some(latest) => format!("{base_url}/compare/{latest}...{default_branch}"),
+                None => format!("{base_url}/commits/{default_branch}"),
+            },
+        })
+    } else {
+        None
+    };
 
     // Each shipped release is the range between it and the release before it;
     // the oldest tag we know of has no predecessor, so count everything up to it.

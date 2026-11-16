@@ -154,12 +154,21 @@ fn fetch(
     want_reviews: bool,
 ) -> Result<Sections> {
     // Release data powers both the "My Shipments" counts and the merged
-    // "RELEASE" column, so fetch it once when either section is shown.
+    // "RELEASE" column, so fetch it once when either section is shown. Only
+    // My Shipments shows the upcoming count, so skip that scan without it.
     // Best-effort: a failure (no releases, empty repo, ...) degrades to an
     // "unavailable" shipments line and blank release cells rather than taking
     // down the whole dashboard.
     let (commit_stats, release_map) = if want_mine && (cli.show_shipments() || cli.show_merged()) {
-        commits::fetch(client, repo, me, default_branch, cli.include_pre_releases).ok()
+        commits::fetch(
+            client,
+            repo,
+            me,
+            default_branch,
+            cli.include_pre_releases,
+            cli.show_shipments(),
+        )
+        .ok()
     } else {
         None
     }
@@ -3599,7 +3608,6 @@ mod tests {
             requests,
             [
                 RELEASES,
-                "GET /repos/o/r/compare/v2...main",
                 "GET /repos/o/r/compare/v1...v2",
                 "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
                 GRAPHQL,
@@ -3616,15 +3624,7 @@ mod tests {
         assert!(sections.commits.is_none());
 
         let (sections, requests) = fetch_offline(&["prowl", "--only", "merged"], untagged());
-        assert_eq!(
-            requests,
-            [
-                RELEASES,
-                "GET /repos/o/r/commits?sha=main&author=me&per_page=100&page=1",
-                "GET /repos/o/r/commits?sha=main&author=me&per_page=100&page=2",
-                GRAPHQL,
-            ]
-        );
+        assert_eq!(requests, [RELEASES, GRAPHQL]);
         assert_eq!(shipped(&sections), [(1, None)]);
         assert!(sections.commits.is_none());
     }
