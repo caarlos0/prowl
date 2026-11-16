@@ -610,8 +610,9 @@ per-module unit tests. `tests/config.rs` exercises startup config paths, errors,
 and help/version without network calls. No network in tests: to pin the
 requests a fetch path sends, build the client with `github::fake::client`
 (canned JSON by `METHOD /path?query`) and assert its request log. It counts
-`Client::get`/`graphql` calls, one HTTP request each in production; it does not
-exercise ureq or GraphQL rate-limit cost.
+`Client::get`/`graphql` calls before they reach ureq, not wire requests
+(ureq can follow redirects); it does not exercise ureq or GraphQL rate-limit
+cost.
 
 ## Conventions
 
