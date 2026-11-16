@@ -153,6 +153,68 @@ fn fetch(
     want_mine: bool,
     want_reviews: bool,
 ) -> Result<Sections> {
+    let (sections, _) = fetch_sections(
+        cli,
+        client,
+        repo,
+        me,
+        default_branch,
+        want_mine,
+        want_reviews,
+    )?;
+    Ok(sections)
+}
+
+fn fetch_watch(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    default_branch: &mut Option<String>,
+) -> Result<(Sections, Vec<MergedFetchError>)> {
+    fetch_sections(cli, client, repo, me, default_branch, true, true)
+}
+
+#[derive(Clone, Copy)]
+enum MergedSection {
+    Mine,
+    Reviewed,
+}
+
+struct MergedFetchError {
+    section: MergedSection,
+    message: String,
+}
+
+fn resolve_merged_nodes(
+    paired: Option<Result<Vec<model::MergedNode>>>,
+    section: MergedSection,
+    errors: &mut Vec<MergedFetchError>,
+    fetch: impl FnOnce() -> Result<Vec<model::MergedNode>>,
+) -> Result<Vec<model::MergedNode>> {
+    match paired {
+        Some(Ok(nodes)) => Ok(nodes),
+        Some(Err(error)) => {
+            errors.push(MergedFetchError {
+                section,
+                message: short_error(&error),
+            });
+            Ok(Vec::new())
+        }
+        None => fetch(),
+    }
+}
+
+fn fetch_sections(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    default_branch: &mut Option<String>,
+    want_mine: bool,
+    want_reviews: bool,
+) -> Result<(Sections, Vec<MergedFetchError>)> {
+    let mut errors = Vec::new();
     let default_branch = (want_mine && cli.show_shipments()).then(|| {
         default_branch
             .get_or_insert_with(|| {
@@ -181,9 +243,27 @@ fn fetch(
         )
     });
 
-    let merged = if want_mine && cli.show_merged() {
+    let merged_pair = if want_mine && cli.show_merged() && want_reviews {
         let since = timefmt::since_date(&cli.merged_window);
-        let nodes = model::fetch_merged(client, repo, me, &since, cli.merged_limit)?;
+        Some(model::fetch_merged_pair(
+            client,
+            repo,
+            me,
+            &since,
+            cli.merged_limit,
+        )?)
+    } else {
+        None
+    };
+    let (mut mine_merged, mut reviewed_merged) =
+        merged_pair.map_or((None, None), |pair| (Some(pair.mine), Some(pair.reviewed)));
+
+    let merged = if want_mine && cli.show_merged() {
+        let nodes =
+            resolve_merged_nodes(mine_merged.take(), MergedSection::Mine, &mut errors, || {
+                let since = timefmt::since_date(&cli.merged_window);
+                model::fetch_merged(client, repo, me, &since, cli.merged_limit)
+            })?;
         Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
     } else {
         None
@@ -217,24 +297,33 @@ fn fetch(
         } else {
             open
         };
-        let since = timefmt::since_date(&cli.merged_window);
-        let merged_nodes =
-            model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)?;
+        let merged_nodes = resolve_merged_nodes(
+            reviewed_merged.take(),
+            MergedSection::Reviewed,
+            &mut errors,
+            || {
+                let since = timefmt::since_date(&cli.merged_window);
+                model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)
+            },
+        )?;
         let merged_reviews = reviews::build_merged_rows(merged_nodes, cli.merged_limit);
         (Some(open), Some(merged_reviews))
     } else {
         (None, None)
     };
 
-    Ok(Sections {
-        merged,
-        queue,
-        queue_next_eta,
-        prs,
-        commits,
-        reviews,
-        reviewed_merged,
-    })
+    Ok((
+        Sections {
+            merged,
+            queue,
+            queue_next_eta,
+            prs,
+            commits,
+            reviews,
+            reviewed_merged,
+        },
+        errors,
+    ))
 }
 
 /// Paint one PR section onto `s` at row `top`: a counted header (with an optional
@@ -1824,8 +1913,9 @@ impl<'a> App<'a> {
                     me = client.me()?;
                 }
                 // Both views every refresh, so Tab switches instantly.
-                let sections = fetch(&cli, &client, &repo, &me, &mut default_branch, true, true)?;
-                Ok((me, default_branch, sections))
+                let (sections, errors) =
+                    fetch_watch(&cli, &client, &repo, &me, &mut default_branch)?;
+                Ok((me, default_branch, sections, errors))
             })();
             let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
         });
@@ -1835,13 +1925,13 @@ impl<'a> App<'a> {
                 return Ok(Flow::Quit);
             }
             match rx.try_recv() {
-                Ok(Ok((me, default_branch, sections))) => {
+                Ok(Ok((me, default_branch, sections, errors))) => {
                     self.me = me;
                     self.default_branch = default_branch;
                     // Cleared before painting, so the result frame already shows
                     // the plain `^R refresh` hint again.
                     self.refreshing = false;
-                    self.apply(sections)?;
+                    self.apply(sections, errors)?;
                     return Ok(Flow::Continue);
                 }
                 Ok(Err(e)) => {
@@ -2141,9 +2231,25 @@ impl<'a> App<'a> {
         self.repaint_last()
     }
 
-    /// Render a successful fetch: diff against the previous snapshot, paint, ring
-    /// the bell on a change (once armed), and cache the result.
-    fn apply(&mut self, sections: Sections) -> Result<()> {
+    /// Render fetched sections, preserving errored merged sections from the last
+    /// snapshot and keeping their failures visible.
+    fn apply(&mut self, mut sections: Sections, errors: Vec<MergedFetchError>) -> Result<()> {
+        let track_changes = self.last_good.is_some()
+            || !errors
+                .iter()
+                .any(|error| matches!(error.section, MergedSection::Mine));
+        if let Some(last_good) = &self.last_good {
+            for error in &errors {
+                match error.section {
+                    MergedSection::Mine => sections.merged.clone_from(&last_good.merged),
+                    MergedSection::Reviewed => {
+                        sections
+                            .reviewed_merged
+                            .clone_from(&last_good.reviewed_merged);
+                    }
+                }
+            }
+        }
         let selected = self.selected_url();
         let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
         let changes = self
@@ -2153,8 +2259,23 @@ impl<'a> App<'a> {
         let bell = changes.any();
         self.unread.extend(changes);
 
-        self.last_status.clear();
-        self.prev = Some(tracker);
+        self.last_status = errors
+            .iter()
+            .map(|error| {
+                let section = match error.section {
+                    MergedSection::Mine => "My merged PRs",
+                    MergedSection::Reviewed => "Reviewed & merged",
+                };
+                format!("{section}: {}", error.message)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !self.last_status.is_empty() {
+            self.last_status = format!("error: {}", self.last_status);
+        }
+        if track_changes {
+            self.prev = Some(tracker);
+        }
         self.last_good = Some(sections);
         // Responsive queue membership can change as checks start or finish.
         // Keep the same URL selected instead of reusing its old numeric index.
@@ -2166,7 +2287,8 @@ impl<'a> App<'a> {
             let _ = self.program.beep();
         }
         self.armed = true;
-        if !self.cli.no_cache
+        if errors.is_empty()
+            && !self.cli.no_cache
             && let Some(good) = &self.last_good
         {
             cache::save(self.repo, self.cli.required, good);
@@ -3986,6 +4108,21 @@ mod tests {
             .collect()
     }
 
+    fn tagged_watch() -> Vec<(String, String)> {
+        let mut routes = tagged();
+        let body = &mut routes
+            .iter_mut()
+            .find(|(route, _)| route == GRAPHQL)
+            .unwrap()
+            .1;
+        let mut response: serde_json::Value = serde_json::from_str(body).unwrap();
+        let nodes = response["data"]["search"]["nodes"].clone();
+        response["data"]["mine"] = serde_json::json!({ "nodes": nodes });
+        response["data"]["reviewed"] = serde_json::json!({ "nodes": nodes });
+        *body = response.to_string();
+        routes
+    }
+
     /// No releases, so the upcoming count pages through every commit of mine.
     fn untagged() -> Vec<(String, String)> {
         let page = |n| format!("GET /repos/o/r/commits?sha=main&author=me&per_page=100&page={n}");
@@ -4029,15 +4166,19 @@ mod tests {
             ("once_merged", &["--only", "merged"], false, 4, 1),
             ("once_shipments", &["--only", "shipments"], false, 6, 0),
             ("once_mine_view", &[], false, 6, 3),
-            ("watch_mine_view", &[], true, 6, 5),
-            ("watch_reviews", &["--view", "reviews"], true, 6, 5),
+            ("watch_mine_view", &[], true, 6, 4),
+            ("watch_reviews", &["--view", "reviews"], true, 6, 4),
             ("watch_mine_only", &["--only", "mine"], true, 1, 3),
         ];
         let repo = Repo::parse("o/r").unwrap();
         for &(name, args, watch, expected_gets, posts) in cases {
             let cli =
                 Cli::try_parse_from(std::iter::once("prowl").chain(args.iter().copied())).unwrap();
-            let mut routes = tagged();
+            let mut routes = if watch && cli.show_merged() {
+                tagged_watch()
+            } else {
+                tagged()
+            };
             routes.push(("GET /user".to_string(), r#"{"login":"me"}"#.to_string()));
             routes.push((
                 "GET /repos/o/r".to_string(),
@@ -4115,6 +4256,105 @@ mod tests {
                 "{name}: refresh must reuse the resolved branch"
             );
         }
+    }
+
+    #[test]
+    fn watch_merged_results_match_the_one_shot_views() {
+        let repo = Repo::parse("o/r").unwrap();
+        let mut branch = Some("main".to_string());
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        let watch = fetch_watch(&cli, &client, &repo, "me", &mut branch).unwrap();
+        let watch_posts = fake
+            .requests()
+            .iter()
+            .filter(|request| request.as_str() == GRAPHQL)
+            .count();
+
+        let mine_cli = Cli::try_parse_from(["prowl", "--only", "merged"]).unwrap();
+        let (client, mine_fake) = github::fake::client(tagged());
+        let mine = fetch(
+            &mine_cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            false,
+        )
+        .unwrap();
+        let mine_posts = mine_fake
+            .requests()
+            .iter()
+            .filter(|request| request.as_str() == GRAPHQL)
+            .count();
+
+        let reviews_cli = Cli::try_parse_from(["prowl", "--view", "reviews"]).unwrap();
+        let (client, reviews_fake) = github::fake::client(tagged());
+        let reviews = fetch(
+            &reviews_cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            false,
+            true,
+        )
+        .unwrap();
+        let reviews_posts = reviews_fake
+            .requests()
+            .iter()
+            .filter(|request| request.as_str() == GRAPHQL)
+            .count();
+
+        assert_eq!(
+            serde_json::to_value(watch.0.merged).unwrap(),
+            serde_json::to_value(mine.merged).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(watch.0.reviewed_merged).unwrap(),
+            serde_json::to_value(reviews.reviewed_merged).unwrap()
+        );
+        assert_eq!((watch_posts, mine_posts, reviews_posts), (4, 1, 2));
+    }
+
+    #[test]
+    fn watch_partial_merged_error_keeps_and_reports_the_other_section() {
+        let mut routes = tagged_watch();
+        let (_, body) = routes
+            .iter_mut()
+            .find(|(route, _)| route == GRAPHQL)
+            .unwrap();
+        let mut response: serde_json::Value = serde_json::from_str(body).unwrap();
+        response["data"]["mine"] = serde_json::Value::Null;
+        response["errors"] = serde_json::json!([{
+            "message": "Mine search unavailable",
+            "path": ["mine"]
+        }]);
+        *body = response.to_string();
+
+        let (client, fake) = github::fake::client(routes);
+        let (sections, errors) = fetch_watch(
+            &Cli::try_parse_from(["prowl"]).unwrap(),
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            &mut Some("main".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0].section, MergedSection::Mine));
+        assert_eq!(errors[0].message, "GraphQL error: Mine search unavailable");
+        assert_eq!(sections.merged.unwrap().len(), 0);
+        assert_eq!(sections.reviewed_merged.unwrap().len(), 3);
+        assert_eq!(
+            fake.requests()
+                .iter()
+                .filter(|request| request.as_str() == GRAPHQL)
+                .count(),
+            4
+        );
     }
 
     #[test]
