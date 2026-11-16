@@ -338,11 +338,17 @@ fn fetch(
     } else {
         None
     };
+    let mut required_context_cache = model::RequiredContextCache::default();
     let (queue, queue_next_eta) = if want_mine && cli.show_queue() {
         section(
             FetchScope::Queue,
-            model::fetch_queue(client, repo, cli.required)
-                .map(|(nodes, eta)| (queue::build_rows(nodes, me), eta)),
+            model::fetch_queue_with_context_cache(
+                client,
+                repo,
+                cli.required,
+                &mut required_context_cache,
+            )
+            .map(|(nodes, eta)| (queue::build_rows(nodes, me), eta)),
             &mut issues,
         )
         .map_or((None, None), |(rows, eta)| (Some(rows), eta))
@@ -352,7 +358,15 @@ fn fetch(
     let prs = if want_mine && cli.show_mine() {
         section(
             FetchScope::Mine,
-            model::fetch_my_prs(client, repo, me, cli.sort_open, cli.required).map(|nodes| {
+            model::fetch_my_prs_with_context_cache(
+                client,
+                repo,
+                me,
+                cli.sort_open,
+                cli.required,
+                &mut required_context_cache,
+            )
+            .map(|nodes| {
                 let rows = prs::build_rows(nodes, cli.sort_open);
                 if cli.no_draft {
                     prs::without_drafts(rows)
@@ -4428,6 +4442,113 @@ mod tests {
 
         assert!(output.contains("error: My PRs unavailable: first"));
         assert!(output.contains("error: Merge Queue stale: second"));
+    }
+
+    fn required_rules_graphql(mine_ref: &str, required: &[&str]) -> (String, String) {
+        let (_, body) = graphql(&[1]);
+        let mut response: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rollup = serde_json::json!({ "contexts": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "checkRunCountsByState": [
+                { "state": "SUCCESS", "count": 1 },
+                { "state": "FAILURE", "count": 1 }
+            ],
+            "statusContextCountsByState": [],
+            "nodes": [
+                {
+                    "__typename": "CheckRun", "required": true, "name": "test",
+                    "status": "COMPLETED", "conclusion": "SUCCESS",
+                    "startedAt": "2026-08-28T10:00:00Z"
+                },
+                {
+                    "__typename": "CheckRun", "required": false, "name": "optional",
+                    "status": "COMPLETED", "conclusion": "FAILURE",
+                    "startedAt": "2026-08-28T09:00:00Z"
+                }
+            ]
+        } });
+        let pr = &mut response["data"]["search"]["nodes"][0];
+        pr["baseRef"] = serde_json::json!({ "id": mine_ref });
+        pr["commits"] = serde_json::json!({ "nodes": [{ "commit": {
+            "id": "PR_HEAD", "statusCheckRollup": rollup
+        } }] });
+        response["data"]["repository"]["mergeQueue"] = serde_json::json!({
+            "entries": { "nodes": [{
+                "position": 1,
+                "headCommit": { "id": "QUEUE_HEAD", "statusCheckRollup": rollup },
+                "pullRequest": {
+                    "number": 2, "title": "queued", "url": "https://github.com/o/r/pull/2",
+                    "baseRef": { "id": "ref-1" }
+                }
+            }] }
+        });
+        response["data"]["node"] = serde_json::json!({
+            "refUpdateRule": { "requiredStatusCheckContexts": required },
+            "rules": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": []
+            }
+        });
+        response["data"]["c0"] = serde_json::json!({ "statusCheckRollup": rollup });
+        (GRAPHQL.to_string(), response.to_string())
+    }
+
+    #[test]
+    fn required_rules_follow_the_production_refresh_lifetime() {
+        let repo = Repo::parse("o/r").unwrap();
+        for (case, mine_ref, per_refresh) in [("shared", "ref-1", 5), ("disjoint", "ref-2", 6)] {
+            for required_only in [false, true] {
+                let mut cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
+                cli.required = required_only;
+                let mut branch = None;
+                let (client, fake) = github::fake::client([]);
+                for (index, required) in [&["test", "lint"][..], &["test", "lint", "security"][..]]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let refresh = index + 1;
+                    let (_, body) = required_rules_graphql(mine_ref, required);
+                    fake.set_response(GRAPHQL, 200, &[], &body);
+                    let missing = (required.len() - 1) as u64;
+                    let expected = status::Checks {
+                        fail: u64::from(!required_only),
+                        running: missing,
+                        pass: 1,
+                    };
+                    let outcome = fetch(&cli, &client, &repo, "me", &mut branch, true, false);
+                    assert!(
+                        outcome.issues.is_empty(),
+                        "{case}, {required_only}: {:?}",
+                        outcome.issues
+                    );
+                    let sections = outcome.sections;
+                    let prs = sections.prs.unwrap();
+                    let queue = sections.queue.unwrap();
+                    assert_eq!(prs.len(), 1);
+                    assert_eq!(queue.len(), 1);
+                    assert_eq!(prs[0].checks, expected, "{case}, {required_only}");
+                    assert_eq!(queue[0].checks, expected, "{case}, {required_only}");
+                    assert_eq!(queue[0].missing_required_checks, missing);
+                    assert_eq!(
+                        queue[0].build_started_at.as_deref(),
+                        Some(if required_only {
+                            "2026-08-28T10:00:00Z"
+                        } else {
+                            "2026-08-28T09:00:00Z"
+                        })
+                    );
+                    let requests = fake.requests();
+                    println!(
+                        "RULE_REFRESH {case} required={required_only} expected_rules={} refresh={refresh} POST={} checks={:?}",
+                        required.len(),
+                        requests.len(),
+                        prs[0].checks
+                    );
+                    assert_eq!(requests, vec![GRAPHQL; per_refresh * refresh], "{case}");
+                    assert!(branch.is_none());
+                }
+            }
+        }
     }
 
     #[test]
