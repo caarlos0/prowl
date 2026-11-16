@@ -269,16 +269,17 @@ impl Visibility {
 }
 
 fn bottom_height(ui: &Ui, status: &str, footer: Option<(&str, bool)>, show_help: bool) -> usize {
-    let lines = usize::from(!ui.search.is_empty() || ui.searching)
-        + status.lines().count()
-        + usize::from(footer.is_some());
+    let search = usize::from(!ui.search.is_empty() || ui.searching);
+    let footer = usize::from(footer.is_some());
+    let blocks = search + usize::from(!status.is_empty()) + footer;
     let help = if show_help {
         render::help_height(ui.view)
     } else {
         0
     };
-    let gaps = (lines + usize::from(show_help)).saturating_sub(1);
-    lines + help + gaps
+    let content_lines = search + status.lines().count() + footer;
+    let gaps = (blocks + usize::from(show_help)).saturating_sub(1);
+    content_lines + help + gaps
 }
 
 /// Fetch the sections for the requested views. `want_mine` covers the Mine view
@@ -387,26 +388,7 @@ fn fetch(
 
     // Reviews view: PRs awaiting / under my review, plus merged PRs I reviewed.
     let (reviews, reviewed_merged) = if want_reviews {
-        let reviews = section(
-            FetchScope::Reviews,
-            model::fetch_reviews(client, repo, me, cli.review_scope.qualifier()).map(|data| {
-                let rows = reviews::build_open_rows(data);
-                if cli.no_draft {
-                    reviews::without_drafts(rows)
-                } else {
-                    rows
-                }
-            }),
-            &mut issues,
-        );
-        let since = timefmt::since_date(&cli.merged_window);
-        let reviewed_merged = section(
-            FetchScope::ReviewedMerged,
-            model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)
-                .map(|nodes| reviews::build_merged_rows(nodes, cli.merged_limit)),
-            &mut issues,
-        );
-        (reviews, reviewed_merged)
+        fetch_review_sections(cli, client, repo, me, &mut issues)
     } else {
         (None, None)
     };
@@ -423,6 +405,38 @@ fn fetch(
         },
         issues,
     }
+}
+
+fn fetch_review_sections(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    issues: &mut Vec<FetchIssue>,
+) -> (
+    Option<Vec<reviews::ReviewRow>>,
+    Option<Vec<reviews::ReviewedMergedRow>>,
+) {
+    let reviews = section(
+        FetchScope::Reviews,
+        model::fetch_reviews(client, repo, me, cli.review_scope.qualifier()).map(|data| {
+            let rows = reviews::build_open_rows(data);
+            if cli.no_draft {
+                reviews::without_drafts(rows)
+            } else {
+                rows
+            }
+        }),
+        issues,
+    );
+    let since = timefmt::since_date(&cli.merged_window);
+    let reviewed_merged = section(
+        FetchScope::ReviewedMerged,
+        model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)
+            .map(|nodes| reviews::build_merged_rows(nodes, cli.merged_limit)),
+        issues,
+    );
+    (reviews, reviewed_merged)
 }
 
 /// Paint one PR section onto `s` at row `top`: a counted header (with an optional

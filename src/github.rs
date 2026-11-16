@@ -426,10 +426,12 @@ pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
     use ureq::http::Response;
 
+    type ScheduledResponses = Arc<Mutex<HashMap<(String, usize), Response<String>>>>;
+
     #[derive(Clone)]
     pub(crate) struct Fake {
         routes: Arc<Mutex<HashMap<String, Response<String>>>>,
-        failures: Arc<Mutex<HashMap<(String, usize), Response<String>>>>,
+        failures: ScheduledResponses,
         requests: Arc<Mutex<Vec<String>>>,
         calls: Arc<Mutex<HashMap<String, usize>>>,
         now: Arc<Mutex<DateTime<Utc>>>,
