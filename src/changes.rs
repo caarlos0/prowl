@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 pub struct Tracker {
     open_status: HashMap<i64, Option<Status>>,
     merged: HashSet<i64>,
+    open_known: bool,
+    merged_known: bool,
 }
 
 /// Changed PRs, used for both a refresh's events and accumulated unread markers.
@@ -49,6 +51,8 @@ impl Tracker {
                 .map(|r| (r.number, r.status))
                 .collect(),
             merged: merged.unwrap_or(&[]).iter().map(|r| r.number).collect(),
+            open_known: open.is_some(),
+            merged_known: merged.is_some(),
         }
     }
 
@@ -56,13 +60,22 @@ impl Tracker {
     /// must exist in both refreshes to count as a status change; a PR appearing
     /// in `merged` for the first time counts as newly merged.
     pub fn diff(&self, prev: &Tracker) -> Changes {
-        let status_changed = self
-            .open_status
-            .iter()
-            .filter(|(num, status)| matches!(prev.open_status.get(num), Some(p) if p != *status))
-            .map(|(num, _)| *num)
-            .collect();
-        let newly_merged = self.merged.difference(&prev.merged).copied().collect();
+        let status_changed = if self.open_known && prev.open_known {
+            self.open_status
+                .iter()
+                .filter(
+                    |(num, status)| matches!(prev.open_status.get(num), Some(p) if p != *status),
+                )
+                .map(|(num, _)| *num)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let newly_merged = if self.merged_known && prev.merged_known {
+            self.merged.difference(&prev.merged).copied().collect()
+        } else {
+            HashSet::new()
+        };
         Changes {
             status_changed,
             newly_merged,
@@ -152,6 +165,21 @@ mod tests {
     fn first_refresh_is_silent() {
         // No previous tracker -> default Changes -> nothing rings.
         assert!(!Changes::default().any());
+    }
+
+    #[test]
+    fn first_available_merged_section_seeds_the_baseline() {
+        let unavailable = Tracker::build(None, None);
+        let available = Tracker::build(None, Some(&[merged(1)]));
+
+        assert!(
+            !available.diff(&unavailable).any(),
+            "historical merges must not ring when a failed section first recovers"
+        );
+        assert!(
+            !available.diff(&available).any(),
+            "the seeded baseline must remain quiet"
+        );
     }
 
     #[test]
