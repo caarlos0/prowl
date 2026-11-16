@@ -91,8 +91,13 @@ watch event loop); everything else is testable modules:
   not on refresh.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
-  `parse_graphql()`. The test-only `github::fake` answers `get()`/`graphql()`
-  from memory and logs each request attempt (`METHOD /path?query`).
+  `parse_graphql()`. Client clones share rate-limit deadlines: primary REST
+  core and GraphQL budgets stay separate, while secondary limits block both.
+  HTTP status, headers, and GraphQL errors identify limits; a successful last
+  response with zero remaining quota still returns its data. The test-only
+  `github::fake` supplies in-memory responses and a controlled clock through
+  the same response/error/cooldown path, logging each dispatch past the gate
+  (`METHOD /path?query`).
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
@@ -414,7 +419,13 @@ still performs all teardown through `finish`.
   view, including filtered/hidden PRs. Neither action moves the selection.
   New events mark the PR again. Markers are not saved to the cache.
 - **Resilience:** a failed API call keeps the last good data, shows a dim error
-  line, and does not ring.
+  line, and does not ring. After a rate-limit signal, the client rejects calls
+  to the limited resource locally until the server's reset or retry deadline,
+  with an error naming that time. An identified secondary limit without a
+  deadline uses GitHub's documented one-minute minimum. Interval and manual
+  refreshes use the same gate; there are no automatic retries, sleeps, or new
+  refresh timers. The next call after expiry proceeds normally. Cooldowns are
+  shared only by clones of that client, not persisted or shared across processes.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
   until the first movement key, then the chosen row is painted with the
   selection background (`status::SURFACE`) edge to edge across the full width
@@ -615,10 +626,12 @@ crafted queue) drive parsing → rows → render in `tests/parsing.rs`, plus
 per-module unit tests. `tests/config.rs` exercises startup config paths, errors,
 and help/version without network calls. No network in tests: to pin the
 requests a fetch path sends, build the client with `github::fake::client`
-(canned JSON by `METHOD /path?query`) and assert its request log. It counts
-`Client::get`/`graphql` calls before they reach ureq, not wire requests
-(ureq can follow redirects); it does not exercise ureq or GraphQL rate-limit
-cost.
+(canned JSON by `METHOD /path?query`) and assert its request log. Fixtures can
+replace status, headers, and body with `set_response`, and control time with
+`set_now`. The log counts dispatches after the cooldown gate, not all
+`Client::get`/`graphql` calls or wire requests (ureq can follow redirects).
+Fixtures exercise the common response/error/gate path without sockets; they
+do not measure production quota savings or GraphQL point costs.
 
 ## Conventions
 
