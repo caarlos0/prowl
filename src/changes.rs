@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Default, Clone)]
 pub struct Tracker {
     open_status: HashMap<i64, Option<Status>>,
-    merged: HashSet<i64>,
+    merged: Option<HashSet<i64>>,
 }
 
 /// Changed PRs, used for both a refresh's events and accumulated unread markers.
@@ -48,13 +48,18 @@ impl Tracker {
                 .iter()
                 .map(|r| (r.number, r.status))
                 .collect(),
-            merged: merged.unwrap_or(&[]).iter().map(|r| r.number).collect(),
+            merged: merged.map(|rows| rows.iter().map(|r| r.number).collect()),
         }
+    }
+
+    pub(crate) fn has_merged_baseline(&self) -> bool {
+        self.merged.is_some()
     }
 
     /// Changes from `prev` (previous refresh) to `self` (current refresh). A PR
     /// must exist in both refreshes to count as a status change; a PR appearing
-    /// in `merged` for the first time counts as newly merged.
+    /// in `merged` for the first time counts as newly merged when both snapshots
+    /// contain a valid merged baseline.
     pub fn diff(&self, prev: &Tracker) -> Changes {
         let status_changed = self
             .open_status
@@ -62,7 +67,10 @@ impl Tracker {
             .filter(|(num, status)| matches!(prev.open_status.get(num), Some(p) if p != *status))
             .map(|(num, _)| *num)
             .collect();
-        let newly_merged = self.merged.difference(&prev.merged).copied().collect();
+        let newly_merged = match (&self.merged, &prev.merged) {
+            (Some(current), Some(previous)) => current.difference(previous).copied().collect(),
+            _ => HashSet::new(),
+        };
         Changes {
             status_changed,
             newly_merged,
@@ -128,6 +136,15 @@ mod tests {
         let c = after.diff(&before);
         assert!(c.any());
         assert_eq!(c.newly_merged, HashSet::from([7]));
+    }
+
+    #[test]
+    fn recovery_after_repeated_merged_failures_establishes_a_silent_baseline() {
+        let first_failure = Tracker::build(Some(&[]), None);
+        let second_failure = Tracker::build(Some(&[]), None);
+        let recovered = Tracker::build(Some(&[]), Some(&[merged(7)]));
+        assert!(!second_failure.diff(&first_failure).any());
+        assert!(!recovered.diff(&second_failure).any());
     }
 
     #[test]

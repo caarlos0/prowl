@@ -212,10 +212,7 @@ fn fetch_review_sections(
     me: &str,
     merged_nodes: Option<Result<Vec<model::MergedNode>>>,
     errors: &mut Vec<MergedFetchError>,
-) -> Result<(
-    Option<Vec<reviews::ReviewRow>>,
-    Option<Vec<reviews::ReviewedMergedRow>>,
-)> {
+) -> Result<(Vec<reviews::ReviewRow>, Vec<reviews::ReviewedMergedRow>)> {
     let data = model::fetch_reviews(client, repo, me, cli.review_scope.qualifier())?;
     let open = reviews::build_open_rows(data);
     let open = if cli.no_draft {
@@ -228,7 +225,7 @@ fn fetch_review_sections(
         model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)
     })?;
     let merged = reviews::build_merged_rows(merged_nodes, cli.merged_limit);
-    Ok((Some(open), Some(merged)))
+    Ok((open, merged))
 }
 
 fn fetch_sections(
@@ -329,7 +326,9 @@ fn fetch_sections(
 
     // Reviews view: PRs awaiting / under my review, plus merged PRs I reviewed.
     let (reviews, reviewed_merged) = if want_reviews {
-        fetch_review_sections(cli, client, repo, me, reviewed_merged.take(), &mut errors)?
+        let (reviews, reviewed_merged) =
+            fetch_review_sections(cli, client, repo, me, reviewed_merged.take(), &mut errors)?;
+        (Some(reviews), Some(reviewed_merged))
     } else {
         (None, None)
     };
@@ -2256,10 +2255,10 @@ impl<'a> App<'a> {
     /// Render fetched sections, preserving errored merged sections from the last
     /// snapshot and keeping their failures visible.
     fn apply(&mut self, mut sections: Sections, errors: Vec<MergedFetchError>) -> Result<()> {
-        let track_changes = self.last_good.is_some()
-            || !errors
-                .iter()
-                .any(|error| matches!(error.section, MergedSection::Mine));
+        let mine_failed = errors
+            .iter()
+            .any(|error| matches!(error.section, MergedSection::Mine));
+        let track_changes = self.last_good.is_some() || !mine_failed;
         if let Some(last_good) = &self.last_good {
             for error in &errors {
                 match error.section {
@@ -2273,7 +2272,13 @@ impl<'a> App<'a> {
             }
         }
         let selected = self.selected_url();
-        let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
+        let merged = if mine_failed && !self.prev.as_ref().is_some_and(Tracker::has_merged_baseline)
+        {
+            None
+        } else {
+            sections.merged.as_deref()
+        };
+        let tracker = Tracker::build(sections.prs.as_deref(), merged);
         let changes = self
             .prev
             .as_ref()
