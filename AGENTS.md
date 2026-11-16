@@ -236,12 +236,14 @@ watch event loop); everything else is testable modules:
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
   The upcoming scan runs only when `fetch` receives a default branch;
-  `lib::fetch` resolves and passes it only when fetching My Shipments, because
-  the release ranges alone build the `ReleaseMap`. The lookup is skipped for
-  one-shot Reviews and Mine selections without shipments, including merged-only.
-  Watch mode still resolves it when shipments are enabled, even if the initial
-  tab is Reviews, and reuses it on refresh. Lookup failures still fall back to
-  `main`.
+  `lib::fetch` resolves and passes it only when fetching My Shipments. With
+  shipments hidden, merged rows are fetched first and release ranges are scanned
+  newest-first only until every displayed PR is mapped; an empty merged list
+  skips release requests, while an unreleased PR requires the full scan. Watch
+  reuses the Mine nodes from its batched merged search for this cutoff without
+  fetching them again. Watch mode resolves the default branch when shipments are
+  enabled, even if the initial tab is Reviews, and reuses it on refresh. Default-branch lookup
+  failures still fall back to `main`.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
@@ -601,7 +603,9 @@ still performs all teardown through `finish`.
   merged:>=<since>)` (reuses the merged query/limit).
 - Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
   The upcoming range (latest tag → default branch, or all of the default
-  branch without a tag) is fetched only while My Shipments is shown.
+  branch without a tag) is fetched only while My Shipments is shown. When
+  shipments are hidden, the release scan used for merged `RELEASE` cells stops
+  after all displayed PRs are mapped; an unmapped row keeps the full scan.
 
 ## Build / test / lint
 
