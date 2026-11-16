@@ -245,6 +245,8 @@ watch event loop); everything else is testable modules:
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
+  An unknown Mine merged baseline stays silent on recovery while open-PR status
+  changes remain tracked.
 - `nav.rs` — watch-mode row navigation + search: `groups(view, &Sections, query, visible)`
   is the matching rows' `Target { number, title, url }` values bucketed by rendered section;
   `number` is `Some(PR number)` for PRs and `None` for shipments, so marking read

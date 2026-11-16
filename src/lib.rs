@@ -2258,7 +2258,6 @@ impl<'a> App<'a> {
         let mine_failed = errors
             .iter()
             .any(|error| matches!(error.section, MergedSection::Mine));
-        let track_changes = self.last_good.is_some() || !mine_failed;
         if let Some(last_good) = &self.last_good {
             for error in &errors {
                 match error.section {
@@ -2279,10 +2278,7 @@ impl<'a> App<'a> {
             sections.merged.as_deref()
         };
         let tracker = Tracker::build(sections.prs.as_deref(), merged);
-        let changes = self
-            .prev
-            .as_ref()
-            .map_or_else(Changes::default, |p| tracker.diff(p));
+        let changes = Tracker::advance(&mut self.prev, tracker);
         let bell = changes.any();
         self.unread.extend(changes);
 
@@ -2299,9 +2295,6 @@ impl<'a> App<'a> {
             .join("; ");
         if !self.last_status.is_empty() {
             self.last_status = format!("error: {}", self.last_status);
-        }
-        if track_changes {
-            self.prev = Some(tracker);
         }
         self.last_good = Some(sections);
         // Responsive queue membership can change as checks start or finish.
