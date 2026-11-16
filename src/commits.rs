@@ -239,17 +239,16 @@ fn range_mine(
 
 /// Compute the commit stats for `repo` (my work in each of the last
 /// [`RELEASES`] releases — stable only, or including prereleases when
-/// `include_prereleases` is set — and, when `count_upcoming` is set, in the next
-/// unreleased version), plus a map from PR number to the release that shipped
+/// `include_prereleases` is set — and, when `default_branch` is provided, in the
+/// next unreleased version), plus a map from PR number to the release that shipped
 /// it (for annotating the merged section). PRs merged since the latest release
 /// are absent from the map (not yet shipped).
 pub fn fetch(
     client: &Client,
     repo: &Repo,
     me: &str,
-    default_branch: &str,
+    default_branch: Option<&str>,
     include_prereleases: bool,
-    count_upcoming: bool,
 ) -> Result<(CommitStats, ReleaseMap)> {
     let tags = release_tags(client, repo, include_prereleases)?;
     let base_url = format!("https://github.com/{}/{}", repo.owner, repo.name);
@@ -258,7 +257,7 @@ pub fn fetch(
     // The next release is everything since the latest tag (or the whole default
     // branch when there are no releases yet); its label links to that log. Its
     // PRs are unreleased, so they are not added to the map.
-    let upcoming = if count_upcoming {
+    let upcoming = if let Some(default_branch) = default_branch {
         let latest = tags.first().map(|t| t.name.as_str());
         let (count, _) = range_mine(client, repo, me, latest, default_branch)?;
         Some(Bucket {
