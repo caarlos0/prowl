@@ -10,6 +10,7 @@
 //! cargo run --quiet --example demo -- reviews # the reviews view
 //! cargo run --quiet --example demo -- scroll  # top/bottom eight-row frames
 //! cargo run --quiet --example demo -- reviews scroll
+//! cargo run --quiet --example demo -- mouse   # simulated clicks and wheel input
 //! vhs demo.tape                               # write demo.png
 //! ```
 
@@ -24,8 +25,10 @@ use prowl::prs::PrRow;
 use prowl::queue::QueueRow;
 use prowl::reviews::{ReviewRow, ReviewedMergedRow};
 use prowl::status::{Approval, Checks, ReviewState, Status};
-use uncurses::buffer::TextBuffer;
+use uncurses::buffer::{Surface, TextBuffer};
 use uncurses::color::Profile;
+use uncurses::event::{Event, KeyModifiers, Mouse, MouseButton};
+use uncurses::layout::Position;
 use uncurses::text::Encode;
 
 const REPO: &str = "acme/rocket";
@@ -319,6 +322,10 @@ fn main() {
         ..Ui::once(&cli)
     };
     let sections = sections();
+    if std::env::args().any(|arg| arg == "mouse") {
+        mouse_frame(&sections, ui, &changes);
+        return;
+    }
     if std::env::args().any(|arg| arg == "scroll") {
         scroll_frames(&sections, ui, &changes);
         return;
@@ -334,6 +341,71 @@ fn main() {
             Profile::TrueColor,
         )
     );
+}
+
+fn mouse_frame(sections: &prowl::Sections, mut ui: Ui, changes: &Changes) {
+    ui.show_help = false;
+    ui.selected = None;
+    let mut frame = TextBuffer::new(120, 8);
+    prowl::paint_watch_frame(
+        &mut frame,
+        sections,
+        &ui,
+        changes,
+        "",
+        Some(("5m", false)),
+        true,
+    );
+    let link = (0..frame.height())
+        .flat_map(|y| (0..frame.width()).map(move |x| Position::new(x, y)))
+        .find(|position| frame.cell(*position).unwrap().style.link.is_some())
+        .expect("the demo has a visible PR link");
+    for (label, event) in [
+        (
+            "ROW CLICK",
+            Event::MouseClick(Mouse::new(
+                119,
+                link.y,
+                MouseButton::Left,
+                KeyModifiers::empty(),
+            )),
+        ),
+        (
+            "LINK CLICK",
+            Event::MouseClick(Mouse::new(
+                link.x,
+                link.y,
+                MouseButton::Left,
+                KeyModifiers::empty(),
+            )),
+        ),
+        (
+            "WHEEL DOWN",
+            Event::MouseWheel(Mouse::new(
+                0,
+                0,
+                MouseButton::WheelDown,
+                KeyModifiers::empty(),
+            )),
+        ),
+    ] {
+        let url = ui.mouse_event(&frame, sections, "", Some(("5m", false)), true, &event);
+        println!(
+            "{label}: selected={:?}, scroll={:?}, open={url:?}",
+            ui.selected, ui.scroll
+        );
+    }
+    let mut frame = TextBuffer::new(120, 8);
+    prowl::paint_watch_frame(
+        &mut frame,
+        sections,
+        &ui,
+        changes,
+        "",
+        Some(("5m", false)),
+        true,
+    );
+    println!("{}", frame.display_with(Profile::Disabled));
 }
 
 fn scroll_frames(sections: &prowl::Sections, mut ui: Ui, changes: &Changes) {
