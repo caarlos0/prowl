@@ -109,6 +109,7 @@ enum FetchScope {
     Mine,
     Queue,
     Merged,
+    Upcoming,
     Shipments,
     ReleaseMetadata,
     Reviews,
@@ -121,6 +122,7 @@ impl FetchScope {
             Self::Mine => "My PRs",
             Self::Queue => "Merge Queue",
             Self::Merged => "My Merged PRs",
+            Self::Upcoming => "My Shipments upcoming",
             Self::Shipments => "My Shipments",
             Self::ReleaseMetadata => "Merged release metadata",
             Self::Reviews => "Reviews",
@@ -193,6 +195,16 @@ impl FetchOutcome {
                     {
                         issue.stale = true;
                         self.sections.commits = previous.commits.take();
+                    }
+                }
+                FetchScope::Upcoming => {
+                    if let Some(stats) = self.sections.commits.as_mut() {
+                        stats.upcoming = None;
+                    } else if let Some(mut stats) = previous.commits.take()
+                        && stats.available
+                    {
+                        stats.upcoming = None;
+                        self.sections.commits = Some(stats);
                     }
                 }
                 FetchScope::ReleaseMetadata => {
@@ -317,15 +329,16 @@ fn fetch(
     want_reviews: bool,
 ) -> FetchOutcome {
     let mut issues = Vec::new();
-    let default_branch = (want_mine && cli.show_shipments()).then(|| {
-        default_branch
-            .get_or_insert_with(|| {
-                client
-                    .default_branch(repo)
-                    .unwrap_or_else(|_| "main".to_string())
-            })
-            .as_str()
-    });
+    let branch_error = if want_mine && cli.show_shipments() {
+        resolve_default_branch(client, repo, default_branch)
+    } else {
+        None
+    };
+    let default_branch = if want_mine && cli.show_shipments() {
+        default_branch.as_deref()
+    } else {
+        None
+    };
 
     let (commit_stats, mut release_map) = fetch_release_data(
         cli,
@@ -336,6 +349,9 @@ fn fetch(
         want_mine,
         &mut issues,
     );
+    if let Some(error) = branch_error {
+        issues.push(FetchIssue::new(FetchScope::Upcoming, &error));
+    }
 
     let (merged_nodes, reviewed_merged) = if want_mine && cli.show_merged() {
         fetch_merged_nodes(cli, client, repo, me, want_reviews, &mut issues)
@@ -414,6 +430,23 @@ fn fetch(
             reviewed_merged,
         },
         issues,
+    }
+}
+
+fn resolve_default_branch(
+    client: &Client,
+    repo: &Repo,
+    branch: &mut Option<String>,
+) -> Option<anyhow::Error> {
+    if branch.is_some() {
+        return None;
+    }
+    match client.default_branch(repo) {
+        Ok(resolved) => {
+            *branch = Some(resolved);
+            None
+        }
+        Err(error) => Some(error),
     }
 }
 
@@ -1372,7 +1405,7 @@ fn paint_commits(
     // with a URL renders its label as a link to it.
     let value = |b: Option<&commits::Bucket>| match b {
         Some(b) => count(&b.count),
-        None => "\u{2014}".to_string(),
+        None => "unavailable".to_string(),
     };
     let mut rows: Vec<(String, Option<String>, String, Option<String>)> = vec![(
         "upcoming".to_string(),
@@ -5009,11 +5042,18 @@ mod tests {
     #[test]
     fn default_branch_shipment_sources() {
         let cases = [
-            ("tagged_fallback", tagged(), None, 6, 1, "compare/v2...main"),
             (
-                "untagged_fallback",
+                "tagged_main",
+                tagged(),
+                Some("main"),
+                6,
+                1,
+                "compare/v2...main",
+            ),
+            (
+                "untagged_main",
                 untagged(),
-                None,
+                Some("main"),
                 5,
                 101,
                 "commits/main",
@@ -5083,6 +5123,107 @@ mod tests {
             );
             assert_eq!(&fake.requests()[requests.len()..], &requests[2..], "{name}");
         }
+    }
+
+    #[test]
+    fn failed_default_branch_lookup_retries_without_guessing() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let mut routes = tagged();
+        routes.push((
+            "GET /repos/o/r".to_string(),
+            r#"{"default_branch":"trunk"}"#.to_string(),
+        ));
+        routes.push((
+            "GET /repos/o/r/compare/v2...trunk".to_string(),
+            serde_json::json!({
+                "total_commits": 2,
+                "commits": [
+                    commit("me", "feat: four (#4)"),
+                    commit("me", "feat: five (#5)"),
+                ]
+            })
+            .to_string(),
+        ));
+        let (client, fake) = github::fake::client(routes);
+        fake.set_response_on_call(
+            "GET /repos/o/r",
+            1,
+            500,
+            &[],
+            r#"{"message":"temporary failure"}"#,
+        );
+        let mut branch = None;
+        let first = fetch(&cli, &client, &repo, "me", &mut branch, true, false);
+        let first_requests = fake.requests();
+        let counts = |requests: &[String]| {
+            (
+                requests
+                    .iter()
+                    .filter(|request| request.starts_with("GET "))
+                    .count(),
+                requests
+                    .iter()
+                    .filter(|request| request.as_str() == GRAPHQL)
+                    .count(),
+                requests
+                    .iter()
+                    .filter(|request| request.as_str() == "GET /repos/o/r")
+                    .count(),
+            )
+        };
+
+        assert_eq!(branch, None);
+        assert_eq!(first.issues.len(), 1);
+        assert_eq!(first.issues[0].scope, FetchScope::Upcoming);
+        assert!(first.status().contains("upcoming unavailable"));
+        let first_stats = first.sections.commits.as_ref().unwrap();
+        assert!(first_stats.available);
+        assert_eq!(first_stats.upcoming, None);
+        assert_eq!(
+            first_stats
+                .releases
+                .iter()
+                .map(|release| (release.tag.as_str(), release.bucket.count.mine))
+                .collect::<Vec<_>>(),
+            [("v2", 1), ("v1", 1)]
+        );
+        assert_eq!(
+            shipped(&first.sections),
+            [(3, None), (2, Some("v2".into())), (1, Some("v1".into()))]
+        );
+        assert!(
+            first_requests
+                .iter()
+                .all(|request| !request.contains("...main") && !request.contains("sha=main")),
+            "{first_requests:?}"
+        );
+        assert_eq!(counts(&first_requests), (4, 3, 1));
+        let rendered = body(&first.sections, &Ui::once(&cli));
+        assert!(rendered.contains("upcoming"));
+        assert!(rendered.contains("unavailable"));
+
+        let recovered = fetch(&cli, &client, &repo, "me", &mut branch, true, false);
+        let all_requests = fake.requests();
+        let refresh_requests = &all_requests[first_requests.len()..];
+        assert!(recovered.issues.is_empty(), "{:?}", recovered.issues);
+        assert_eq!(branch.as_deref(), Some("trunk"));
+        let recovered_stats = recovered.sections.commits.as_ref().unwrap();
+        let upcoming = recovered_stats.upcoming.as_ref().unwrap();
+        assert_eq!(upcoming.count.mine, 2);
+        assert_eq!(upcoming.url, "https://github.com/o/r/compare/v2...trunk");
+        assert_eq!(
+            shipped(&recovered.sections),
+            [(3, None), (2, Some("v2".into())), (1, Some("v1".into()))]
+        );
+        assert!(
+            refresh_requests
+                .iter()
+                .all(|request| !request.contains("...main") && !request.contains("sha=main")),
+            "{refresh_requests:?}"
+        );
+        assert_eq!(counts(refresh_requests), (5, 3, 1));
+        assert_eq!(counts(&all_requests), (9, 6, 2));
     }
 
     fn shipped(sections: &Sections) -> Vec<(i64, Option<String>)> {
