@@ -633,27 +633,46 @@ pub fn paint_footer(
 /// with a section-style bar, the other dim (the active one is bracketed in ASCII
 /// mode). Returns y + 1.
 pub fn paint_tabs(s: &mut impl TextSurface, view: View, ascii: bool, y: u16) -> u16 {
-    let names = [(View::Mine, "my PRs"), (View::Reviews, "reviews")];
     let bar = status::fg(status::LAVENDER).bold();
     let dim = Style::new().faint();
     let mut x = 0u16;
-    for (v, n) in names {
+    for (v, text) in tab_labels(view, ascii) {
         let active = v == view;
         x = if ascii {
-            let text = if active {
-                format!("[{n}]")
-            } else {
-                n.to_string()
-            };
             s.set_str((x, y), &text, None).x
         } else if active {
-            s.set_str((x, y), &format!("\u{258c}{n}"), &bar).x
+            s.set_str((x, y), &text, &bar).x
         } else {
-            s.set_str((x, y), n, &dim).x
+            s.set_str((x, y), &text, &dim).x
         };
         x += 2;
     }
     y + 1
+}
+
+fn tab_labels(view: View, ascii: bool) -> [(View, String); 2] {
+    [(View::Mine, "my PRs"), (View::Reviews, "reviews")].map(|(tab, name)| {
+        let label = if tab != view {
+            name.to_string()
+        } else if ascii {
+            format!("[{name}]")
+        } else {
+            format!("\u{258c}{name}")
+        };
+        (tab, label)
+    })
+}
+
+pub(crate) fn tab_at(s: &impl TextSurface, view: View, ascii: bool, column: u16) -> Option<View> {
+    let mut x = 0;
+    for (tab, label) in tab_labels(view, ascii) {
+        let end = x + s.str_width(&label);
+        if (x..end.min(s.bounds().width)).contains(&column) {
+            return Some(tab);
+        }
+        x = end + 2;
+    }
+    None
 }
 
 /// Paint the search prompt at row `y`: an accented `/`, the query, and a dim
@@ -780,6 +799,11 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
     s.set_str((2, y), &keys, &dim);
     y += 1;
 
+    let mouse =
+        format!("wheel scroll{sep}click select{sep}click link open{sep}click tab switch view");
+    s.set_str((2, y), &mouse, &dim);
+    y += 1;
+
     let keys = format!(
         "PgUp/PgDn scroll{sep}r mark read{sep}R mark all read{sep}^R refresh{sep}shift+enter open section"
     );
@@ -820,7 +844,7 @@ pub fn paint_help(s: &mut impl TextSurface, view: View, ascii: bool, top: u16) -
 /// The number of legend rows [`paint_help`] paints for `view` (header + the key
 /// lines + one row per entry), so callers can size a surface before painting.
 pub fn help_height(view: View) -> usize {
-    3 + match view {
+    4 + match view {
         // One approval glyph per state, plus the conflict marker.
         View::Mine => status::APPROVAL_ORDER.len() + 1,
         View::Reviews => status::REVIEW_ORDER.len(),

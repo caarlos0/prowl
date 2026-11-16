@@ -28,7 +28,11 @@ Keys (while watching):
   Ctrl-R           refresh now
   Tab              switch view (your PRs / your reviews)
   ?                toggle the help legend
-  Ctrl-C           quit";
+  Ctrl-C           quit
+
+Mouse (while watching):
+  Wheel            scroll without changing the selection
+  Left click       select a row, open a hyperlink, or switch tabs";
 
 #[derive(Parser, Debug, Clone)]
 #[command(
