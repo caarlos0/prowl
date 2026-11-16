@@ -442,10 +442,14 @@ pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
     use ureq::http::Response;
 
+    type ScheduledResponses = Arc<Mutex<HashMap<(String, usize), Response<String>>>>;
+
     #[derive(Clone)]
     pub(crate) struct Fake {
         routes: Arc<Mutex<HashMap<String, Response<String>>>>,
+        failures: ScheduledResponses,
         requests: Arc<Mutex<Vec<String>>>,
+        calls: Arc<Mutex<HashMap<String, usize>>>,
         now: Arc<Mutex<DateTime<Utc>>>,
     }
 
@@ -461,14 +465,32 @@ pub(crate) mod fake {
             headers: &[(&str, &str)],
             body: &str,
         ) {
+            self.routes
+                .lock()
+                .unwrap()
+                .insert(request.to_string(), Self::response(status, headers, body));
+        }
+
+        pub(crate) fn set_response_on_call(
+            &self,
+            request: &str,
+            call: usize,
+            status: u16,
+            headers: &[(&str, &str)],
+            body: &str,
+        ) {
+            self.failures.lock().unwrap().insert(
+                (request.to_string(), call),
+                Self::response(status, headers, body),
+            );
+        }
+
+        fn response(status: u16, headers: &[(&str, &str)], body: &str) -> Response<String> {
             let mut response = Response::builder().status(status);
             for (name, value) in headers {
                 response = response.header(*name, *value);
             }
-            self.routes.lock().unwrap().insert(
-                request.to_string(),
-                response.body(body.to_string()).unwrap(),
-            );
+            response.body(body.to_string()).unwrap()
         }
 
         pub(crate) fn set_now(&self, now: DateTime<Utc>) {
@@ -481,12 +503,19 @@ pub(crate) mod fake {
 
         pub(super) fn respond(&self, request: String) -> Result<Response<ureq::Body>> {
             self.requests.lock().unwrap().push(request.clone());
+            let call = {
+                let mut calls = self.calls.lock().unwrap();
+                let count = calls.entry(request.clone()).or_default();
+                *count += 1;
+                *count
+            };
             let response = self
-                .routes
+                .failures
                 .lock()
                 .unwrap()
-                .get(&request)
+                .get(&(request.clone(), call))
                 .cloned()
+                .or_else(|| self.routes.lock().unwrap().get(&request).cloned())
                 .ok_or_else(|| anyhow!("GitHub request failed: 404 for {request}"))?;
             Ok(response.map(|body| ureq::Body::builder().data(body)))
         }
@@ -500,7 +529,9 @@ pub(crate) mod fake {
                     .map(|(route, body)| (route, Response::new(body)))
                     .collect(),
             )),
+            failures: Arc::default(),
             requests: Arc::default(),
+            calls: Arc::default(),
             now: Arc::new(Mutex::new(Utc::now())),
         };
         let mut client = Client::new(String::new());
