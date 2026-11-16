@@ -154,12 +154,21 @@ fn fetch(
     want_reviews: bool,
 ) -> Result<Sections> {
     // Release data powers both the "My Shipments" counts and the merged
-    // "RELEASE" column, so fetch it once when either section is shown.
+    // "RELEASE" column, so fetch it once when either section is shown. Only
+    // My Shipments shows the upcoming count, so skip that scan without it.
     // Best-effort: a failure (no releases, empty repo, ...) degrades to an
     // "unavailable" shipments line and blank release cells rather than taking
     // down the whole dashboard.
     let (commit_stats, release_map) = if want_mine && (cli.show_shipments() || cli.show_merged()) {
-        commits::fetch(client, repo, me, default_branch, cli.include_pre_releases).ok()
+        commits::fetch(
+            client,
+            repo,
+            me,
+            default_branch,
+            cli.include_pre_releases,
+            cli.show_shipments(),
+        )
+        .ok()
     } else {
         None
     }
@@ -2014,8 +2023,7 @@ impl<'a> App<'a> {
         let changes = self
             .prev
             .as_ref()
-            .map(|p| tracker.diff(p))
-            .unwrap_or_default();
+            .map_or_else(Changes::default, |p| tracker.diff(p));
         let bell = changes.any();
         self.unread.extend(changes);
 
@@ -3489,5 +3497,200 @@ mod tests {
         });
         assert_eq!(sel.len(), 1, "expected one highlighted row, got {sel:?}");
         assert!(sel[0].contains("#2"), "wrong row highlighted: {:?}", sel[0]);
+    }
+
+    const RELEASES: &str = "GET /repos/o/r/releases?per_page=50&page=1";
+    const GRAPHQL: &str = "POST /graphql";
+
+    fn release(tag: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "draft": false,
+            "prerelease": false,
+            "published_at": "2026-01-01T00:00:00Z",
+        })
+    }
+
+    fn commit(login: &str, message: &str) -> serde_json::Value {
+        serde_json::json!({ "author": { "login": login }, "commit": { "message": message } })
+    }
+
+    /// One GraphQL answer for the merged, queue, and open-PR queries: each
+    /// node parses as both a merged PR and an open PR, and the queue is null.
+    fn graphql(numbers: &[i64]) -> (String, String) {
+        let nodes: Vec<_> = numbers
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "number": n,
+                    "title": format!("PR {n}"),
+                    "url": format!("https://github.com/o/r/pull/{n}"),
+                    "mergedAt": format!("2026-01-0{n}T00:00:00Z"),
+                    "isDraft": false,
+                    "reviewThreads": { "totalCount": 0, "nodes": [] },
+                    "commits": { "nodes": [] },
+                })
+            })
+            .collect();
+        let data = serde_json::json!({ "data": {
+            "search": { "nodes": nodes, "pageInfo": { "hasNextPage": false, "endCursor": null } },
+            "repository": { "mergeQueue": null },
+        }});
+        (GRAPHQL.to_string(), data.to_string())
+    }
+
+    /// Releases v2 and v1: PR 3 is unreleased, PR 2 shipped in v2, PR 1 in v1.
+    fn tagged() -> Vec<(String, String)> {
+        let routes = [
+            (RELEASES, serde_json::json!([release("v2"), release("v1")])),
+            (
+                "GET /repos/o/r/compare/v2...main",
+                serde_json::json!({ "total_commits": 2, "commits": [
+                    commit("me", "feat: three (#3)"),
+                    commit("other", "fix: theirs (#9)"),
+                ]}),
+            ),
+            (
+                "GET /repos/o/r/compare/v1...v2",
+                serde_json::json!({ "total_commits": 1, "commits": [commit("me", "feat: two (#2)")] }),
+            ),
+            (
+                "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+                serde_json::json!([commit("me", "feat: one (#1)")]),
+            ),
+        ];
+        routes
+            .into_iter()
+            .map(|(route, body)| (route.to_string(), body.to_string()))
+            .chain([graphql(&[3, 2, 1])])
+            .collect()
+    }
+
+    /// No releases, so the upcoming count pages through every commit of mine.
+    fn untagged() -> Vec<(String, String)> {
+        let page = |n| format!("GET /repos/o/r/commits?sha=main&author=me&per_page=100&page={n}");
+        vec![
+            (RELEASES.to_string(), "[]".to_string()),
+            (
+                page(1),
+                serde_json::Value::from(vec![commit("me", "chore: old"); 100]).to_string(),
+            ),
+            (
+                page(2),
+                serde_json::json!([commit("me", "feat: one (#1)")]).to_string(),
+            ),
+            graphql(&[1]),
+        ]
+    }
+
+    fn fetch_offline(args: &[&str], routes: Vec<(String, String)>) -> (Sections, Vec<String>) {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let (client, fake) = github::fake::client(routes);
+        let repo = Repo::parse("o/r").unwrap();
+        let sections = fetch(&cli, &client, &repo, "me", "main", true, false).unwrap();
+        (sections, fake.requests())
+    }
+
+    fn shipped(sections: &Sections) -> Vec<(i64, Option<String>)> {
+        sections
+            .merged
+            .iter()
+            .flatten()
+            .map(|row| (row.number, row.release.as_ref().map(|r| r.tag.clone())))
+            .collect()
+    }
+
+    #[test]
+    fn hidden_shipments_fetch_requests() {
+        let (sections, requests) = fetch_offline(&["prowl", "--only", "merged"], tagged());
+        assert_eq!(
+            requests,
+            [
+                RELEASES,
+                "GET /repos/o/r/compare/v1...v2",
+                "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+                GRAPHQL,
+            ]
+        );
+        assert_eq!(
+            shipped(&sections),
+            [
+                (3, None),
+                (2, Some("v2".to_string())),
+                (1, Some("v1".to_string())),
+            ]
+        );
+        assert!(sections.commits.is_none());
+
+        let (sections, requests) = fetch_offline(&["prowl", "--only", "merged"], untagged());
+        assert_eq!(requests, [RELEASES, GRAPHQL]);
+        assert_eq!(shipped(&sections), [(1, None)]);
+        assert!(sections.commits.is_none());
+    }
+
+    #[test]
+    fn shown_shipments_fetch_requests() {
+        let (sections, requests) = fetch_offline(&["prowl"], tagged());
+        assert_eq!(
+            requests,
+            [
+                RELEASES,
+                "GET /repos/o/r/compare/v2...main",
+                "GET /repos/o/r/compare/v1...v2",
+                "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+                GRAPHQL,
+                GRAPHQL,
+                GRAPHQL,
+            ]
+        );
+        assert_eq!(
+            shipped(&sections),
+            [
+                (3, None),
+                (2, Some("v2".to_string())),
+                (1, Some("v1".to_string())),
+            ]
+        );
+        let count = |mine| commits::Count {
+            mine,
+            capped: false,
+        };
+        let stats = sections.commits.unwrap();
+        assert_eq!(
+            stats.upcoming,
+            Some(commits::Bucket {
+                count: count(1),
+                url: "https://github.com/o/r/compare/v2...main".to_string(),
+            })
+        );
+        let releases: Vec<_> = stats
+            .releases
+            .iter()
+            .map(|r| (r.tag.as_str(), r.bucket.count))
+            .collect();
+        assert_eq!(releases, [("v2", count(1)), ("v1", count(1))]);
+
+        let (sections, requests) = fetch_offline(&["prowl"], untagged());
+        assert_eq!(
+            requests,
+            [
+                RELEASES,
+                "GET /repos/o/r/commits?sha=main&author=me&per_page=100&page=1",
+                "GET /repos/o/r/commits?sha=main&author=me&per_page=100&page=2",
+                GRAPHQL,
+                GRAPHQL,
+                GRAPHQL,
+            ]
+        );
+        assert_eq!(shipped(&sections), [(1, None)]);
+        let stats = sections.commits.unwrap();
+        assert_eq!(
+            stats.upcoming,
+            Some(commits::Bucket {
+                count: count(101),
+                url: "https://github.com/o/r/commits/main".to_string(),
+            })
+        );
+        assert_eq!(stats.releases, []);
     }
 }

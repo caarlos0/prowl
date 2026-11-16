@@ -204,8 +204,7 @@ pub struct Login {
 pub fn queue_nodes(data: QueueData) -> Vec<QueueEntryNode> {
     data.repository
         .and_then(|r| r.merge_queue)
-        .map(|q| q.entries.nodes)
-        .unwrap_or_default()
+        .map_or_else(Vec::new, |q| q.entries.nodes)
 }
 
 /// The queue-level estimate (seconds until a newly added entry would merge),

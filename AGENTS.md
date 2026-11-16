@@ -91,7 +91,8 @@ watch event loop); everything else is testable modules:
   not on refresh.
 - `github.rs` — `Client` (HTTP `graphql()`/`get()`), `Repo`, `me()`,
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
-  `parse_graphql()`.
+  `parse_graphql()`. The test-only `github::fake` answers `get()`/`graphql()`
+  from memory and logs each request attempt (`METHOD /path?query`).
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
@@ -213,6 +214,9 @@ watch event loop); everything else is testable modules:
   shipped it, parsed from each commit subject's trailing `(#NNN)`, the squash /
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
+  The upcoming scan runs only when `fetch` is asked to count it; `lib::fetch`
+  asks only while My Shipments is shown, because the release ranges alone
+  build the `ReleaseMap`.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
@@ -542,6 +546,8 @@ still performs all teardown through `finish`.
 - Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
   merged:>=<since>)` (reuses the merged query/limit).
 - Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
+  The upcoming range (latest tag → default branch, or all of the default
+  branch without a tag) is fetched only while My Shipments is shown.
 
 ## Build / test / lint
 
@@ -601,7 +607,12 @@ notarization.
 Tests are offline: JSON fixtures under `tests/fixtures/` (real captures + a
 crafted queue) drive parsing → rows → render in `tests/parsing.rs`, plus
 per-module unit tests. `tests/config.rs` exercises startup config paths, errors,
-and help/version without network calls. No network in tests.
+and help/version without network calls. No network in tests: to pin the
+requests a fetch path sends, build the client with `github::fake::client`
+(canned JSON by `METHOD /path?query`) and assert its request log. It counts
+`Client::get`/`graphql` calls before they reach ureq, not wire requests
+(ureq can follow redirects); it does not exercise ureq or GraphQL rate-limit
+cost.
 
 ## Conventions
 
