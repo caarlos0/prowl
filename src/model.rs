@@ -1,14 +1,14 @@
 //! Typed serde models for the GitHub GraphQL queries, plus the fetch
 //! helpers that run them. Most queries are sent verbatim; the merged query
-//! interpolates its page size, and required-check queries batch one aliased
-//! commit lookup per pull request.
+//! interpolates its page size, and required-check queries batch aliased ref and
+//! commit lookups.
 
 use crate::cli::OpenSort;
 use crate::github::{Client, Repo};
 use crate::status::{self, Approval, Checks};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 // ----------------------------------------------------------------------------
@@ -549,28 +549,12 @@ pub(crate) fn fetch_my_prs_with_context_cache(
 // Required status checks
 // ----------------------------------------------------------------------------
 
-const REQUIRED_CONTEXTS_QUERY: &str = r#"query($id: ID!, $after: String) {
-  node(id: $id) {
-    ... on Ref {
-      refUpdateRule { requiredStatusCheckContexts }
-      rules(first: 100, after: $after) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          parameters {
-            __typename
-            ... on RequiredStatusChecksParameters {
-              requiredStatusChecks { context }
-            }
-          }
-        }
-      }
-    }
-  }
-}"#;
+const REQUIRED_CONTEXTS_BATCH_SIZE: usize = 5;
 
 #[derive(Debug, Deserialize)]
-struct RequiredRefData {
-    node: Option<RequiredRef>,
+struct RequiredRefsData {
+    #[serde(flatten)]
+    refs: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -629,27 +613,6 @@ impl RequiredRef {
     }
 }
 
-fn fetch_required_contexts(
-    id: &str,
-    mut fetch: impl FnMut(&str, serde_json::Value) -> Result<RequiredRefData>,
-) -> Result<HashSet<String>> {
-    let mut contexts = HashSet::new();
-    let mut after: Option<String> = None;
-    loop {
-        let data = fetch(
-            REQUIRED_CONTEXTS_QUERY,
-            serde_json::json!({ "id": id, "after": after }),
-        )?;
-        after = data
-            .node
-            .context("required-check base branch was unavailable")?
-            .add_to(&mut contexts)?;
-        if after.is_none() {
-            return Ok(contexts);
-        }
-    }
-}
-
 #[derive(Debug)]
 struct RequiredTarget {
     pull_request_number: i64,
@@ -660,19 +623,6 @@ struct RequiredTarget {
 #[derive(Debug, Default)]
 pub(crate) struct RequiredContextCache {
     contexts: HashMap<String, HashSet<String>>,
-}
-
-impl RequiredContextCache {
-    fn fetch_if_missing(
-        &mut self,
-        id: &str,
-        fetch: impl FnOnce() -> Result<HashSet<String>>,
-    ) -> Result<()> {
-        if let Entry::Vacant(entry) = self.contexts.entry(id.to_string()) {
-            entry.insert(fetch()?);
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Default)]
@@ -800,6 +750,99 @@ struct PendingRequired {
     after: Option<String>,
 }
 
+#[derive(Debug)]
+struct PendingRequiredRules {
+    id: String,
+    after: Option<String>,
+    contexts: HashSet<String>,
+}
+
+fn required_rules_query(pending: &[PendingRequiredRules]) -> (String, serde_json::Value) {
+    let mut declarations = Vec::with_capacity(pending.len() * 2);
+    let mut fields = String::new();
+    let mut variables = serde_json::Map::new();
+    for (alias, item) in pending.iter().enumerate() {
+        declarations.extend([format!("$id{alias}: ID!"), format!("$after{alias}: String")]);
+        write!(
+            fields,
+            r#"r{alias}: node(id: $id{alias}) {{
+  ... on Ref {{
+    refUpdateRule {{ requiredStatusCheckContexts }}
+    rules(first: 100, after: $after{alias}) {{
+      pageInfo {{ hasNextPage endCursor }}
+      nodes {{
+        parameters {{
+          __typename
+          ... on RequiredStatusChecksParameters {{
+            requiredStatusChecks {{ context }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+        )
+        .expect("writing to a String cannot fail");
+        variables.insert(
+            format!("id{alias}"),
+            serde_json::Value::String(item.id.clone()),
+        );
+        variables.insert(format!("after{alias}"), serde_json::json!(item.after));
+    }
+    (
+        format!("query({}) {{\n{fields}}}", declarations.join(", ")),
+        serde_json::Value::Object(variables),
+    )
+}
+
+fn fetch_required_contexts(
+    ids: &[String],
+    context_cache: &mut RequiredContextCache,
+    mut fetch: impl FnMut(&str, serde_json::Value) -> Result<RequiredRefsData>,
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    let mut pending: Vec<_> = ids
+        .iter()
+        .filter(|id| !context_cache.contexts.contains_key(*id) && seen.insert(id.as_str()))
+        .map(|id| PendingRequiredRules {
+            id: id.clone(),
+            after: None,
+            contexts: HashSet::new(),
+        })
+        .collect();
+
+    while !pending.is_empty() {
+        for batch in pending.chunks_mut(REQUIRED_CONTEXTS_BATCH_SIZE) {
+            let (query, variables) = required_rules_query(batch);
+            let mut data = fetch(&query, variables)?;
+            for (alias, item) in batch.iter_mut().enumerate() {
+                let value = data
+                    .refs
+                    .remove(&format!("r{alias}"))
+                    .with_context(|| format!("required-rule response omitted r{alias}"))?;
+                let rule: Option<RequiredRef> = serde_json::from_value(value)
+                    .with_context(|| format!("could not parse required-rule response r{alias}"))?;
+                let rule = rule.with_context(|| {
+                    format!("required-check base branch {} was unavailable", item.id)
+                })?;
+                item.after = rule.add_to(&mut item.contexts)?;
+            }
+        }
+        pending.retain_mut(|item| {
+            if item.after.is_some() {
+                true
+            } else {
+                context_cache
+                    .contexts
+                    .insert(item.id.clone(), std::mem::take(&mut item.contexts));
+                false
+            }
+        });
+    }
+    Ok(())
+}
+
 fn required_query(pending: &[PendingRequired]) -> (String, serde_json::Value) {
     let mut declarations = Vec::with_capacity(pending.len() * 3);
     let mut fields = String::new();
@@ -879,14 +922,14 @@ fn fetch_required(
     required_only: bool,
     context_cache: &mut RequiredContextCache,
 ) -> Result<Vec<RequiredSummary>> {
-    for id in targets
+    let base_ref_ids: Vec<_> = targets
         .iter()
         .filter_map(|target| target.base_ref_id.as_ref())
-    {
-        context_cache.fetch_if_missing(id, || {
-            fetch_required_contexts(id, |query, variables| client.graphql(query, variables))
-        })?;
-    }
+        .cloned()
+        .collect();
+    fetch_required_contexts(&base_ref_ids, context_cache, |query, variables| {
+        client.graphql(query, variables)
+    })?;
     let empty = HashSet::new();
     let expected = |target: &RequiredTarget| {
         target
@@ -1359,16 +1402,20 @@ mod tests {
     }
 
     fn required_rules_response() -> String {
-        serde_json::json!({
-            "data": {
-                "node": {
-                    "refUpdateRule": { "requiredStatusCheckContexts": ["test", "lint"] },
-                    "rules": {
-                        "pageInfo": { "hasNextPage": false, "endCursor": null },
-                        "nodes": []
-                    }
-                },
-                "c0": {
+        let required_rules = serde_json::json!({
+            "refUpdateRule": { "requiredStatusCheckContexts": ["test", "lint"] },
+            "rules": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": []
+            }
+        });
+        let mut data = serde_json::json!({});
+        for alias in 0..5 {
+            let object = data.as_object_mut().unwrap();
+            object.insert(format!("r{alias}"), required_rules.clone());
+            object.insert(
+                format!("c{alias}"),
+                serde_json::json!({
                     "statusCheckRollup": {
                         "contexts": {
                             "pageInfo": { "hasNextPage": false, "endCursor": null },
@@ -1382,10 +1429,10 @@ mod tests {
                             }]
                         }
                     }
-                }
-            }
-        })
-        .to_string()
+                }),
+            );
+        }
+        serde_json::json!({ "data": data }).to_string()
     }
 
     fn required_rule_page(after: Option<&str>) -> serde_json::Value {
@@ -1395,98 +1442,186 @@ mod tests {
             (false, Some("LAST"), "lint")
         };
         serde_json::json!({
-            "node": {
-                "refUpdateRule": if after.is_none() {
-                    serde_json::json!({ "requiredStatusCheckContexts": ["classic"] })
-                } else {
-                    serde_json::Value::Null
-                },
-                "rules": {
-                    "pageInfo": { "hasNextPage": has_next_page, "endCursor": end_cursor },
-                    "nodes": [{
-                        "parameters": {
-                            "__typename": "RequiredStatusChecksParameters",
-                            "requiredStatusChecks": [{ "context": context }]
-                        }
-                    }]
-                }
+            "refUpdateRule": if after.is_none() {
+                serde_json::json!({ "requiredStatusCheckContexts": ["classic"] })
+            } else {
+                serde_json::Value::Null
+            },
+            "rules": {
+                "pageInfo": { "hasNextPage": has_next_page, "endCursor": end_cursor },
+                "nodes": [{
+                    "parameters": {
+                        "__typename": "RequiredStatusChecksParameters",
+                        "requiredStatusChecks": [{ "context": context }]
+                    }
+                }]
             }
         })
     }
 
     #[test]
-    fn required_rule_dispatch_counts_for_shared_and_disjoint_refs() {
-        for (case, base_refs, expected_per_refresh) in [
-            ("shared", ["ref-1", "ref-1"], 3),
-            ("disjoint", ["ref-1", "ref-2"], 4),
-        ] {
+    fn required_rule_dispatch_counts_for_one_five_and_six_refs() {
+        for (case, ref_count, expected_per_refresh) in
+            [("one", 1, 2), ("five", 5, 2), ("six", 6, 4)]
+        {
             for required_only in [false, true] {
                 let (client, fake) = crate::github::fake::client([(
                     "POST /graphql".to_string(),
                     required_rules_response(),
                 )]);
+                let mut requests_per_refresh = Vec::new();
                 for _ in 0..2 {
+                    let request_count = fake.requests().len();
                     let mut cache = RequiredContextCache::default();
-                    for (index, base_ref_id) in base_refs.into_iter().enumerate() {
-                        let target = RequiredTarget {
-                            pull_request_number: 100 + i64::try_from(index).unwrap(),
+                    let targets: Vec<_> = (0..ref_count)
+                        .map(|index| RequiredTarget {
+                            pull_request_number: 100 + i64::from(index),
                             commit_id: Some(format!("commit-{index}")),
-                            base_ref_id: Some(base_ref_id.to_string()),
-                        };
-                        let summary =
-                            fetch_required(&client, &[target], required_only, &mut cache).unwrap();
-                        assert_eq!(summary[0].checks.pass, 1, "{case}, {required_only}");
-                        assert_eq!(summary[0].missing, 1, "{case}, {required_only}");
+                            base_ref_id: Some(format!("ref-{index}")),
+                        })
+                        .collect();
+                    let summaries =
+                        fetch_required(&client, &targets, required_only, &mut cache).unwrap();
+                    for summary in summaries {
+                        assert_eq!(summary.checks.pass, 1, "{case}, {required_only}");
+                        assert_eq!(summary.missing, 1, "{case}, {required_only}");
                     }
+                    requests_per_refresh.push(fake.requests().len() - request_count);
                 }
                 assert_eq!(
-                    fake.requests().len(),
-                    expected_per_refresh * 2,
-                    "{case}, required_only={required_only}"
+                    requests_per_refresh, [expected_per_refresh; 2],
+                    "{case}, required_only={required_only}",
                 );
             }
         }
     }
 
     #[test]
-    fn required_rule_paginated_dispatches_across_refreshes() {
-        for (case, refs, per_refresh) in [
-            ("shared", ["ref-1", "ref-1"], 2),
-            ("disjoint", ["ref-1", "ref-2"], 4),
-        ] {
-            let (first, first_log) = crate::github::fake::client([(
+    fn required_rule_dispatch_counts_overlapping_and_disjoint_sections() {
+        for required_only in [false, true] {
+            let (client, fake) = crate::github::fake::client([(
                 "POST /graphql".to_string(),
-                serde_json::json!({ "data": required_rule_page(None) }).to_string(),
+                required_rules_response(),
             )]);
-            let (last, last_log) = crate::github::fake::client([(
-                "POST /graphql".to_string(),
-                serde_json::json!({ "data": required_rule_page(Some("NEXT")) }).to_string(),
-            )]);
-            for refresh in 1..=2 {
+            let mut requests_per_refresh = Vec::new();
+            for _ in 0..2 {
+                let request_count = fake.requests().len();
                 let mut cache = RequiredContextCache::default();
-                for id in refs {
-                    cache
-                        .fetch_if_missing(id, || {
-                            fetch_required_contexts(id, |query, variables| {
-                                assert_eq!(variables["id"], id);
-                                let client = match variables["after"].as_str() {
-                                    None => &first,
-                                    Some("NEXT") => &last,
-                                    cursor => panic!("unexpected rules cursor: {cursor:?}"),
-                                };
-                                client.graphql(query, variables)
-                            })
+                for (start, end) in [(0, 5), (3, 8)] {
+                    let targets: Vec<_> = (start..end)
+                        .map(|index| RequiredTarget {
+                            pull_request_number: 100 + i64::try_from(index).unwrap(),
+                            commit_id: Some(format!("commit-{index}")),
+                            base_ref_id: Some(format!("ref-{index}")),
                         })
-                        .unwrap();
-                    assert_eq!(
-                        cache.contexts[id],
-                        HashSet::from(["classic".into(), "test".into(), "lint".into()])
-                    );
+                        .collect();
+                    let summaries =
+                        fetch_required(&client, &targets, required_only, &mut cache).unwrap();
+                    assert_eq!(summaries.len(), end - start);
+                    assert!(summaries.iter().all(|summary| summary.missing == 1));
                 }
-                let requests = first_log.requests().len() + last_log.requests().len();
-                println!("PAGINATED_RULES {case} refresh={refresh} POST={requests}");
-                assert_eq!(requests, per_refresh * refresh, "{case}");
+                requests_per_refresh.push(fake.requests().len() - request_count);
             }
+            assert_eq!(
+                requests_per_refresh, [4; 2],
+                "required_only={required_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_rules_batch_pages_keep_each_ref_cursor() {
+        let ids: Vec<_> = (0..6).map(|index| format!("ref-{index}")).collect();
+        let mut cache = RequiredContextCache::default();
+        let mut requests = Vec::new();
+        fetch_required_contexts(&ids, &mut cache, |query, variables| {
+            let count = variables.as_object().unwrap().len() / 2;
+            assert!((1..=REQUIRED_CONTEXTS_BATCH_SIZE).contains(&count));
+            let mut request = Vec::new();
+            let mut refs = HashMap::new();
+            for alias in 0..count {
+                assert!(query.contains(&format!("r{alias}: node(id: $id{alias})")));
+                assert!(query.contains(&format!("rules(first: 100, after: $after{alias})")));
+                let id = variables[format!("id{alias}")].as_str().unwrap();
+                let after = variables[format!("after{alias}")]
+                    .as_str()
+                    .map(str::to_string);
+                let (has_next, end_cursor, context) = match (id, after.as_deref()) {
+                    ("ref-0", None) => (true, Some("A"), "ref-0-first"),
+                    ("ref-0", Some("A")) => (false, None, "ref-0-second"),
+                    ("ref-1", None) => (true, Some("B"), "ref-1-first"),
+                    ("ref-1", Some("B")) => (false, None, "ref-1-second"),
+                    _ => (false, None, "single-page"),
+                };
+                let rule = serde_json::json!({
+                    "refUpdateRule": if after.is_none() {
+                        serde_json::json!({ "requiredStatusCheckContexts": [format!("classic-{id}")] })
+                    } else {
+                        serde_json::Value::Null
+                    },
+                    "rules": {
+                        "pageInfo": { "hasNextPage": has_next, "endCursor": end_cursor },
+                        "nodes": [{
+                            "parameters": {
+                                "__typename": "RequiredStatusChecksParameters",
+                                "requiredStatusChecks": [{ "context": context }]
+                            }
+                        }]
+                    }
+                });
+                request.push((id.to_string(), after));
+                refs.insert(format!("r{alias}"), rule);
+            }
+            requests.push(request);
+            Ok(RequiredRefsData { refs })
+        })
+        .unwrap();
+
+        assert_eq!(
+            requests,
+            [
+                (0..5)
+                    .map(|index| (format!("ref-{index}"), None))
+                    .collect::<Vec<_>>(),
+                vec![("ref-5".to_string(), None)],
+                vec![
+                    ("ref-0".to_string(), Some("A".to_string())),
+                    ("ref-1".to_string(), Some("B".to_string())),
+                ],
+            ]
+        );
+        for id in ids {
+            assert_eq!(
+                cache.contexts[&id].len(),
+                if id == "ref-0" || id == "ref-1" { 3 } else { 2 },
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_rules_missing_alias_is_an_error_and_caches_nothing() {
+        let ids = ["ref-0".to_string(), "ref-1".to_string()];
+        for (refs, expected_error) in [
+            (
+                HashMap::from([("r0".to_string(), required_rule_page(None))]),
+                "required-rule response omitted r1",
+            ),
+            (
+                HashMap::from([
+                    ("r0".to_string(), serde_json::Value::Null),
+                    ("r1".to_string(), required_rule_page(None)),
+                ]),
+                "required-check base branch ref-0 was unavailable",
+            ),
+        ] {
+            let mut cache = RequiredContextCache::default();
+            let error = fetch_required_contexts(&ids, &mut cache, |_, _| {
+                Ok(RequiredRefsData { refs: refs.clone() })
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error:#}");
+            assert!(cache.contexts.is_empty());
         }
     }
 
@@ -1494,15 +1629,16 @@ mod tests {
     fn required_rule_cache_only_stores_complete_paginated_results() {
         let mut cache = RequiredContextCache::default();
         let mut failed_cursors = Vec::new();
-        let error = cache.fetch_if_missing("ref", || {
-            fetch_required_contexts("ref", |query, variables| {
-                assert_eq!(query, REQUIRED_CONTEXTS_QUERY);
-                let after = variables["after"].as_str().map(str::to_string);
-                failed_cursors.push(after.clone());
-                if after.is_some() {
-                    anyhow::bail!("second rules page failed");
-                }
-                Ok(serde_json::from_value(required_rule_page(after.as_deref())).unwrap())
+        let ids = ["ref".to_string()];
+        let error = fetch_required_contexts(&ids, &mut cache, |query, variables| {
+            assert!(query.contains("r0: node(id: $id0)"));
+            let after = variables["after0"].as_str().map(str::to_string);
+            failed_cursors.push(after.clone());
+            if after.is_some() {
+                anyhow::bail!("second rules page failed");
+            }
+            Ok(RequiredRefsData {
+                refs: HashMap::from([("r0".to_string(), required_rule_page(after.as_deref()))]),
             })
         });
         assert!(error.is_err());
@@ -1510,16 +1646,15 @@ mod tests {
         assert!(!cache.contexts.contains_key("ref"));
 
         let mut retried_cursors = Vec::new();
-        cache
-            .fetch_if_missing("ref", || {
-                fetch_required_contexts("ref", |query, variables| {
-                    assert_eq!(query, REQUIRED_CONTEXTS_QUERY);
-                    let after = variables["after"].as_str().map(str::to_string);
-                    retried_cursors.push(after.clone());
-                    Ok(serde_json::from_value(required_rule_page(after.as_deref())).unwrap())
-                })
+        fetch_required_contexts(&ids, &mut cache, |query, variables| {
+            assert!(query.contains("r0: node(id: $id0)"));
+            let after = variables["after0"].as_str().map(str::to_string);
+            retried_cursors.push(after.clone());
+            Ok(RequiredRefsData {
+                refs: HashMap::from([("r0".to_string(), required_rule_page(after.as_deref()))]),
             })
-            .unwrap();
+        })
+        .unwrap();
         assert_eq!(retried_cursors, [None, Some("NEXT".to_string())]);
         assert_eq!(
             cache.contexts["ref"],

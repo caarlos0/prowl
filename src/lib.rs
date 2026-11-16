@@ -4071,7 +4071,7 @@ mod tests {
                 }
             }] }
         });
-        response["data"]["node"] = serde_json::json!({
+        response["data"]["r0"] = serde_json::json!({
             "refUpdateRule": { "requiredStatusCheckContexts": required },
             "rules": {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
