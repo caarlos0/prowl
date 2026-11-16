@@ -6,7 +6,7 @@
 use crate::github::{Client, Repo};
 use anyhow::Result;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitStats {
@@ -235,6 +235,47 @@ fn range_mine(
         Some(base) => compare_mine(client, repo, me, base, head),
         None => reachable_mine(client, repo, me, head),
     }
+}
+
+/// Build the release map for the displayed merged PRs, stopping when all of
+/// them are mapped. An unmapped PR can still be unreleased, so it requires the
+/// full scan.
+pub(crate) fn fetch_release_map(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    include_prereleases: bool,
+    prs: &[i64],
+) -> Result<ReleaseMap> {
+    let mut missing: HashSet<_> = prs.iter().copied().collect();
+    let mut map = ReleaseMap::new();
+    if missing.is_empty() {
+        return Ok(map);
+    }
+
+    let tags = release_tags(client, repo, include_prereleases)?;
+    let base_url = format!("https://github.com/{}/{}", repo.owner, repo.name);
+    for (i, tag) in tags.iter().enumerate().take(RELEASES) {
+        let base = tags.get(i + 1).map(|t| t.name.as_str());
+        let (_, prs) = range_mine(client, repo, me, base, &tag.name)?;
+        let url = format!("{base_url}/releases/tag/{}", tag.name);
+        for n in prs {
+            let n = i64::from(n);
+            if missing.remove(&n) {
+                map.insert(
+                    n,
+                    ReleaseRef {
+                        tag: tag.name.clone(),
+                        url: url.clone(),
+                    },
+                );
+            }
+        }
+        if missing.is_empty() {
+            break;
+        }
+    }
+    Ok(map)
 }
 
 /// Compute the commit stats for `repo` (my work in each of the last
