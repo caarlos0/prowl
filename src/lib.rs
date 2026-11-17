@@ -6659,7 +6659,7 @@ mod tests {
 
         let sent = fake.requests().len();
         let cooldown = refresh_shipments(&client, Some(limited.sections));
-        assert!(new_requests(&fake, sent).is_empty());
+        assert_eq!(fake.requests().len(), sent);
         assert_eq!(
             bucket_counts(&cooldown.sections),
             (Some(1), vec![Some(1); 2])
