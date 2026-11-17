@@ -544,13 +544,21 @@ impl Schedule {
     }
 }
 
+/// Which tracker baselines (open PRs, merged PRs) a refresh has replaced with
+/// trusted live data. Each baseline arms its own part of the bell.
+#[derive(Debug, Default, Clone, Copy)]
+struct Armed {
+    open: bool,
+    merged: bool,
+}
+
 /// Diff a refresh against the tracker baseline. The bool says whether the
-/// bell should ring: only once `armed`, and `armed` is set only by a refresh
-/// that replaced the baseline with trusted live data, so changes made while
-/// prowl was closed never ring.
+/// bell should ring: a change rings only once its baseline is armed, and a
+/// baseline is armed only by a refresh that replaced it with trusted live
+/// data, so changes made while prowl was closed never ring.
 fn track_changes(
     prev: &mut Option<Tracker>,
-    armed: &mut bool,
+    armed: &mut Armed,
     sections: &Sections,
     issues: &[FetchIssue],
 ) -> (Changes, bool) {
@@ -559,8 +567,10 @@ fn track_changes(
     let mut tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
     tracker.preserve_untrusted(prev.as_ref(), open_issue, merged_issue);
     let changes = Tracker::advance(prev, tracker);
-    let ring = *armed && changes.any();
-    *armed |= !open_issue && !merged_issue;
+    let ring = (armed.open && !changes.status_changed.is_empty())
+        || (armed.merged && !changes.newly_merged.is_empty());
+    armed.open |= !open_issue;
+    armed.merged |= !merged_issue;
     (changes, ring)
 }
 
@@ -2725,9 +2735,9 @@ struct App<'a> {
     schedule: Schedule,
     /// Whether a fetch is in flight, so the footer can say `^R refreshing`.
     refreshing: bool,
-    /// Whether the bell is armed. Refreshes before one that replaces the
-    /// baseline with trusted data are silent (they still highlight changes).
-    armed: bool,
+    /// Which baselines arm the bell. Changes in a baseline that no refresh
+    /// has yet replaced with trusted data are silent (they still highlight).
+    armed: Armed,
     /// Whether we've switched from the inline loading frame to the alternate
     /// screen. The watch starts inline and enters the alt screen once the first
     /// fetch lands (or immediately when there's a cache to paint).
@@ -2778,7 +2788,7 @@ impl<'a> App<'a> {
             fetch_issues: Vec::new(),
             schedule: Schedule::default(),
             refreshing: false,
-            armed: false,
+            armed: Armed::default(),
             in_alt: false,
             cursor_shown: false,
         };
@@ -8256,7 +8266,7 @@ mod tests {
             cached.prs.as_deref(),
             cached.merged.as_deref(),
         ));
-        let mut armed = false;
+        let mut armed = Armed::default();
         let warning = FetchIssue::partial(
             FetchScope::Mine,
             &[
@@ -8273,11 +8283,48 @@ mod tests {
         let (changes, second) = track_changes(&mut prev, &mut armed, &passing, &[]);
         assert!(!first && !second);
         assert!(changes.any(), "the offline change is still flagged unread");
-        assert!(armed);
+        assert!(armed.open && armed.merged, "{armed:?}");
 
         let failing = sections(status::Status::Fail);
         let (_, ring) = track_changes(&mut prev, &mut armed, &failing, &[]);
         assert!(ring, "a later real change still rings");
+    }
+
+    #[test]
+    fn repeated_merged_warning_does_not_silence_open_pr_bell() {
+        let sections = |status| {
+            let mut row = queued_open_row(1);
+            row.queue = None;
+            row.status = Some(status);
+            Sections {
+                prs: Some(vec![row]),
+                merged: Some(Vec::new()),
+                ..Sections::EMPTY
+            }
+        };
+        let warning = || {
+            FetchIssue::partial(
+                FetchScope::Merged,
+                &[
+                    serde_json::from_value::<github::GqlError>(serde_json::json!({
+                        "message": "search timeout",
+                        "path": ["mineMerged"],
+                    }))
+                    .unwrap(),
+                ],
+            )
+        };
+        let mut prev = None;
+        let mut armed = Armed::default();
+
+        let pending = sections(status::Status::Pending);
+        let (_, first) = track_changes(&mut prev, &mut armed, &pending, &[warning()]);
+        let passing = sections(status::Status::Pass);
+        let (changes, second) = track_changes(&mut prev, &mut armed, &passing, &[warning()]);
+        assert!(!first, "the first refresh is silent");
+        assert_eq!(changes.status_changed, HashSet::from([1]));
+        assert!(second, "open PR change rings: {armed:?}");
+        assert!(!armed.merged, "merged baseline stays unarmed");
     }
 
     #[test]

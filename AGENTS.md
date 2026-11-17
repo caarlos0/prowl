@@ -537,11 +537,13 @@ still performs all teardown through `finish`.
   `/` search, the first number counts the matching rows.
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
-  not ring). The bell is armed only after a refresh that replaced the change
-  baseline with trusted live data (no Mine or Merged issue, warnings included,
-  `lib.rs::track_changes`); until then refreshes are silent, so a cached start
-  with a partial first refresh never rings for changes made while prowl was
-  closed. Changed rows get a `▸` marker. Bell
+  not ring). The open-PR and merged baselines arm the bell independently
+  (`lib.rs::Armed`, `lib.rs::track_changes`): each arms after a refresh that
+  replaced it with trusted live data (no Mine issue for open PRs, no Merged
+  issue for merged PRs, warnings included). Until then that baseline's changes
+  are silent, so a cached start with a partial first refresh never rings for
+  changes made while prowl was closed, and a repeated warning in one section
+  does not silence the other. Changed rows get a `▸` marker. Bell
   and change markers track the **Mine** view only (the Reviews view conveys
   state through its per-row glyph instead). While Reviews is active, Mine
   changes are detected when the Mine view is next fetched (at most two
