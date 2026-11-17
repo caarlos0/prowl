@@ -235,6 +235,13 @@ impl FetchOutcome {
         self.issues.iter().any(|issue| !issue.warning)
     }
 
+    fn has_fresh_mine_data(&self) -> bool {
+        self.sections.merged.is_some()
+            || self.sections.queue.is_some()
+            || self.sections.prs.is_some()
+            || self.sections.commits.is_some()
+    }
+
     fn reconcile(mut self, previous: Option<Sections>) -> Self {
         let mut previous = previous.unwrap_or(Sections::EMPTY);
         for issue in &mut self.issues {
@@ -399,6 +406,7 @@ struct Schedule {
     mine_refreshes: u64,
     shipments_at_mine_refresh: Option<u64>,
     mine: Option<Fetched>,
+    mine_data: Option<Fetched>,
     reviews: Option<Fetched>,
     shipments: Option<Fetched>,
 }
@@ -456,6 +464,7 @@ impl Schedule {
         issues: &[FetchIssue],
         at: chrono::DateTime<chrono::Utc>,
         shipment_scan: bool,
+        mine_data_updated: bool,
     ) {
         let fetched = Some(Fetched {
             refresh: self.refresh,
@@ -464,6 +473,9 @@ impl Schedule {
         let succeeded = |view| {
             due.includes(view) && !issues.iter().any(|i| !i.warning && i.scope.view() == view)
         };
+        if due.mine && mine_data_updated {
+            self.mine_data = fetched;
+        }
         if succeeded(View::Mine) {
             self.mine = fetched;
             self.mine_refreshes += 1;
@@ -494,7 +506,7 @@ impl Schedule {
 
     fn shipments_age_note(&self, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
         let shipments = self.shipments?;
-        let mine = self.mine?;
+        let mine = self.mine_data?;
         if shipments.refresh >= mine.refresh {
             return None;
         }
@@ -2670,6 +2682,7 @@ impl<'a> App<'a> {
                         &outcome.issues,
                         chrono::Utc::now(),
                         outcome.shipment_scan,
+                        outcome.has_fresh_mine_data(),
                     );
                     self.apply(outcome, due)?;
                     return Ok(Flow::Continue);
@@ -3707,6 +3720,50 @@ mod tests {
         assert_eq!(
             format!("{error:#}"),
             "opening https://merged/2: opener unavailable"
+        );
+    }
+
+    #[test]
+    fn shipment_age_tracks_fresh_mine_data_after_a_partial_refresh() {
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let mut schedule = Schedule::default();
+        let first = schedule.next(View::Mine, false, true);
+        schedule.record(first, &[], start, true, true);
+        assert_eq!(schedule.shipments_age_note(start), None);
+
+        let second = schedule.next(View::Mine, false, true);
+        assert!(!second.shipments);
+        let updated = start + chrono::TimeDelta::minutes(5);
+        let partial = FetchOutcome {
+            sections: Sections {
+                merged: Some(Vec::new()),
+                ..Sections::EMPTY
+            },
+            issues: vec![FetchIssue::new(
+                FetchScope::Mine,
+                &anyhow::anyhow!("open PR request failed"),
+            )],
+            shipment_scan: false,
+        };
+        schedule.record(
+            second,
+            &partial.issues,
+            updated,
+            partial.shipment_scan,
+            partial.has_fresh_mine_data(),
+        );
+        let partial = partial.merge(Some(Sections::EMPTY), Vec::new(), second);
+
+        assert_eq!(schedule.mine.map(|fetched| fetched.refresh), Some(1));
+        assert_eq!(schedule.mine_data.map(|fetched| fetched.refresh), Some(2));
+        assert!(partial.sections.merged.is_some());
+        assert_eq!(
+            schedule.shipments_age_note(updated).as_deref(),
+            Some("updated 5m ago")
+        );
+        assert!(
+            !schedule.next(View::Mine, false, true).shipments,
+            "a partial Mine refresh must not advance the successful-refresh cadence"
         );
     }
 
@@ -5472,7 +5529,13 @@ mod tests {
                 let outcome = fetch_views(&client, due);
                 let after = counts(&fake.requests()[sent..]);
                 let now = start + chrono::TimeDelta::minutes(5 * tick);
-                schedule.record(due, &outcome.issues, now, outcome.shipment_scan);
+                schedule.record(
+                    due,
+                    &outcome.issues,
+                    now,
+                    outcome.shipment_scan,
+                    outcome.has_fresh_mine_data(),
+                );
                 let outcome = outcome.merge(last_good.take(), std::mem::take(&mut issues), due);
                 println!(
                     "TICK_COUNTS {label}: before GET={} POST={} after GET={} POST={}",
@@ -5563,12 +5626,12 @@ mod tests {
         let mut schedule = Schedule::default();
         for tick in 1..=2 {
             let due = schedule.next(View::Mine, false, false);
-            schedule.record(due, &[], at(tick), false);
+            schedule.record(due, &[], at(tick), false, false);
         }
 
         let due = schedule.next(View::Mine, false, false);
         assert!(due.reviews, "{due:?}");
-        schedule.record(due, &failed, at(3), false);
+        schedule.record(due, &failed, at(3), false, false);
 
         assert_eq!(
             schedule.age_note(View::Reviews, at(3)).as_deref(),
@@ -5589,7 +5652,7 @@ mod tests {
         let mut schedule = Schedule::default();
         let due = schedule.next(View::Mine, false, false);
         assert!(due.reviews, "{due:?}");
-        schedule.record(due, &partial, at(1), false);
+        schedule.record(due, &partial, at(1), false, false);
 
         assert_eq!(schedule.age_note(View::Reviews, at(1)), None);
         let due = schedule.next(View::Mine, false, false);
@@ -5603,7 +5666,7 @@ mod tests {
 
         let due = schedule.next(View::Mine, false, true);
         assert!(due.shipments);
-        schedule.record(due, &[], at, false);
+        schedule.record(due, &[], at, false, false);
 
         let due = schedule.next(View::Mine, false, true);
         assert!(due.shipments, "a skipped scan must stay due");
@@ -5611,7 +5674,7 @@ mod tests {
             FetchScope::Shipments,
             &anyhow::anyhow!("rate limit"),
         )];
-        schedule.record(due, &failure, at, true);
+        schedule.record(due, &failure, at, true, false);
 
         assert!(
             schedule.next(View::Mine, false, true).shipments,
@@ -6426,6 +6489,7 @@ mod tests {
             &first.issues,
             start + chrono::TimeDelta::minutes(5),
             first.shipment_scan,
+            first.has_fresh_mine_data(),
         );
         let first = first.merge(None, Vec::new(), first_due);
         assert_eq!(shipped(&first.sections), [(2, Some("v2".to_string()))]);
@@ -6448,6 +6512,7 @@ mod tests {
             &second.issues,
             start + chrono::TimeDelta::minutes(10),
             second.shipment_scan,
+            second.has_fresh_mine_data(),
         );
         let second = second.merge(Some(first.sections), first.issues, second_due);
         let rows = second.sections.merged.as_ref().unwrap();
