@@ -108,6 +108,14 @@ watch event loop); everything else is testable modules:
   `default_branch()`, `detect_repo()` (parses the git `origin` remote),
   `parse_graphql()`. Client clones share rate-limit deadlines: primary REST
   core and GraphQL budgets stay separate, while secondary limits block both.
+  A cooldown refusal is a typed `RateLimited` error (same message) that
+  `me()` downcasts. `me()` uses REST `GET /user`; only when that is refused
+  by a core cooldown or limit does it send one `viewer { login }` query through
+  the normal GraphQL gate, so a core-exhausted start still renders GraphQL
+  sections. A secondary limit, GraphQL limit, 401, or other 403 does not fall
+  back, and nothing is retried, waited for, or persisted. `--login` shares it.
+  REST sections (shipments, release annotations) stay unavailable until core
+  resets.
   Clones also share a per-client, in-memory cache of up to 32 successful REST
   GET responses with ETags. The cache keeps only fields parsed by the caller,
   promotes reused entries ahead of older unused entries, and sends
@@ -587,6 +595,8 @@ still performs all teardown through `finish`.
   refreshes use the same gate; there are no automatic retries, sleeps, or new
   refresh timers. The next call after expiry proceeds normally. Cooldowns are
   shared only by clones of that client, not persisted or shared across processes.
+  A REST core limit at startup does not block identity: see `me()` above, and
+  the watch reuses the resolved login on later refreshes.
 - **Navigation / open:** a lazy selection cursor (`nav`, watch only) — `None`
   until the first movement key, then the chosen row is painted with the
   selection background (`status::SURFACE`) edge to edge across the full width

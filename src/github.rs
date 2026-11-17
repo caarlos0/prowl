@@ -170,7 +170,7 @@ impl Envelope<serde_json::Value> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Resource {
     Core,
     Graphql,
@@ -179,17 +179,37 @@ enum Resource {
 
 impl Resource {
     fn error(self, reset: DateTime<Utc>) -> anyhow::Error {
-        let name = match self {
-            Self::Core => "core",
-            Self::Graphql => "graphql",
-            Self::Secondary => "secondary",
+        anyhow::Error::new(RateLimited {
+            resource: self,
+            reset,
+        })
+    }
+}
+
+/// A local refusal because `resource` is cooling down. `Client::me` downcasts
+/// it to tell a core limit from the others.
+#[derive(Debug)]
+struct RateLimited {
+    resource: Resource,
+    reset: DateTime<Utc>,
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self.resource {
+            Resource::Core => "core",
+            Resource::Graphql => "graphql",
+            Resource::Secondary => "secondary",
         };
-        anyhow!(
+        write!(
+            f,
             "GitHub {name} rate limit; retry after {}",
-            reset.format("%Y-%m-%dT%H:%M:%S%.fZ")
+            self.reset.format("%Y-%m-%dT%H:%M:%S%.fZ")
         )
     }
 }
+
+impl std::error::Error for RateLimited {}
 
 fn secondary_limit(message: &str) -> bool {
     message
@@ -525,14 +545,34 @@ impl Client {
         }
     }
 
-    /// The authenticated user's login.
+    /// The authenticated user's login. While the REST core quota is exhausted
+    /// it asks the separate GraphQL quota instead.
     pub fn me(&self) -> Result<String> {
         #[derive(Deserialize, Serialize)]
         struct User {
             login: String,
         }
-        let user: User = self.get("user")?;
-        Ok(user.login)
+        match self.get::<User>("user") {
+            Ok(user) => Ok(user.login),
+            Err(err)
+                if err
+                    .downcast_ref::<RateLimited>()
+                    .is_some_and(|limit| limit.resource == Resource::Core) =>
+            {
+                #[derive(Deserialize)]
+                struct Viewer {
+                    login: String,
+                }
+                #[derive(Deserialize)]
+                struct Data {
+                    viewer: Viewer,
+                }
+                let data: Data =
+                    self.graphql("query { viewer { login } }", serde_json::json!({}))?;
+                Ok(data.viewer.login)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// The repository's default branch (e.g. `main`).
@@ -1037,7 +1077,7 @@ mod tests {
         assert_eq!(client.me().unwrap(), "me");
         assert!(
             client
-                .me()
+                .get::<serde_json::Value>("user")
                 .unwrap_err()
                 .to_string()
                 .contains("core rate limit")
@@ -1072,7 +1112,13 @@ mod tests {
         assert_eq!(fake.requests(), [REST]);
         fake.set_now(DateTime::from_timestamp(NOW + 90, 0).unwrap());
         assert_eq!(graphql(&client).unwrap()["login"], "me");
-        assert!(client.me().unwrap_err().to_string().contains("core"));
+        assert!(
+            client
+                .get::<serde_json::Value>("user")
+                .unwrap_err()
+                .to_string()
+                .contains("core")
+        );
         assert_eq!(fake.requests(), [REST, GRAPHQL]);
         fake.set_response(REST, 200, &[], USER);
         fake.set_now(DateTime::from_timestamp(NOW + 120, 0).unwrap());
@@ -1101,6 +1147,104 @@ mod tests {
                 assert_eq!(graphql(&client).unwrap()["login"], "me");
             }
             assert_eq!(fake.requests(), [REST, GRAPHQL, REST, GRAPHQL]);
+        }
+    }
+
+    const VIEWER: &str = r#"{"data":{"viewer":{"login":"me"}}}"#;
+    const CORE_LIMITED: &str = r#"{"message":"API rate limit exceeded"}"#;
+    const CORE_EXHAUSTED: [(&str, &str); 3] = [
+        ("x-ratelimit-resource", "core"),
+        ("x-ratelimit-remaining", "0"),
+        ("x-ratelimit-reset", RESET),
+    ];
+
+    #[test]
+    fn healthy_identity_uses_rest_only() {
+        let (client, fake) = client();
+        assert_eq!(client.me().unwrap(), "me");
+        assert_eq!(fake.requests(), [REST]);
+    }
+
+    #[test]
+    fn core_limit_resolves_identity_through_graphql_without_more_rest() {
+        for status in [403, 429] {
+            let (client, fake) = client();
+            fake.set_response(REST, status, &CORE_EXHAUSTED, CORE_LIMITED);
+            fake.set_response(GRAPHQL, 200, &[], VIEWER);
+            assert_eq!(client.me().unwrap(), "me", "status={status}");
+            assert_eq!(client.clone().me().unwrap(), "me", "status={status}");
+            assert_eq!(fake.requests(), [REST, GRAPHQL, GRAPHQL], "status={status}");
+
+            fake.set_response(REST, 200, &[], USER);
+            fake.set_now(DateTime::from_timestamp(NOW + 120, 0).unwrap());
+            assert_eq!(client.me().unwrap(), "me");
+            assert_eq!(fake.requests(), [REST, GRAPHQL, GRAPHQL, REST]);
+        }
+    }
+
+    #[test]
+    fn secondary_limit_does_not_fall_back() {
+        let (client, fake) = client();
+        fake.set_response(
+            REST,
+            403,
+            &[("retry-after", "90"), ("x-ratelimit-remaining", "1")],
+            SECONDARY,
+        );
+        fake.set_response(GRAPHQL, 200, &[], VIEWER);
+        for _ in 0..2 {
+            let err = client.me().unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "GitHub secondary rate limit; retry after 2023-11-14T22:14:50Z"
+            );
+        }
+        assert_eq!(fake.requests(), [REST]);
+    }
+
+    #[test]
+    fn core_limit_with_a_limited_graphql_bucket_fails_once() {
+        let (client, fake) = client();
+        fake.set_response(REST, 403, &CORE_EXHAUSTED, CORE_LIMITED);
+        fake.set_response(
+            GRAPHQL,
+            200,
+            &[
+                ("x-ratelimit-resource", "graphql"),
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1700000300"),
+            ],
+            PRIMARY,
+        );
+        for _ in 0..2 {
+            let err = client.me().unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "GitHub graphql rate limit; retry after 2023-11-14T22:18:20Z"
+            );
+        }
+        assert_eq!(fake.requests(), [REST, GRAPHQL]);
+    }
+
+    #[test]
+    fn unauthorized_and_forbidden_identity_do_not_fall_back() {
+        for (status, message) in [
+            (401, "GitHub rejected the token (401); run `prowl --login`"),
+            (403, "GitHub request failed: http status: 403"),
+        ] {
+            let (client, fake) = client();
+            fake.set_response(
+                REST,
+                status,
+                &[
+                    ("x-ratelimit-resource", "core"),
+                    ("x-ratelimit-remaining", "4000"),
+                ],
+                r#"{"message":"Forbidden"}"#,
+            );
+            fake.set_response(GRAPHQL, 200, &[], VIEWER);
+            assert_eq!(client.me().unwrap_err().to_string(), message);
+            assert_eq!(fake.requests(), [REST], "status={status}");
         }
     }
 
