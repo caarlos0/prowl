@@ -122,6 +122,7 @@ mod tests {
             branch: format!("b/{number}"),
             url: format!("https://x/{number}"),
             release: None,
+            release_unknown: false,
             merged_at: Some("2026-06-19T00:00:00Z".to_string()),
         }
     }
