@@ -251,8 +251,11 @@ watch event loop); everything else is testable modules:
   skips release requests, while an unreleased PR requires the full scan. Watch
   reuses the Mine nodes from its batched merged search for this cutoff without
   fetching them again. Watch mode resolves the default branch when shipments are
-  enabled, even if the initial tab is Reviews, and reuses it on refresh. Default-branch lookup
-  failures still fall back to `main`.
+  enabled, even if the initial tab is Reviews, and reuses only a successful
+  resolution. A failed lookup leaves the upcoming bucket unavailable while
+  shipped release counts and release-map data are still computed; the next
+  scheduled refresh retries the lookup. No compare request uses a guessed
+  branch.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
