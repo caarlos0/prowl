@@ -90,6 +90,32 @@ impl Tracker {
             newly_merged,
         }
     }
+
+    pub(crate) fn preserve_untrusted(
+        &mut self,
+        previous: Option<&Tracker>,
+        open: bool,
+        merged: bool,
+    ) {
+        if open {
+            if let Some(previous) = previous.filter(|tracker| tracker.open_known) {
+                self.open_status.clone_from(&previous.open_status);
+                self.open_known = true;
+            } else {
+                self.open_status.clear();
+                self.open_known = false;
+            }
+        }
+        if merged {
+            if let Some(previous) = previous.filter(|tracker| tracker.merged_known) {
+                self.merged.clone_from(&previous.merged);
+                self.merged_known = true;
+            } else {
+                self.merged.clear();
+                self.merged_known = false;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +232,42 @@ mod tests {
             !available.diff(&available).any(),
             "the seeded baseline must remain quiet"
         );
+    }
+
+    #[test]
+    fn partial_data_does_not_change_trusted_status_until_a_clean_refresh() {
+        let trusted = Tracker::build(Some(&[pr(1, Some(Status::Fail))]), Some(&[merged(2)]));
+        let mut previous = Some(trusted);
+        let mut partial = Tracker::build(Some(&[pr(1, None)]), Some(&[]));
+        partial.preserve_untrusted(previous.as_ref(), true, true);
+        assert!(!Tracker::advance(&mut previous, partial).any());
+
+        let mut failed = Tracker::build(Some(&[pr(1, None)]), Some(&[]));
+        failed.preserve_untrusted(previous.as_ref(), true, true);
+        assert!(!Tracker::advance(&mut previous, failed).any());
+
+        let clean = Tracker::build(Some(&[pr(1, None)]), Some(&[]));
+        let changes = Tracker::advance(&mut previous, clean);
+        assert_eq!(changes.status_changed, HashSet::from([1]));
+        assert_eq!(changes.newly_merged, HashSet::new());
+    }
+
+    #[test]
+    fn partial_data_without_a_trusted_baseline_stays_unknown_until_clean() {
+        let mut partial = Tracker::build(Some(&[pr(1, None)]), Some(&[merged(2)]));
+        partial.preserve_untrusted(None, true, true);
+
+        let clean = Tracker::build(Some(&[pr(1, None)]), Some(&[merged(2)]));
+        assert!(!clean.diff(&partial).any());
+    }
+
+    #[test]
+    fn partial_open_data_does_not_hide_merged_changes() {
+        let trusted = Tracker::build(Some(&[pr(1, Some(Status::Pass))]), Some(&[]));
+        let mut current = Tracker::build(Some(&[pr(1, None)]), Some(&[merged(2)]));
+        current.preserve_untrusted(Some(&trusted), true, false);
+
+        assert_eq!(current.diff(&trusted).newly_merged, HashSet::from([2]));
     }
 
     #[test]

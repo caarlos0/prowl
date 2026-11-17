@@ -134,6 +134,7 @@ struct FetchIssue {
     scope: FetchScope,
     message: String,
     stale: bool,
+    warning: bool,
 }
 
 impl FetchIssue {
@@ -142,10 +143,34 @@ impl FetchIssue {
             scope,
             message: short_error(error).replace(['\n', '\r'], " "),
             stale: false,
+            warning: false,
+        }
+    }
+
+    fn partial(scope: FetchScope, errors: &[github::GqlError]) -> Self {
+        let mut messages = Vec::new();
+        for error in errors {
+            let message = error.message.replace(['\n', '\r'], " ");
+            if !messages.contains(&message) {
+                messages.push(message);
+            }
+        }
+        Self {
+            scope,
+            message: messages.join("; "),
+            stale: false,
+            warning: true,
         }
     }
 
     fn line(&self) -> String {
+        if self.warning {
+            return format!(
+                "warning: {} partial data: {}",
+                self.scope.label(),
+                self.message
+            );
+        }
         format!(
             "error: {} {}: {}",
             self.scope.label(),
@@ -169,9 +194,24 @@ impl FetchOutcome {
             .join("\n")
     }
 
+    fn warnings(&self) -> Vec<FetchScope> {
+        self.issues
+            .iter()
+            .filter(|issue| issue.warning)
+            .map(|issue| issue.scope)
+            .collect()
+    }
+
+    fn has_errors(&self) -> bool {
+        self.issues.iter().any(|issue| !issue.warning)
+    }
+
     fn reconcile(mut self, previous: Option<Sections>) -> Self {
         let mut previous = previous.unwrap_or(Sections::EMPTY);
         for issue in &mut self.issues {
+            if issue.warning {
+                continue;
+            }
             match issue.scope {
                 FetchScope::Mine => {
                     retain(&mut self.sections.prs, &mut previous.prs, issue);
@@ -238,6 +278,26 @@ fn retain<T>(fresh: &mut Option<T>, previous: &mut Option<T>, issue: &mut FetchI
 fn section<T>(scope: FetchScope, result: Result<T>, issues: &mut Vec<FetchIssue>) -> Option<T> {
     match result {
         Ok(data) => Some(data),
+        Err(error) => {
+            issues.push(FetchIssue::new(scope, &error));
+            None
+        }
+    }
+}
+
+fn graphql_section<T, U>(
+    scope: FetchScope,
+    result: Result<model::GraphqlData<T>>,
+    map: impl FnOnce(T) -> U,
+    issues: &mut Vec<FetchIssue>,
+) -> Option<U> {
+    match result {
+        Ok(response) => {
+            if !response.errors.is_empty() {
+                issues.push(FetchIssue::partial(scope, &response.errors));
+            }
+            Some(map(response.data))
+        }
         Err(error) => {
             issues.push(FetchIssue::new(scope, &error));
             None
@@ -351,15 +411,15 @@ fn fetch(
         merged_nodes.map(|nodes| merged::build_rows(nodes, cli.merged_limit, &release_map));
     let mut required_context_cache = model::RequiredContextCache::default();
     let (queue, queue_next_eta) = if want_mine && cli.show_queue() {
-        section(
+        graphql_section(
             FetchScope::Queue,
             model::fetch_queue_with_context_cache(
                 client,
                 repo,
                 cli.required,
                 &mut required_context_cache,
-            )
-            .map(|(nodes, eta)| (queue::build_rows(nodes, me), eta)),
+            ),
+            |(nodes, eta)| (queue::build_rows(nodes, me), eta),
             &mut issues,
         )
         .map_or((None, None), |(rows, eta)| (Some(rows), eta))
@@ -367,7 +427,7 @@ fn fetch(
         (None, None)
     };
     let prs = if want_mine && cli.show_mine() {
-        section(
+        graphql_section(
             FetchScope::Mine,
             model::fetch_my_prs_with_context_cache(
                 client,
@@ -376,15 +436,15 @@ fn fetch(
                 cli.sort_open,
                 cli.required,
                 &mut required_context_cache,
-            )
-            .map(|nodes| {
+            ),
+            |nodes| {
                 let rows = prs::build_rows(nodes, cli.sort_open);
                 if cli.no_draft {
                     prs::without_drafts(rows)
                 } else {
                     rows
                 }
-            }),
+            },
             &mut issues,
         )
     } else {
@@ -452,14 +512,15 @@ fn fetch_merged_nodes(
     issues: &mut Vec<FetchIssue>,
 ) -> (
     Option<Vec<model::MergedNode>>,
-    Option<Result<Vec<model::MergedNode>>>,
+    Option<Result<model::GraphqlData<Vec<model::MergedNode>>>>,
 ) {
     let since = timefmt::since_date(&cli.merged_window);
     if !want_reviews {
         return (
-            section(
+            graphql_section(
                 FetchScope::Merged,
-                model::fetch_merged(client, repo, me, &since, cli.merged_limit),
+                model::fetch_merged_with_errors(client, repo, me, &since, cli.merged_limit),
+                |nodes| nodes,
                 issues,
             ),
             None,
@@ -467,7 +528,7 @@ fn fetch_merged_nodes(
     }
     match model::fetch_merged_pair(client, repo, me, &since, cli.merged_limit) {
         Ok(pair) => (
-            section(FetchScope::Merged, pair.mine, issues),
+            graphql_section(FetchScope::Merged, pair.mine, |nodes| nodes, issues),
             Some(pair.reviewed),
         ),
         Err(error) => {
@@ -489,31 +550,33 @@ fn fetch_review_sections(
     client: &Client,
     repo: &Repo,
     me: &str,
-    merged_nodes: Option<Result<Vec<model::MergedNode>>>,
+    merged_nodes: Option<Result<model::GraphqlData<Vec<model::MergedNode>>>>,
     issues: &mut Vec<FetchIssue>,
 ) -> (
     Option<Vec<reviews::ReviewRow>>,
     Option<Vec<reviews::ReviewedMergedRow>>,
 ) {
-    let reviews = section(
+    let reviews = graphql_section(
         FetchScope::Reviews,
-        model::fetch_reviews(client, repo, me, cli.review_scope.qualifier()).map(|data| {
+        model::fetch_reviews_with_errors(client, repo, me, cli.review_scope.qualifier()),
+        |data| {
             let rows = reviews::build_open_rows(data);
             if cli.no_draft {
                 reviews::without_drafts(rows)
             } else {
                 rows
             }
-        }),
+        },
         issues,
     );
     let since = timefmt::since_date(&cli.merged_window);
     let merged_nodes = merged_nodes.unwrap_or_else(|| {
-        model::fetch_reviewed_merged(client, repo, me, &since, cli.merged_limit)
+        model::fetch_reviewed_merged_with_errors(client, repo, me, &since, cli.merged_limit)
     });
-    let reviewed_merged = section(
+    let reviewed_merged = graphql_section(
         FetchScope::ReviewedMerged,
-        merged_nodes.map(|nodes| reviews::build_merged_rows(nodes, cli.merged_limit)),
+        merged_nodes,
+        |nodes| reviews::build_merged_rows(nodes, cli.merged_limit),
         issues,
     );
     (reviews, reviewed_merged)
@@ -594,6 +657,7 @@ fn paint_mine(
     s: &mut impl TextSurface,
     sections: &Sections,
     changes: &Changes,
+    warnings: &[FetchScope],
     selected: Option<usize>,
     ascii: bool,
     show_branch: bool,
@@ -643,7 +707,9 @@ fn paint_mine(
             "My open PRs",
             status::GREEN,
             rows.len(),
-            None,
+            warnings
+                .contains(&FetchScope::Mine)
+                .then_some("partial data"),
             "No open PRs.",
             prs_table.as_ref(),
             &alignment,
@@ -662,12 +728,19 @@ fn paint_mine(
                 timefmt::eta(Duration::from_secs(secs.max(0) as u64))
             )
         });
+        let warning = warnings.contains(&FetchScope::Queue);
+        let note = match (eta.as_deref(), warning) {
+            (Some(eta), true) => Some(format!("{eta}; partial data")),
+            (Some(eta), false) => Some(eta.to_string()),
+            (None, true) => Some("partial data".to_string()),
+            (None, false) => None,
+        };
         y = paint_section(
             s,
             "Merge Queue",
             status::PEACH,
             rows.len(),
-            eta.as_deref(),
+            note.as_deref(),
             "No merge queue.",
             queue_table.as_ref(),
             &alignment,
@@ -683,7 +756,9 @@ fn paint_mine(
             "My merged PRs",
             status::MAUVE,
             rows.len(),
-            None,
+            warnings
+                .contains(&FetchScope::Merged)
+                .then_some("partial data"),
             "No recent merged PRs.",
             merged_table.as_ref(),
             &alignment,
@@ -708,6 +783,7 @@ fn paint_mine(
 fn paint_reviews(
     s: &mut impl TextSurface,
     sections: &Sections,
+    warnings: &[FetchScope],
     selected: Option<usize>,
     ascii: bool,
     show_branch: bool,
@@ -758,7 +834,9 @@ fn paint_reviews(
             "Reviews",
             status::LAVENDER,
             rows.len(),
-            None,
+            warnings
+                .contains(&FetchScope::Reviews)
+                .then_some("partial data"),
             "No PRs to review.",
             open_table.as_ref(),
             &alignment,
@@ -776,7 +854,9 @@ fn paint_reviews(
             "Reviewed & merged",
             status::MAUVE,
             rows.len(),
-            None,
+            warnings
+                .contains(&FetchScope::ReviewedMerged)
+                .then_some("partial data"),
             "No reviewed PRs merged recently.",
             merged_table.as_ref(),
             &alignment,
@@ -801,6 +881,7 @@ fn paint_body(
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
+    warnings: &[FetchScope],
     ascii: bool,
     tabs: bool,
     visible: Visibility,
@@ -816,6 +897,7 @@ fn paint_body(
             s,
             sections,
             changes,
+            warnings,
             ui.selected,
             ascii,
             ui.branch,
@@ -826,6 +908,7 @@ fn paint_body(
         View::Reviews => paint_reviews(
             s,
             sections,
+            warnings,
             ui.selected,
             ascii,
             ui.branch,
@@ -907,6 +990,7 @@ fn paint_dashboard(
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
+    warnings: &[FetchScope],
     status: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
@@ -917,6 +1001,7 @@ fn paint_dashboard(
         sections,
         ui,
         changes,
+        warnings,
         ascii,
         footer.is_some(),
         visible,
@@ -999,6 +1084,7 @@ fn watch_body(
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
+    warnings: &[FetchScope],
     ascii: bool,
 ) -> (TextBuffer, u16, Option<u16>, bool, Vec<u16>) {
     let mut body = staging_buffer(
@@ -1017,6 +1103,7 @@ fn watch_body(
         sections,
         ui,
         changes,
+        warnings,
         ascii,
         true,
         Visibility::all(sections),
@@ -1038,9 +1125,24 @@ pub fn paint_watch_frame(
     footer: Option<(&str, bool)>,
     ascii: bool,
 ) -> Option<Position> {
+    paint_watch_frame_with_warnings(screen, sections, ui, changes, &[], status, footer, ascii)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_watch_frame_with_warnings(
+    screen: &mut impl TextSurface,
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    warnings: &[FetchScope],
+    status: &str,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+) -> Option<Position> {
     let bounds = screen.bounds();
     let visible = Visibility::all(sections);
-    let (mut body, body_h, selected, compact, _) = watch_body(screen, sections, ui, changes, ascii);
+    let (mut body, body_h, selected, compact, _) =
+        watch_body(screen, sections, ui, changes, warnings, ascii);
     let bottom_h = bottom_height(ui, status, footer, false) as u16;
     let mut bottom = staging_buffer(screen, bounds.width, bottom_h.max(1));
     let (bottom_h, caret) = paint_bottom(
@@ -1087,6 +1189,7 @@ fn render_dashboard(
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
+    warnings: &[FetchScope],
     status: &str,
     footer: Option<(&str, bool)>,
     ascii: bool,
@@ -1099,7 +1202,9 @@ fn render_dashboard(
         // every redraw (and, before uncurses 0.0.2, force a clear + full
         // repaint — the flicker this replaced).
         screen.clear();
-        paint_watch_frame(screen, sections, ui, changes, status, footer, ascii)
+        paint_watch_frame_with_warnings(
+            screen, sections, ui, changes, warnings, status, footer, ascii,
+        )
     } else {
         let w = screen.width().max(1);
         // Inline output keeps its full height, even on a short terminal.
@@ -1108,7 +1213,9 @@ fn render_dashboard(
             (height_bound(sections, ui) + bottom_bound(ui, status)).max(1),
         ));
         screen.clear();
-        let (used, caret) = paint_dashboard(screen, sections, ui, changes, status, footer, ascii);
+        let (used, caret) = paint_dashboard(
+            screen, sections, ui, changes, warnings, status, footer, ascii,
+        );
         screen.resize((w, used.max(1)));
         caret
     };
@@ -1147,10 +1254,32 @@ fn render_to_string_with_status(
     ascii: bool,
     profile: Profile,
 ) -> String {
+    render_to_string_with_warnings(sections, ui, changes, &[], status, footer, ascii, profile)
+}
+
+fn render_to_string_with_warnings(
+    sections: &Sections,
+    ui: &Ui,
+    changes: &Changes,
+    warnings: &[FetchScope],
+    status: &str,
+    footer: Option<(&str, bool)>,
+    ascii: bool,
+    profile: Profile,
+) -> String {
     let w = render::OUTPUT_WIDTH as u16;
     let mut canvas = TextBuffer::new(w, height_bound(sections, ui) + bottom_bound(ui, status));
     // One-shot output never searches, so there is no caret to place.
-    let (used, _) = paint_dashboard(&mut canvas, sections, ui, changes, status, footer, ascii);
+    let (used, _) = paint_dashboard(
+        &mut canvas,
+        sections,
+        ui,
+        changes,
+        warnings,
+        status,
+        footer,
+        ascii,
+    );
     canvas.resize(w, used.max(1));
 
     let mut out = Vec::new();
@@ -1168,6 +1297,7 @@ fn render_once(
     sections: &Sections,
     cli: &Cli,
     changes: &Changes,
+    warnings: &[FetchScope],
     status: &str,
     footer: Option<(&str, bool)>,
 ) -> Result<()> {
@@ -1176,8 +1306,9 @@ fn render_once(
     // One-shot output has no interaction: no tabs, no selection, no search; the
     // help legend follows `--no-help` instead of the `?` toggle.
     let ui = Ui::once(cli);
-    let painted =
-        render_to_string_with_status(sections, &ui, changes, status, footer, ascii, profile);
+    let painted = render_to_string_with_warnings(
+        sections, &ui, changes, warnings, status, footer, ascii, profile,
+    );
 
     // A closed downstream pipe (`prowl --once | head`) is a clean exit, not an
     // error worth printing.
@@ -1216,7 +1347,7 @@ fn run_once_session(
     cli: &Cli,
     client: &Client,
     repo: &Repo,
-) -> Result<Option<Sections>> {
+) -> Result<Option<FetchOutcome>> {
     // Inline loading frame; raw mode swallows keystrokes so nothing echoes into
     // the output while we wait.
     paint_loading(program.screen_mut())?;
@@ -1275,20 +1406,22 @@ fn run_once_session(
             // Replace the loading frame with the dashboard, then leave it inline.
             let ascii = ascii_mode(cli.ascii, program.screen().color_profile());
             let status = outcome.status();
+            let warnings = outcome.warnings();
             render_dashboard(
                 program.screen_mut(),
                 &outcome.sections,
                 &Ui::once(cli),
                 &Changes::default(),
+                &warnings,
                 &status,
                 None,
                 ascii,
                 false,
             )?;
-            if status.is_empty() {
-                Ok(Some(outcome.sections))
-            } else {
+            if outcome.has_errors() {
                 Err(anyhow::anyhow!("{status}"))
+            } else {
+                Ok(Some(outcome))
             }
         }
         Some(Err(error)) => Err(error),
@@ -1313,10 +1446,11 @@ fn run_once_interactive(
     let finish = program.finish();
     let sections = result?;
     finish?;
-    if let Some(sections) = sections
+    if let Some(outcome) = sections
+        && outcome.issues.is_empty()
         && !cli.no_cache
     {
-        cache::save(repo, cli.required, &sections);
+        cache::save(repo, cli.required, &outcome.sections);
     }
     Ok(())
 }
@@ -1730,7 +1864,7 @@ impl Ui {
         let mut filtered = None;
         let shown = self.shown(sections, &mut filtered);
         let (_, height, selected, _, rows) =
-            watch_body(screen, shown, self, &Changes::default(), ascii);
+            watch_body(screen, shown, self, &Changes::default(), &[], ascii);
         if let Some(down) = down {
             self.scroll_by(down, 3, height, available, selected);
             return None;
@@ -1883,6 +2017,7 @@ pub fn run() -> Result<()> {
             cli.view == View::Reviews,
         );
         let status = outcome.status();
+        let warnings = outcome.warnings();
         if !cli.no_cache && outcome.issues.is_empty() {
             cache::save(&repo, cli.required, &outcome.sections);
         }
@@ -1891,13 +2026,14 @@ pub fn run() -> Result<()> {
             &outcome.sections,
             &cli,
             &Changes::default(),
+            &warnings,
             &status,
             None,
         )?;
-        return if status.is_empty() {
-            Ok(())
-        } else {
+        return if outcome.has_errors() {
             Err(anyhow::anyhow!("{status}"))
+        } else {
+            Ok(())
         };
     }
 
@@ -2063,11 +2199,18 @@ impl<'a> App<'a> {
         let sections = self.ui.shown(good, &mut buf);
         let ascii = ascii_mode(self.cli.ascii, self.program.screen().color_profile());
         let status = self.status();
+        let warnings: Vec<_> = self
+            .fetch_issues
+            .iter()
+            .filter(|issue| issue.warning)
+            .map(|issue| issue.scope)
+            .collect();
         let caret = render_dashboard(
             self.program.screen_mut(),
             sections,
             &self.ui,
             &self.unread,
+            &warnings,
             &status,
             Some((self.eta.as_str(), self.refreshing)),
             ascii,
@@ -2402,7 +2545,7 @@ impl<'a> App<'a> {
         let screen = self.program.screen();
         let ascii = ascii_mode(self.cli.ascii, screen.color_profile());
         let (_, body_h, selected, _, _) =
-            watch_body(screen, sections, &self.ui, &self.unread, ascii);
+            watch_body(screen, sections, &self.ui, &self.unread, &[], ascii);
         let status = self.status();
         let bottom_h = bottom_height(
             &self.ui,
@@ -2469,7 +2612,12 @@ impl<'a> App<'a> {
         let selected = self.selected_url();
         let outcome = outcome.reconcile(self.last_good.take());
         let FetchOutcome { sections, issues } = outcome;
-        let tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
+        let mut tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
+        tracker.preserve_untrusted(
+            self.prev.as_ref(),
+            issues.iter().any(|issue| issue.scope == FetchScope::Mine),
+            issues.iter().any(|issue| issue.scope == FetchScope::Merged),
+        );
         let changes = Tracker::advance(&mut self.prev, tracker);
         let bell = changes.any();
         self.unread.extend(changes);
@@ -2539,6 +2687,7 @@ mod tests {
             sections,
             ui,
             &Changes::default(),
+            &[],
             "",
             None,
             true,
@@ -3521,7 +3670,7 @@ mod tests {
             );
             let screen = TextBuffer::new(120, 6);
             let (body, height, selected, _, _) =
-                watch_body(&screen, &sections, &ui, &Changes::default(), true);
+                watch_body(&screen, &sections, &ui, &Changes::default(), &[], true);
             let expected = body.display_with(Profile::Disabled).to_string();
             let mut seen = HashSet::new();
             for _ in 0..height {
@@ -3973,6 +4122,7 @@ mod tests {
                 &sections,
                 &ui,
                 &Changes::default(),
+                &[],
                 "",
                 None,
                 true,
@@ -4213,6 +4363,7 @@ mod tests {
                 &sections,
                 ui,
                 &Changes::default(),
+                &[],
                 "",
                 None,
                 true,
@@ -4376,6 +4527,111 @@ mod tests {
         );
         assert!(outcome.issues.is_empty());
         (outcome.sections, fake.requests())
+    }
+
+    #[test]
+    fn mine_partial_graphql_error_keeps_rows_and_warns_without_extra_requests() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let body = include_str!("../tests/fixtures/mine_no_rollup.json");
+        let (client, fake) = github::fake::client([(GRAPHQL.to_string(), body.to_string())]);
+
+        let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+
+        assert_eq!(fake.requests(), [GRAPHQL]);
+        assert_eq!(
+            outcome.sections.prs.as_ref().unwrap()[0].number,
+            123,
+            "usable data must survive the GraphQL error"
+        );
+        assert!(!outcome.has_errors());
+        assert!(
+            outcome.status().contains("warning: My PRs partial data"),
+            "{}",
+            outcome.status()
+        );
+        let warnings = outcome.warnings();
+        let once = render_to_string_with_warnings(
+            &outcome.sections,
+            &Ui::once(&cli),
+            &Changes::default(),
+            &warnings,
+            &outcome.status(),
+            None,
+            true,
+            Profile::Disabled,
+        );
+        assert!(
+            once.lines()
+                .any(|line| line.contains("My open PRs") && line.contains("partial data")),
+            "{once}"
+        );
+        let mut watch = TextBuffer::new(120, 12);
+        let mut ui = Ui::once(&cli);
+        ui.show_help = false;
+        paint_watch_frame_with_warnings(
+            &mut watch,
+            &outcome.sections,
+            &ui,
+            &Changes::default(),
+            &warnings,
+            &outcome.status(),
+            None,
+            true,
+        );
+        let watch = watch.display_with(Profile::Disabled).to_string();
+        assert!(
+            watch
+                .lines()
+                .any(|line| line.contains("My open PRs") && line.contains("partial data")),
+            "{watch}"
+        );
+    }
+
+    #[test]
+    fn clean_mine_graphql_response_has_no_partial_warning() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let mut response: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine_no_rollup.json")).unwrap();
+        response.as_object_mut().unwrap().remove("errors");
+        let (client, fake) = github::fake::client([(GRAPHQL.to_string(), response.to_string())]);
+
+        let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+
+        assert!(outcome.issues.is_empty());
+        assert_eq!(fake.requests(), [GRAPHQL]);
+        let output = render_to_string_with_warnings(
+            &outcome.sections,
+            &Ui::once(&cli),
+            &Changes::default(),
+            &outcome.warnings(),
+            &outcome.status(),
+            None,
+            true,
+            Profile::Disabled,
+        );
+        assert!(!output.contains("partial data"), "{output}");
+    }
+
+    #[test]
+    fn mine_partial_graphql_error_does_not_hide_a_typed_parse_failure() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let mut response: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine_no_rollup.json")).unwrap();
+        response["data"]["search"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pageInfo");
+        let (client, fake) = github::fake::client([(GRAPHQL.to_string(), response.to_string())]);
+
+        let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+
+        assert!(outcome.has_errors());
+        assert!(outcome.sections.prs.is_none());
+        assert!(outcome.status().contains("unavailable"));
+        assert_eq!(fake.requests(), [GRAPHQL]);
     }
 
     #[test]
@@ -4970,10 +5226,13 @@ mod tests {
             "message": "Mine search unavailable",
             "path": ["mine"]
         }]);
+        let partial = response.to_string();
+        response.as_object_mut().unwrap().remove("errors");
         *body = response.to_string();
 
         for (args, posts) in [(&["prowl"][..], 4), (&["prowl", "--only", "merged"][..], 2)] {
             let (client, fake) = github::fake::client(routes.clone());
+            fake.set_response_on_call(GRAPHQL, 1, 200, &[], &partial);
             let outcome = fetch(
                 &Cli::try_parse_from(args).unwrap(),
                 &client,
