@@ -511,7 +511,14 @@ impl Schedule {
                 .any(|i| !i.warning && i.scope.is_shipment_scan())
         {
             self.shipments = fetched;
-            self.shipments_at_mine_refresh = Some(self.mine_refreshes);
+            // Without merged rows the scan's release map was dropped, so the
+            // next Mine refresh scans again to annotate them.
+            if !issues
+                .iter()
+                .any(|i| !i.warning && i.scope == FetchScope::Merged)
+            {
+                self.shipments_at_mine_refresh = Some(self.mine_refreshes);
+            }
         }
     }
 
@@ -7763,5 +7770,52 @@ mod tests {
         let failing = sections(status::Status::Fail);
         let (_, ring) = track_changes(&mut prev, &mut armed, &failing, &[]);
         assert!(ring, "a later real change still rings");
+    }
+
+    #[test]
+    fn failed_merged_search_retries_the_shipment_scan_for_release_cells() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        let mut failed: serde_json::Value = serde_json::from_str(&graphql(&[3, 2, 1]).1).unwrap();
+        failed["data"]["mineMerged"] = serde_json::Value::Null;
+        failed["errors"] =
+            serde_json::json!([{ "message": "merged boom", "path": ["mineMerged"] }]);
+        fake.set_response(GRAPHQL, 200, &[], &failed.to_string());
+        let mut schedule = Schedule::default();
+        let mut branch = Some("main".to_string());
+        let mut last = None;
+        let mut issues = Vec::new();
+        let mut shown = Vec::new();
+        for tick in 1..=2 {
+            if tick == 2 {
+                fake.set_response(GRAPHQL, 200, &[], &graphql(&[3, 2, 1]).1);
+            }
+            let due = schedule.next(View::Mine, false, true);
+            assert!(due.shipments, "refresh {tick} scans shipments");
+            let out = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+            schedule.record(
+                due,
+                &out.issues,
+                chrono::Utc::now(),
+                out.shipment_scan,
+                out.has_fresh_mine_data(),
+            );
+            let out = out.merge(last.take(), std::mem::take(&mut issues), due);
+            shown.push(out.sections.merged.as_ref().map(|rows| {
+                merged::to_table(rows, true, &HashSet::new(), false)
+                    .rows
+                    .iter()
+                    .map(|r| (r[2].text.clone(), r[4].text.clone()))
+                    .collect::<Vec<_>>()
+            }));
+            issues = out.issues;
+            last = Some(out.sections);
+        }
+        let second = shown[1].clone().unwrap();
+        assert!(
+            second.contains(&("#2".to_string(), "v2".to_string())),
+            "{second:?}"
+        );
     }
 }
