@@ -162,7 +162,7 @@ fn shipments<'a>(s: &'a Sections, query: &str) -> Vec<Target<'a>> {
                 .map(|r| Target {
                     number: None,
                     title: &r.tag,
-                    url: &r.bucket.url,
+                    url: &r.url,
                 }),
         );
     }
@@ -397,6 +397,7 @@ mod tests {
             branch: format!("b/{n}"),
             url: format!("https://m/{n}"),
             release: None,
+            release_unknown: false,
             merged_at: None,
         }
     }
@@ -434,7 +435,8 @@ mod tests {
             upcoming: Some(bucket("https://up")),
             releases: vec![Release {
                 tag: "v1".into(),
-                bucket: bucket("https://rel/v1"),
+                count: Some(bucket("https://rel/v1").count),
+                url: "https://rel/v1".into(),
                 published_at: None,
             }],
         });
@@ -667,7 +669,8 @@ mod tests {
             upcoming: Some(bucket("https://up")),
             releases: vec![Release {
                 tag: "v1.5.0".into(),
-                bucket: bucket("https://rel/v1"),
+                count: Some(bucket("https://rel/v1").count),
+                url: "https://rel/v1".into(),
                 published_at: None,
             }],
         });
@@ -712,7 +715,8 @@ mod tests {
             upcoming: Some(bucket("https://up")),
             releases: vec![Release {
                 tag: "v1".into(),
-                bucket: bucket("https://rel/v1"),
+                count: Some(bucket("https://rel/v1").count),
+                url: "https://rel/v1".into(),
                 published_at: None,
             }],
         });

@@ -229,8 +229,9 @@ watch event loop); everything else is testable modules:
   merged columns are `[mark] [blank] PR TITLE [BRANCH] RELEASE MERGED` (no
   per-row glyph — every row there is merged — so a blank gutter cell keeps its
   left columns aligned with every other PR table), where `RELEASE` is the release
-  that shipped the PR (a link to its release page) or `—` if not yet shipped,
-  looked up from the `commits::ReleaseMap`.
+  that shipped the PR (a link to its release page), `—` when a complete lookup
+  confirms it has not shipped, or `?` when an incomplete lookup cannot determine
+  its release, looked up from the `commits::ReleaseMap`.
 - `reviews.rs` — the Reviews view's rows/tables. `ReviewRow` (open: `glyph PR
   TITLE [BRANCH] AUTHOR UPDATED`, glyph = the `ReviewState`) via `build_open_rows`
   (de-dupes the two searches, derives the state, sorts by state rank then
@@ -246,6 +247,11 @@ watch event loop); everything else is testable modules:
   shipped it, parsed from each commit subject's trailing `(#NNN)`, the squash /
   merge-commit convention) that annotates the merged section's `RELEASE` column.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
+  Release tags are collected before any ranges are scanned, so a failed
+  pagination request cannot change a comparison base. Completed buckets remain
+  visible when another range fails; failed or rate-limit-skipped buckets show
+  `unavailable`. A rate-limit refusal ends the remaining scan. Incomplete
+  release scans mark unmapped merged PRs `?`, not unshipped.
   The upcoming scan runs only when `fetch` receives a default branch;
   `lib::fetch` resolves and passes it only when fetching My Shipments. With
   shipments hidden, merged rows are fetched first and release ranges are scanned
@@ -464,14 +470,15 @@ still performs all teardown through `finish`.
   per-section error lines remain visible through navigation and copy/open
   messages. Release-stat failures also mark merged release metadata; known
   release annotations are retained while fresh merged PR rows still render.
-  Partial fetches do not write the cache, so degraded data is never saved as a
-  fresh snapshot. GraphQL responses with usable data and errors keep their rows
-  and show a `partial data` warning in the affected section and status line.
-  Warnings do not replace the section with stale data or change bell and unread
-  tracking. One-shot output succeeds with warnings and exits with an error only
-  when a section failed. If a section first becomes available after a cold
-  failure, it seeds change detection without reporting historical merges as
-  new.
+  Partial shipment scans retain completed buckets, mark failed buckets
+  unavailable, and render unknown release lookups as `?`. Partial fetches do
+  not write the cache, so degraded data is never saved as a fresh snapshot.
+  GraphQL responses with usable data and errors keep their rows and show a
+  `partial data` warning in the affected section and status line. Warnings do
+  not replace the section with stale data or change bell and unread tracking.
+  One-shot output succeeds with warnings and exits with an error only when a
+  section failed. If a section first becomes available after a cold failure, it
+  seeds change detection without reporting historical merges as new.
   After a rate-limit signal, the client rejects calls
   to the limited resource locally until the server's reset or retry deadline,
   with an error naming that time. An identified secondary limit without a
