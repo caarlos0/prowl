@@ -54,8 +54,8 @@ The dashboard still accepts input after the first fetch fails without cached dat
 - **Transport is the native GitHub API over HTTP** (`ureq` + rustls), not the
   `gh` CLI. `github::Client` sends a Bearer token with a User-Agent +
   `X-GitHub-Api-Version`. GraphQL is a `POST /graphql` with `{query, variables}`;
-  parse the full `{"data":...}` envelope (`github::parse_graphql`, surfacing
-  GraphQL `errors`). REST is `GET /<path>`.
+  section fetches use `graphql_with_errors` to retain usable data and its
+  GraphQL `errors`; `parse_graphql` is for data-only parsing. REST is `GET /<path>`.
 - **Auth** lives in `auth.rs`: token resolution is `PROWL_TOKEN` → `GITHUB_TOKEN`
   → OS keyring / chmod-600 file → OAuth **device flow** (interactive). The OAuth
   App client id is public and embedded. `--login` forces the device flow. The
@@ -127,6 +127,8 @@ watch event loop); everything else is testable modules:
   views; when Reviews is not fetched, Mine merged keeps its single-search path.
   Alias errors stay scoped to their sections. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
+  GraphQL partial-data errors warn in each affected section, including a
+  section that consumes warned shared rule data; the cache adds no requests.
   It reads required context names from each distinct base ref's `refUpdateRule`
   and all pages of active `rules`, in groups of up to five refs per GraphQL
   request, once per distinct ref across the enabled sections. The queue request
@@ -487,10 +489,12 @@ still performs all teardown through `finish`.
   Partial shipment scans retain completed buckets, mark failed buckets
   unavailable, and render unknown release lookups as `?`. Partial fetches do
   not write the cache, so degraded data is never saved as a fresh snapshot.
-  One-shot output renders available sections and exits with an error when any
-  section failed. If a section first becomes available after a
-  cold failure, it seeds change detection without reporting historical merges
-  as new.
+  GraphQL responses with usable data and errors keep their rows and show a
+  `partial data` warning in the affected section and status line. Warnings do
+  not replace the section with stale data or change bell and unread tracking.
+  One-shot output succeeds with warnings and exits with an error only when a
+  section failed. If a section first becomes available after a cold failure, it
+  seeds change detection without reporting historical merges as new.
   After a rate-limit signal, the client rejects calls
   to the limited resource locally until the server's reset or retry deadline,
   with an error naming that time. An identified secondary limit without a

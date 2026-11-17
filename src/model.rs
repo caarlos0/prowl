@@ -11,6 +11,12 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
+#[derive(Debug)]
+pub(crate) struct GraphqlData<T> {
+    pub(crate) data: T,
+    pub(crate) errors: Vec<GqlError>,
+}
+
 // ----------------------------------------------------------------------------
 // Merge queue
 // ----------------------------------------------------------------------------
@@ -241,12 +247,13 @@ pub fn fetch_queue(
     repo: &Repo,
     required_only: bool,
 ) -> Result<(Vec<QueueEntryNode>, Option<i64>)> {
-    fetch_queue_with_context_cache(
+    Ok(fetch_queue_with_context_cache(
         client,
         repo,
         required_only,
         &mut RequiredContextCache::default(),
-    )
+    )?
+    .data)
 }
 
 pub(crate) fn fetch_queue_with_context_cache(
@@ -254,8 +261,8 @@ pub(crate) fn fetch_queue_with_context_cache(
     repo: &Repo,
     required_only: bool,
     context_cache: &mut RequiredContextCache,
-) -> Result<(Vec<QueueEntryNode>, Option<i64>)> {
-    let mut data: QueueData = client.graphql(
+) -> Result<GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>> {
+    let (mut data, mut errors): (QueueData, _) = client.graphql_with_errors(
         QUEUE_QUERY,
         serde_json::json!({ "owner": repo.owner, "name": repo.name }),
     )?;
@@ -264,18 +271,28 @@ pub(crate) fn fetch_queue_with_context_cache(
         .as_mut()
         .and_then(|repository| repository.default_branch_ref.take());
     seed_default_branch_ref(default_branch_ref, context_cache)?;
+    if could_affect_default_branch_rules(&errors)
+        && let Some(id) = &context_cache.default_branch_ref_id
+    {
+        context_cache
+            .errors
+            .entry(id.clone())
+            .or_default()
+            .extend(errors.iter().cloned());
+    }
     let eta = queue_next_eta(&data);
     let mut nodes = queue_nodes(data);
     let targets: Vec<_> = nodes.iter().map(QueueEntryNode::required_target).collect();
-    for (node, summary) in nodes.iter_mut().zip(fetch_required(
-        client,
-        &targets,
-        required_only,
-        context_cache,
-    )?) {
+    let (summaries, required_errors) =
+        fetch_required(client, &targets, required_only, context_cache)?;
+    errors.extend(required_errors);
+    for (node, summary) in nodes.iter_mut().zip(summaries) {
         node.apply_required(summary, required_only);
     }
-    Ok((nodes, eta))
+    Ok(GraphqlData {
+        data: (nodes, eta),
+        errors,
+    })
 }
 
 // ----------------------------------------------------------------------------
@@ -539,14 +556,15 @@ pub fn fetch_my_prs(
     sort: OpenSort,
     required_only: bool,
 ) -> Result<Vec<PrNode>> {
-    fetch_my_prs_with_context_cache(
+    Ok(fetch_my_prs_with_context_cache(
         client,
         repo,
         me,
         sort,
         required_only,
         &mut RequiredContextCache::default(),
-    )
+    )?
+    .data)
 }
 
 pub(crate) fn fetch_my_prs_with_context_cache(
@@ -556,14 +574,15 @@ pub(crate) fn fetch_my_prs_with_context_cache(
     sort: OpenSort,
     required_only: bool,
     context_cache: &mut RequiredContextCache,
-) -> Result<Vec<PrNode>> {
+) -> Result<GraphqlData<Vec<PrNode>>> {
     let q = mine_search(repo, me, sort);
     let mut nodes = Vec::new();
+    let mut errors = Vec::new();
     let mut after: Option<String> = None;
     loop {
         let include_default_branch_ref =
             after.is_none() && context_cache.default_branch_ref_id.is_none();
-        let data: MineData = client.graphql(
+        let (data, page_errors): (MineData, _) = client.graphql_with_errors(
             MINE_QUERY,
             serde_json::json!({
                 "owner": repo.owner,
@@ -573,6 +592,20 @@ pub(crate) fn fetch_my_prs_with_context_cache(
                 "includeDefaultBranchRef": include_default_branch_ref,
             }),
         )?;
+        if include_default_branch_ref
+            && could_affect_default_branch_rules(&page_errors)
+            && let Some(branch) = data
+                .repository
+                .as_ref()
+                .and_then(|repository| repository.default_branch_ref.as_ref())
+        {
+            context_cache
+                .errors
+                .entry(branch.id.clone())
+                .or_default()
+                .extend(page_errors.iter().cloned());
+        }
+        errors.extend(page_errors);
         if include_default_branch_ref {
             seed_default_branch_ref(
                 data.repository
@@ -597,15 +630,16 @@ pub(crate) fn fetch_my_prs_with_context_cache(
             base_ref_id: node.base_ref.as_ref().map(|base| base.id.clone()),
         })
         .collect();
-    for (node, summary) in nodes.iter_mut().zip(fetch_required(
-        client,
-        &targets,
-        required_only,
-        context_cache,
-    )?) {
+    let (summaries, required_errors) =
+        fetch_required(client, &targets, required_only, context_cache)?;
+    errors.extend(required_errors);
+    for (node, summary) in nodes.iter_mut().zip(summaries) {
         node.apply_required(summary, required_only);
     }
-    Ok(nodes)
+    Ok(GraphqlData {
+        data: nodes,
+        errors,
+    })
 }
 
 // ----------------------------------------------------------------------------
@@ -693,6 +727,7 @@ struct RequiredTarget {
 #[derive(Debug, Default)]
 pub(crate) struct RequiredContextCache {
     contexts: HashMap<String, HashSet<String>>,
+    errors: HashMap<String, Vec<GqlError>>,
     pending: HashMap<String, String>,
     default_branch_ref_id: Option<String>,
 }
@@ -871,8 +906,10 @@ fn required_rules_query(pending: &[PendingRequiredRules]) -> (String, serde_json
 fn fetch_required_contexts(
     ids: &[String],
     context_cache: &mut RequiredContextCache,
-    mut fetch: impl FnMut(&str, serde_json::Value) -> Result<RequiredRefsData>,
-) -> Result<()> {
+    mut fetch: impl FnMut(&str, serde_json::Value) -> Result<(RequiredRefsData, Vec<GqlError>)>,
+) -> Result<Vec<GqlError>> {
+    let mut errors = Vec::new();
+    let mut errors_by_ref = HashMap::<String, Vec<GqlError>>::new();
     let mut seen = HashSet::new();
     let mut pending: Vec<_> = ids
         .iter()
@@ -890,7 +927,30 @@ fn fetch_required_contexts(
     while !pending.is_empty() {
         for batch in pending.chunks_mut(REQUIRED_CONTEXTS_BATCH_SIZE) {
             let (query, variables) = required_rules_query(batch);
-            let mut data = fetch(&query, variables)?;
+            let (mut data, batch_errors) = fetch(&query, variables)?;
+            errors.extend(batch_errors.iter().cloned());
+            for (index, item) in batch.iter().enumerate() {
+                let relevant = batch_errors
+                    .iter()
+                    .filter(|error| {
+                        error
+                            .path
+                            .as_ref()
+                            .and_then(|path| path.first())
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|root| root.strip_prefix('r'))
+                            .and_then(|alias| alias.parse::<usize>().ok())
+                            .is_none_or(|alias| alias == index)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !relevant.is_empty() {
+                    errors_by_ref
+                        .entry(item.id.clone())
+                        .or_default()
+                        .extend(relevant);
+                }
+            }
             for (alias, item) in batch.iter_mut().enumerate() {
                 let value = data
                     .refs
@@ -912,11 +972,18 @@ fn fetch_required_contexts(
                     .contexts
                     .insert(item.id.clone(), std::mem::take(&mut item.contexts));
                 context_cache.pending.remove(&item.id);
+                if let Some(errors) = errors_by_ref.remove(&item.id) {
+                    context_cache
+                        .errors
+                        .entry(item.id.clone())
+                        .or_default()
+                        .extend(errors);
+                }
                 false
             }
         });
     }
-    Ok(())
+    Ok(errors)
 }
 
 fn seed_default_branch_ref(
@@ -935,6 +1002,24 @@ fn seed_default_branch_ref(
     }
     context_cache.default_branch_ref_id = Some(branch.id);
     Ok(())
+}
+
+fn could_affect_default_branch_rules(errors: &[GqlError]) -> bool {
+    errors.iter().any(|error| {
+        let Some(path) = &error.path else {
+            return true;
+        };
+        match path.as_slice() {
+            [root, field, ..]
+                if root.as_str() == Some("repository")
+                    && field.as_str() == Some("defaultBranchRef") =>
+            {
+                true
+            }
+            [root, ..] if matches!(root.as_str(), Some("repository" | "search")) => false,
+            _ => true,
+        }
+    })
 }
 
 fn required_query(pending: &[PendingRequired]) -> (String, serde_json::Value) {
@@ -1015,14 +1100,14 @@ fn fetch_required(
     targets: &[RequiredTarget],
     required_only: bool,
     context_cache: &mut RequiredContextCache,
-) -> Result<Vec<RequiredSummary>> {
+) -> Result<(Vec<RequiredSummary>, Vec<GqlError>)> {
     let base_ref_ids: Vec<_> = targets
         .iter()
         .filter_map(|target| target.base_ref_id.as_ref())
         .cloned()
         .collect();
-    fetch_required_contexts(&base_ref_ids, context_cache, |query, variables| {
-        client.graphql(query, variables)
+    let mut errors = fetch_required_contexts(&base_ref_ids, context_cache, |query, variables| {
+        client.graphql_with_errors(query, variables)
     })?;
     let empty = HashSet::new();
     let expected = |target: &RequiredTarget| {
@@ -1050,13 +1135,20 @@ fn fetch_required(
         .collect();
 
     fetch_required_pages(pending, &mut summaries, |query, variables| {
-        client.graphql(query, variables)
+        let (data, page_errors) = client.graphql_with_errors(query, variables)?;
+        errors.extend(page_errors);
+        Ok(data)
     })?;
 
     for (target, summary) in targets.iter().zip(&mut summaries) {
         summary.include_missing(expected(target));
+        if let Some(ref_id) = &target.base_ref_id
+            && let Some(ref_errors) = context_cache.errors.get(ref_id)
+        {
+            errors.extend(ref_errors.iter().cloned());
+        }
     }
-    Ok(summaries)
+    Ok((summaries, errors))
 }
 
 // ----------------------------------------------------------------------------
@@ -1123,9 +1215,23 @@ pub fn fetch_merged(
     since: &str,
     limit: usize,
 ) -> Result<Vec<MergedNode>> {
+    Ok(fetch_merged_with_errors(client, repo, me, since, limit)?.data)
+}
+
+pub(crate) fn fetch_merged_with_errors(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    since: &str,
+    limit: usize,
+) -> Result<GraphqlData<Vec<MergedNode>>> {
     let q = merged_search(repo, me, since);
-    let data: MergedData = client.graphql(&merged_query(limit), serde_json::json!({ "q": q }))?;
-    Ok(data.search.nodes)
+    let (data, errors): (MergedData, _) =
+        client.graphql_with_errors(&merged_query(limit), serde_json::json!({ "q": q }))?;
+    Ok(GraphqlData {
+        data: data.search.nodes,
+        errors,
+    })
 }
 
 /// The "merged PRs I reviewed" search: merged PRs in the repo that I reviewed,
@@ -1144,30 +1250,59 @@ pub fn fetch_reviewed_merged(
     since: &str,
     limit: usize,
 ) -> Result<Vec<MergedNode>> {
+    Ok(fetch_reviewed_merged_with_errors(client, repo, me, since, limit)?.data)
+}
+
+pub(crate) fn fetch_reviewed_merged_with_errors(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    since: &str,
+    limit: usize,
+) -> Result<GraphqlData<Vec<MergedNode>>> {
     let q = reviewed_merged_search(repo, me, since);
-    let data: MergedData = client.graphql(&merged_query(limit), serde_json::json!({ "q": q }))?;
-    Ok(data.search.nodes)
+    let (data, errors): (MergedData, _) =
+        client.graphql_with_errors(&merged_query(limit), serde_json::json!({ "q": q }))?;
+    Ok(GraphqlData {
+        data: data.search.nodes,
+        errors,
+    })
 }
 
 fn merged_alias(
     data: &serde_json::Value,
     errors: &[GqlError],
     alias: &str,
-) -> Result<Vec<MergedNode>> {
-    alias_error(errors, &[alias])?;
-
+) -> Result<GraphqlData<Vec<MergedNode>>> {
+    let errors = alias_errors(errors, &[alias]);
     let search = data
         .get(alias)
         .filter(|search| !search.is_null())
-        .ok_or_else(|| anyhow!("GraphQL response omitted `{alias}` merged search"))?;
+        .ok_or_else(|| {
+            if errors.is_empty() {
+                anyhow!("GraphQL response omitted `{alias}` merged search")
+            } else {
+                anyhow!(
+                    "GraphQL error: {}",
+                    errors
+                        .iter()
+                        .map(|error| error.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            }
+        })?;
     let search: MergedNodes = serde_json::from_value(search.clone())
         .with_context(|| format!("parsing `{alias}` merged search"))?;
-    Ok(search.nodes)
+    Ok(GraphqlData {
+        data: search.nodes,
+        errors,
+    })
 }
 
-fn alias_error(errors: &[GqlError], aliases: &[&str]) -> Result<()> {
-    let known_aliases = ["requested", "reviewed", "mineMerged", "reviewedMerged"];
-    let messages = errors
+fn alias_errors(errors: &[GqlError], aliases: &[&str]) -> Vec<GqlError> {
+    const KNOWN_ALIASES: &[&str] = &["requested", "reviewed", "mineMerged", "reviewedMerged"];
+    errors
         .iter()
         .filter(|error| {
             error
@@ -1175,15 +1310,10 @@ fn alias_error(errors: &[GqlError], aliases: &[&str]) -> Result<()> {
                 .as_ref()
                 .and_then(|path| path.first())
                 .and_then(serde_json::Value::as_str)
-                .is_none_or(|root| aliases.contains(&root) || !known_aliases.contains(&root))
+                .is_none_or(|root| aliases.contains(&root) || !KNOWN_ALIASES.contains(&root))
         })
-        .map(|error| error.message.as_str())
-        .collect::<Vec<_>>();
-    if messages.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow!("GraphQL error: {}", messages.join("; ")))
-    }
+        .cloned()
+        .collect()
 }
 
 // ----------------------------------------------------------------------------
@@ -1297,17 +1427,27 @@ pub fn fetch_reviews(
     me: &str,
     requested_qualifier: &str,
 ) -> Result<ReviewsData> {
+    Ok(fetch_reviews_with_errors(client, repo, me, requested_qualifier)?.data)
+}
+
+pub(crate) fn fetch_reviews_with_errors(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    requested_qualifier: &str,
+) -> Result<GraphqlData<ReviewsData>> {
     let (requested, reviewed) = reviews_searches(repo, me, requested_qualifier);
-    client.graphql(
+    let (data, errors) = client.graphql_with_errors(
         REVIEWS_ONLY_QUERY,
         serde_json::json!({ "me": me, "requested": requested, "reviewed": reviewed }),
-    )
+    )?;
+    Ok(GraphqlData { data, errors })
 }
 
 pub(crate) struct ReviewsAndMerged {
-    pub(crate) reviews: Result<ReviewsData>,
-    pub(crate) mine_merged: Option<Result<Vec<MergedNode>>>,
-    pub(crate) reviewed_merged: Result<Vec<MergedNode>>,
+    pub(crate) reviews: Result<GraphqlData<ReviewsData>>,
+    pub(crate) mine_merged: Option<Result<GraphqlData<Vec<MergedNode>>>>,
+    pub(crate) reviewed_merged: Result<GraphqlData<Vec<MergedNode>>>,
 }
 
 pub(crate) fn fetch_reviews_and_merged(
@@ -1332,10 +1472,24 @@ pub(crate) fn fetch_reviews_and_merged(
             "includeMineMerged": include_mine,
         }),
     )?;
-    Ok(ReviewsAndMerged {
-        reviews: alias_error(&errors, &["requested", "reviewed"]).and_then(|()| {
-            serde_json::from_value(data.clone()).context("parsing Reviews searches")
+    let review_errors = alias_errors(&errors, &["requested", "reviewed"]);
+    let reviews = match serde_json::from_value(data.clone()) {
+        Ok(data) => Ok(GraphqlData {
+            data,
+            errors: review_errors.clone(),
         }),
+        Err(_) if !review_errors.is_empty() => Err(anyhow!(
+            "GraphQL error: {}",
+            review_errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+        Err(error) => Err(error).context("parsing Reviews searches"),
+    };
+    Ok(ReviewsAndMerged {
+        reviews,
         mine_merged: include_mine.then(|| merged_alias(&data, &errors, "mineMerged")),
         reviewed_merged: merged_alias(&data, &errors, "reviewedMerged"),
     })
@@ -1537,7 +1691,82 @@ mod tests {
             fetched.mine_merged.unwrap().unwrap_err().to_string(),
             "GraphQL error: Mine search unavailable"
         );
-        assert_eq!(fetched.reviewed_merged.unwrap()[0].number, 42);
+        assert_eq!(fetched.reviewed_merged.unwrap().data[0].number, 42);
+        assert_eq!(fake.requests(), ["POST /graphql"]);
+    }
+
+    #[test]
+    fn reviews_merged_fetch_preserves_partial_alias_data() {
+        let response = serde_json::json!({
+            "data": {
+                "requested": {
+                    "nodes": [{
+                        "number": 1,
+                        "title": "review",
+                        "url": "https://github.com/o/r/pull/1",
+                        "headRefName": "branch",
+                        "isDraft": false,
+                        "updatedAt": "2026-01-01T00:00:00Z",
+                        "author": { "login": "author" },
+                        "commits": { "nodes": [{ "commit": { "committedDate": "2026-01-01T00:00:00Z" } }] },
+                        "reviews": { "nodes": [] }
+                    }]
+                },
+                "reviewed": { "nodes": [] },
+                "mineMerged": {
+                    "nodes": [{
+                        "number": 41,
+                        "title": "mine",
+                        "url": "https://github.com/o/r/pull/41",
+                        "headRefName": "branch",
+                        "mergedAt": "2026-01-01T00:00:00Z",
+                        "author": { "login": "me" }
+                    }]
+                },
+                "reviewedMerged": {
+                    "nodes": [{
+                        "number": 42,
+                        "title": "reviewed",
+                        "url": "https://github.com/o/r/pull/42",
+                        "headRefName": "branch",
+                        "mergedAt": "2026-01-01T00:00:00Z",
+                        "author": { "login": "author" }
+                    }]
+                }
+            },
+            "errors": [
+                {
+                    "message": "Review author unavailable",
+                    "path": ["requested", "nodes", 0, "author"]
+                },
+                {
+                    "message": "Mine author unavailable",
+                    "path": ["mineMerged", "nodes", 0, "author"]
+                }
+            ]
+        });
+        let (client, fake) =
+            crate::github::fake::client([("POST /graphql".to_string(), response.to_string())]);
+        let fetched = fetch_reviews_and_merged(
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            "review-requested",
+            "2026-01-01",
+            20,
+            true,
+        )
+        .unwrap();
+
+        let reviews = fetched.reviews.unwrap();
+        assert_eq!(reviews.data.requested.nodes[0].number, 1);
+        assert_eq!(reviews.errors[0].message, "Review author unavailable");
+        let mine = fetched.mine_merged.unwrap().unwrap();
+        assert_eq!(mine.data[0].number, 41);
+        assert_eq!(mine.errors[0].message, "Mine author unavailable");
+        let reviewed = fetched.reviewed_merged.unwrap();
+        assert_eq!(reviewed.data[0].number, 42);
+        assert!(reviewed.errors.is_empty(), "{:?}", reviewed.errors);
         assert_eq!(fake.requests(), ["POST /graphql"]);
     }
 
@@ -1674,23 +1903,26 @@ mod tests {
             let after = variables["after0"].as_str().map(str::to_string);
             cursors.push(after.clone());
             assert_eq!(after.as_deref(), Some("NEXT"));
-            Ok(RequiredRefsData {
-                refs: HashMap::from([(
-                    "r0".to_string(),
-                    serde_json::json!({
-                        "refUpdateRule": null,
-                        "rules": {
-                            "pageInfo": { "hasNextPage": false, "endCursor": null },
-                            "nodes": [{
-                                "parameters": {
-                                    "__typename": "RequiredStatusChecksParameters",
-                                    "requiredStatusChecks": [{ "context": "later" }]
-                                }
-                            }]
-                        }
-                    }),
-                )]),
-            })
+            Ok((
+                RequiredRefsData {
+                    refs: HashMap::from([(
+                        "r0".to_string(),
+                        serde_json::json!({
+                            "refUpdateRule": null,
+                            "rules": {
+                                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                                "nodes": [{
+                                    "parameters": {
+                                        "__typename": "RequiredStatusChecksParameters",
+                                        "requiredStatusChecks": [{ "context": "later" }]
+                                    }
+                                }]
+                            }
+                        }),
+                    )]),
+                },
+                Vec::new(),
+            ))
         })
         .unwrap();
 
@@ -1761,6 +1993,50 @@ mod tests {
     }
 
     #[test]
+    fn shared_required_rule_errors_warn_every_consuming_section() {
+        let error: GqlError = serde_json::from_value(serde_json::json!({
+            "message": "required rules unavailable",
+            "path": ["r0", "rules"]
+        }))
+        .unwrap();
+        let mut cache = RequiredContextCache::default();
+        let errors = fetch_required_contexts(&["ref".to_string()], &mut cache, |_, _| {
+            Ok((
+                RequiredRefsData {
+                    refs: HashMap::from([(
+                        "r0".to_string(),
+                        serde_json::json!({
+                            "refUpdateRule": { "requiredStatusCheckContexts": ["classic"] },
+                            "rules": {
+                                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                                "nodes": []
+                            }
+                        }),
+                    )]),
+                },
+                vec![error.clone()],
+            ))
+        })
+        .unwrap();
+        assert_eq!(errors[0].message, "required rules unavailable");
+
+        let (client, fake) = crate::github::fake::client([]);
+        let (_, mine_errors) = fetch_required(
+            &client,
+            &[RequiredTarget {
+                pull_request_number: 1,
+                commit_id: None,
+                base_ref_id: Some("ref".to_string()),
+            }],
+            false,
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(mine_errors[0].message, "required rules unavailable");
+        assert_eq!(fake.requests(), Vec::<String>::new());
+    }
+
+    #[test]
     fn required_rule_dispatch_counts_for_one_five_and_six_refs() {
         for (case, ref_count, expected_per_refresh) in
             [("one", 1, 2), ("five", 5, 2), ("six", 6, 4)]
@@ -1781,8 +2057,9 @@ mod tests {
                             base_ref_id: Some(format!("ref-{index}")),
                         })
                         .collect();
-                    let summaries =
+                    let (summaries, errors) =
                         fetch_required(&client, &targets, required_only, &mut cache).unwrap();
+                    assert!(errors.is_empty(), "{case}, {required_only}: {errors:?}");
                     for summary in summaries {
                         assert_eq!(summary.checks.pass, 1, "{case}, {required_only}");
                         assert_eq!(summary.missing, 1, "{case}, {required_only}");
@@ -1816,8 +2093,9 @@ mod tests {
                             base_ref_id: Some(format!("ref-{index}")),
                         })
                         .collect();
-                    let summaries =
+                    let (summaries, errors) =
                         fetch_required(&client, &targets, required_only, &mut cache).unwrap();
+                    assert!(errors.is_empty(), "{required_only}: {errors:?}");
                     assert_eq!(summaries.len(), end - start);
                     assert!(summaries.iter().all(|summary| summary.missing == 1));
                 }
@@ -1874,7 +2152,7 @@ mod tests {
                 refs.insert(format!("r{alias}"), rule);
             }
             requests.push(request);
-            Ok(RequiredRefsData { refs })
+            Ok((RequiredRefsData { refs }, Vec::new()))
         })
         .unwrap();
 
@@ -1918,7 +2196,7 @@ mod tests {
         ] {
             let mut cache = RequiredContextCache::default();
             let error = fetch_required_contexts(&ids, &mut cache, |_, _| {
-                Ok(RequiredRefsData { refs: refs.clone() })
+                Ok((RequiredRefsData { refs: refs.clone() }, Vec::new()))
             })
             .unwrap_err();
             assert!(error.to_string().contains(expected_error), "{error:#}");
@@ -1938,9 +2216,12 @@ mod tests {
             if after.is_some() {
                 anyhow::bail!("second rules page failed");
             }
-            Ok(RequiredRefsData {
-                refs: HashMap::from([("r0".to_string(), required_rule_page(after.as_deref()))]),
-            })
+            Ok((
+                RequiredRefsData {
+                    refs: HashMap::from([("r0".to_string(), required_rule_page(after.as_deref()))]),
+                },
+                Vec::new(),
+            ))
         });
         assert!(error.is_err());
         assert_eq!(failed_cursors, [None, Some("NEXT".to_string())]);
@@ -1951,9 +2232,12 @@ mod tests {
             assert!(query.contains("r0: node(id: $id0)"));
             let after = variables["after0"].as_str().map(str::to_string);
             retried_cursors.push(after.clone());
-            Ok(RequiredRefsData {
-                refs: HashMap::from([("r0".to_string(), required_rule_page(after.as_deref()))]),
-            })
+            Ok((
+                RequiredRefsData {
+                    refs: HashMap::from([("r0".to_string(), required_rule_page(after.as_deref()))]),
+                },
+                Vec::new(),
+            ))
         })
         .unwrap();
         assert_eq!(retried_cursors, [None, Some("NEXT".to_string())]);
@@ -1961,6 +2245,53 @@ mod tests {
             cache.contexts["ref"],
             HashSet::from(["classic".into(), "test".into(), "lint".into()])
         );
+    }
+
+    #[test]
+    fn failed_rule_response_errors_do_not_taint_a_successful_retry() {
+        let error: GqlError = serde_json::from_value(serde_json::json!({
+            "message": "required rules unavailable",
+            "path": ["r0", "rules"]
+        }))
+        .unwrap();
+        let mut cache = RequiredContextCache::default();
+        let ids = ["ref".to_string()];
+        let failed = fetch_required_contexts(&ids, &mut cache, |_, _| {
+            Ok((
+                RequiredRefsData {
+                    refs: HashMap::from([("r0".to_string(), serde_json::Value::Null)]),
+                },
+                vec![error.clone()],
+            ))
+        });
+        assert!(failed.is_err());
+        assert!(!cache.errors.contains_key("ref"));
+
+        fetch_required_contexts(&ids, &mut cache, |_, variables| {
+            let after = variables["after0"].as_str();
+            Ok((
+                RequiredRefsData {
+                    refs: HashMap::from([("r0".to_string(), required_rule_page(after))]),
+                },
+                Vec::new(),
+            ))
+        })
+        .unwrap();
+
+        let (client, fake) = crate::github::fake::client([]);
+        let (_, errors) = fetch_required(
+            &client,
+            &[RequiredTarget {
+                pull_request_number: 1,
+                commit_id: None,
+                base_ref_id: Some("ref".to_string()),
+            }],
+            false,
+            &mut cache,
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(fake.requests(), Vec::<String>::new());
     }
 
     #[test]

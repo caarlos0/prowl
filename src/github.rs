@@ -128,9 +128,10 @@ pub(crate) struct GqlError {
     pub(crate) path: Option<Vec<serde_json::Value>>,
 }
 
-/// Parse a GraphQL `{"data": ...}` envelope. GitHub returns partial `data`
-/// alongside an `errors` array when some nested field is inaccessible (those
-/// fields deserialize as `None`), so prefer the data when it parses.
+/// Parse the `data` value from a GraphQL `{"data": ...}` envelope. GitHub
+/// returns partial `data` alongside an `errors` array when some nested field is
+/// inaccessible; use `Client::graphql_with_errors` when callers need to retain
+/// those errors after the data parses.
 ///
 /// Parse into `Value` first, never straight into `T`: a partial response can
 /// null a required (non-`Option`) field while `data` is present, which would
