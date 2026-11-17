@@ -4655,6 +4655,63 @@ mod tests {
     }
 
     #[test]
+    fn combined_mine_and_queue_reports_both_field_errors() {
+        let routes = tagged_watch();
+        let (_, body) = routes.iter().find(|(route, _)| route == GRAPHQL).unwrap();
+        let mut response: serde_json::Value = serde_json::from_str(body).unwrap();
+        response["errors"] = serde_json::json!([
+            {
+                "message": "Mine field failed",
+                "path": ["search"]
+            },
+            {
+                "message": "Queue field failed",
+                "path": ["repository", "mergeQueue"]
+            }
+        ]);
+        let (client, fake) = github::fake::client(routes);
+        fake.set_response_on_call(GRAPHQL, 2, 200, &[], &response.to_string());
+
+        let outcome = fetch(
+            &Cli::try_parse_from(["prowl"]).unwrap(),
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            true,
+        );
+
+        assert_eq!(
+            outcome
+                .issues
+                .iter()
+                .map(|issue| issue.scope)
+                .collect::<Vec<_>>(),
+            [FetchScope::Queue, FetchScope::Mine]
+        );
+        assert!(
+            outcome.issues[0].message.contains("Queue field failed"),
+            "{}",
+            outcome.issues[0].message
+        );
+        assert!(
+            outcome.issues[1].message.contains("Mine field failed"),
+            "{}",
+            outcome.issues[1].message
+        );
+        assert!(outcome.sections.queue.is_none());
+        assert!(outcome.sections.prs.is_none());
+        assert_eq!(
+            fake.requests()
+                .iter()
+                .filter(|request| request.as_str() == GRAPHQL)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn cold_shipment_failure_is_reported_without_empty_stats() {
         let cli = Cli::try_parse_from(["prowl", "--only", "shipments"]).unwrap();
         let repo = Repo::parse("o/r").unwrap();

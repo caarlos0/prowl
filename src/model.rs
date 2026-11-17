@@ -644,11 +644,6 @@ pub(crate) fn fetch_mine_and_queue_with_context_cache(
     )?;
     let mine_error = mine_queue_graphql_error(&errors, false);
     let queue_error = mine_queue_graphql_error(&errors, true);
-    if let Some(error) = &mine_error
-        && queue_error.is_some()
-    {
-        return Err(anyhow!("{error}"));
-    }
 
     let repository = data.get("repository").filter(|value| !value.is_null());
     let default_branch_ref = repository
