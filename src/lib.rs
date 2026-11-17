@@ -658,34 +658,6 @@ fn fetch_scheduled(
     fetch_scheduled_with_context_memo(cli, client, repo, me, default_branch, due, None)
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-fn fetch_with_context_memo(
-    cli: &Cli,
-    client: &Client,
-    repo: &Repo,
-    me: &str,
-    default_branch: &mut Option<String>,
-    want_mine: bool,
-    want_reviews: bool,
-    required_context_memo: Option<&mut model::RequiredContextMemo>,
-) -> FetchOutcome {
-    fetch_scheduled_with_context_memo(
-        cli,
-        client,
-        repo,
-        me,
-        default_branch,
-        Due {
-            mine: want_mine,
-            reviews: want_reviews,
-            shipments: true,
-        },
-        required_context_memo,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn fetch_scheduled_with_context_memo(
     cli: &Cli,
     client: &Client,
@@ -1093,6 +1065,7 @@ fn fetch_mine_reviews_sections(
             requested_qualifier: cli.review_scope.qualifier(),
             since: &since,
             merged_limit: cli.merged_limit,
+            no_draft: cli.no_draft,
             include_queue: cli.show_queue(),
             include_mine_merged: cli.show_merged(),
         },
@@ -5267,6 +5240,67 @@ mod tests {
             searches.iter().all(|q| q.contains(" draft:false ")),
             "{searches:?}"
         );
+
+        let (combined, combined_requests, combined_searches) =
+            run(&["prowl", "--only", "mine,queue", "--no-draft"], true);
+        assert_eq!(combined, ready);
+        assert_eq!(combined_requests, requests);
+        assert_eq!(combined_searches.len(), searches.len());
+        assert!(
+            combined_searches
+                .iter()
+                .all(|q| q.contains(" draft:false ")),
+            "{combined_searches:?}"
+        );
+    }
+
+    #[test]
+    fn no_draft_keeps_draft_filter_in_combined_watch_pages() {
+        const DRAFTS: &[i64] = &[2, 5, 8, 11];
+        let cli = Cli::try_parse_from(["prowl", "--no-draft"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let searches = std::sync::Arc::default();
+        let (client, fake) = github::fake::client([]);
+        let mine = mine_server(DRAFTS, true, std::sync::Arc::clone(&searches));
+        fake.set_graphql_responder(move |body| {
+            let mut response: serde_json::Value = serde_json::from_str(&mine(body)).unwrap();
+            if body["variables"].get("requested").is_some() {
+                response["data"]["requested"] = serde_json::json!({ "nodes": [] });
+                response["data"]["reviewed"] = serde_json::json!({ "nodes": [] });
+                response["data"]["reviewedMerged"] = serde_json::json!({ "nodes": [] });
+                response["data"]["mineMerged"] = serde_json::json!({ "nodes": [] });
+            }
+            response.to_string()
+        });
+
+        let outcome = fetch_scheduled(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut None,
+            Due {
+                mine: true,
+                reviews: true,
+                shipments: false,
+            },
+        );
+
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        let numbers: Vec<_> = outcome
+            .sections
+            .prs
+            .unwrap()
+            .iter()
+            .map(|row| row.number)
+            .collect();
+        assert_eq!(numbers, [12, 10, 9, 7, 6, 4, 3, 1]);
+        let searches = searches.lock().unwrap();
+        assert_eq!(searches.len(), 2);
+        assert!(
+            searches.iter().all(|q| q.contains(" draft:false ")),
+            "{searches:?}"
+        );
     }
 
     #[test]
@@ -6321,11 +6355,16 @@ mod tests {
         serde_json::to_string(&response).unwrap()
     }
 
-    fn assert_context_memo_matches_uncached(cli: &Cli, body: &str, cached: &FetchOutcome) -> usize {
+    fn assert_context_memo_matches_uncached(
+        cli: &Cli,
+        body: &str,
+        cached: &FetchOutcome,
+        want_reviews: bool,
+    ) -> usize {
         let repo = Repo::parse("o/r").unwrap();
         let (client, fake) = github::fake::client([]);
         fake.set_response(GRAPHQL, 200, &[], body);
-        let outcome = fetch(cli, &client, &repo, "me", &mut None, true, false);
+        let outcome = fetch(cli, &client, &repo, "me", &mut None, true, want_reviews);
         assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
         assert_eq!(
             serde_json::to_value(&cached.sections).unwrap(),
@@ -6396,9 +6435,12 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn watch_context_memo_skips_only_complete_unchanged_targets() {
         let repo = Repo::parse("o/r").unwrap();
-        for (case, initial_ref, cold_posts, warm_posts) in
-            [("shared", "ref-1", 3, 1), ("disjoint", "ref-2", 4, 2)]
-        {
+        for (case, initial_ref, cold_posts, warm_posts, want_reviews) in [
+            ("shared", "ref-1", 3, 1, false),
+            ("disjoint", "ref-2", 4, 2, false),
+            ("shared combined views", "ref-1", 3, 1, true),
+            ("disjoint combined views", "ref-2", 4, 2, true),
+        ] {
             let cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
             let (client, fake) = github::fake::client([]);
             let mut memo = model::RequiredContextMemo::default();
@@ -6406,16 +6448,33 @@ mod tests {
             let mut refresh =
                 |cli: &Cli, body: &str, expected_posts: usize, cold_posts: usize, label: &str| {
                     if expected_posts != 0 {
-                        fake.set_response(GRAPHQL, 200, &[], body);
+                        let body = body.to_owned();
+                        fake.set_graphql_responder(move |request| {
+                            let mut response: serde_json::Value =
+                                serde_json::from_str(&body).unwrap();
+                            if !request["query"].as_str().unwrap().contains("integrationId") {
+                                for check in response["data"]["repository"]["defaultBranchRef"]
+                                    ["rules"]["nodes"][0]["parameters"]["requiredStatusChecks"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                {
+                                    check.as_object_mut().unwrap().remove("integrationId");
+                                }
+                            }
+                            response.to_string()
+                        });
                     }
-                    let outcome = fetch_with_context_memo(
+                    let outcome = fetch_scheduled_with_context_memo(
                         cli,
                         &client,
                         &repo,
                         "me",
                         &mut None,
-                        expected_posts != 0,
-                        false,
+                        Due {
+                            mine: expected_posts != 0,
+                            reviews: want_reviews && expected_posts != 0,
+                            shipments: false,
+                        },
                         Some(&mut memo),
                     );
                     assert!(outcome.issues.is_empty(), "{label}: {:?}", outcome.issues);
@@ -6427,7 +6486,7 @@ mod tests {
                     let cold_count = if expected_posts == 0 {
                         0
                     } else {
-                        assert_context_memo_matches_uncached(cli, body, &outcome)
+                        assert_context_memo_matches_uncached(cli, body, &outcome, want_reviews)
                     };
                     assert_eq!(cold_count, cold_posts, "{label}: uncached request count");
                     outcome

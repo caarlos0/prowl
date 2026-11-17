@@ -403,7 +403,7 @@ const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!,
           parameters {
             __typename
             ... on RequiredStatusChecksParameters {
-              requiredStatusChecks { context }
+              requiredStatusChecks { context integrationId }
             }
           }
         }
@@ -781,8 +781,7 @@ pub(crate) struct MineQueueResults {
 }
 
 struct MineQueueOptions<'a> {
-    me: &'a str,
-    sort: OpenSort,
+    q: &'a str,
     required_only: bool,
     include_queue: bool,
 }
@@ -817,8 +816,7 @@ pub(crate) fn fetch_mine_and_queue_with_context_memo(
         &data,
         errors,
         MineQueueOptions {
-            me,
-            sort,
+            q: &q,
             required_only,
             include_queue: true,
         },
@@ -830,6 +828,7 @@ pub(crate) struct WatchQueryOptions<'a> {
     pub(crate) requested_qualifier: &'a str,
     pub(crate) since: &'a str,
     pub(crate) merged_limit: usize,
+    pub(crate) no_draft: bool,
     pub(crate) include_queue: bool,
     pub(crate) include_mine_merged: bool,
 }
@@ -850,13 +849,14 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
     options: WatchQueryOptions<'_>,
     memo: Option<&mut RequiredContextMemo>,
 ) -> Result<MineReviewsQueueResults> {
+    let q = mine_search(repo, me, sort, options.no_draft);
     let (requested, reviewed) = reviews_searches(repo, me, options.requested_qualifier);
     let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
         WATCH_MINE_REVIEWS_QUERY,
         serde_json::json!({
             "owner": repo.owner,
             "name": repo.name,
-            "q": mine_search(repo, me, sort),
+            "q": q,
             "after": null,
             "includeQueue": options.include_queue,
             "me": me,
@@ -903,8 +903,7 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
         &data,
         mine_errors,
         MineQueueOptions {
-            me,
-            sort,
+            q: &q,
             required_only,
             include_queue: options.include_queue,
         },
@@ -928,8 +927,7 @@ fn parse_mine_queue_response(
     mut memo: Option<&mut RequiredContextMemo>,
 ) -> Result<MineQueueResults> {
     let MineQueueOptions {
-        me,
-        sort,
+        q,
         required_only,
         include_queue,
     } = options;
@@ -1030,7 +1028,7 @@ fn parse_mine_queue_response(
         Ok(first_page) => fetch_mine_pages(
             client,
             repo,
-            &q,
+            q,
             required_only,
             context_cache,
             memo,
@@ -1085,7 +1083,6 @@ fn mine_queue_graphql_error(errors: &[GqlError], queue: bool) -> Option<anyhow::
     (!messages.is_empty()).then(|| anyhow!("GraphQL error: {}", messages.join("; ")))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn fetch_mine_pages(
     client: &Client,
     repo: &Repo,

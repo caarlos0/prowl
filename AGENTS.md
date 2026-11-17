@@ -131,7 +131,8 @@ watch event loop); everything else is testable modules:
   GraphQL partial-data errors warn in each affected section, including a
   section that consumes warned shared rule data; the cache adds no requests.
   Watch mode also keeps a session-only memo for complete required-context
-  lookups. It skips commit-context POSTs only for matching PR, commit, base-ref,
+  lookups, both in separate Mine fetches and when combined with Reviews.
+  It skips commit-context POSTs only for matching PR, commit, base-ref,
   and rule identity (including active-rule integration IDs) when every expected
   context was reported. It is not used by one-shot output or `--required`;
   skipped or failed sections keep their entries, while successful sections
