@@ -127,8 +127,8 @@ watch event loop); everything else is testable modules:
   and-Mine request, the queue request when My PRs are hidden, or Mine page 1
   when the queue is hidden. `WATCH_MINE_REVIEWS_QUERY` combines the Reviews
   searches with the enabled Mine sections (first Mine page, queue, Mine merged)
-  when both views are due and My PRs, Merge Queue, or My merged PRs is shown; it includes the
-  Mine merged search exactly once when that section is enabled, and skips the
+  when both views are due and My PRs, Merge Queue, or My merged PRs is shown.
+  It includes the Mine merged search exactly once when enabled, and skips the
   Mine page and default-branch rules when neither My PRs nor Merge Queue is
   shown. `REVIEWS_QUERY` never carries Mine merged; a standalone search is
   needed only when no Mine, queue, or two-view watch request can carry it.
@@ -487,9 +487,9 @@ still performs all teardown through `finish`.
   request; the next refresh fetches the newly active view. When the shown view
   was fetched before the other, a dim `updated 6m ago` status line
   (`Schedule::age_note`) shows its age. When both views are due and My PRs,
-  Merge Queue, or My merged PRs is enabled, the Reviews searches and the enabled Mine sections
-  (first Mine page, queue, Mine merged) share one request; the Mine merged
-  search appears once when enabled. Otherwise Mine
+  Merge Queue, or My merged PRs is enabled, the Reviews searches and the enabled
+  Mine sections (first Mine page, queue, Mine merged) share one request; the Mine
+  merged search appears once when enabled. Otherwise Mine
   merged is fetched with the first Mine request when that view is due, and
   Reviews fetches only its open review searches and reviewed-and-merged search.
   `--once`/piped fetches only the
@@ -652,7 +652,8 @@ still performs all teardown through `finish`.
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
 - Merge queue: when My PRs and the queue are both enabled, the first Mine request
-  includes `mergeQueue @include(if: $includeQueue)`; `--only queue` keeps its
+  includes `mergeQueue @include(if: $includeQueue)`; `--only queue` shares the
+  combined request when both watch views are due, and otherwise keeps its
   separate queue request. `repository.defaultBranchRef` returns the default ref
   ID, classic
   required contexts, and its first active-rules page.
