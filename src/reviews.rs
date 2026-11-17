@@ -42,7 +42,8 @@ fn updated_since(last_commit: Option<&str>, my_last_review: Option<&str>) -> boo
 /// Derive a PR's review state from whether it currently requests my review,
 /// whether I've reviewed it, and (for reviewed PRs) whether it moved since.
 fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
-    let has_my_review = !node.reviews.nodes.is_empty();
+    let my_reviews = node.reviews.as_ref().map_or(&[][..], |r| &r.nodes);
+    let has_my_review = !my_reviews.is_empty();
     match (requested, has_my_review) {
         (true, true) => ReviewState::ReReview,
         (true, false) => ReviewState::Awaiting,
@@ -52,9 +53,7 @@ fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
                 .nodes
                 .first()
                 .and_then(|c| c.commit.committed_date.as_deref());
-            let my_last_review = node
-                .reviews
-                .nodes
+            let my_last_review = my_reviews
                 .iter()
                 .filter_map(|r| r.submitted_at.as_deref())
                 .max();
@@ -65,7 +64,8 @@ fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
             }
         }
         // A PR I haven't reviewed and that isn't requesting me shouldn't surface,
-        // but treat it as quietly reviewed rather than panic.
+        // but treat it as quietly reviewed rather than panic. A `reviewed` node
+        // whose `reviews` field errored also lands here, by design.
         (false, false) => ReviewState::Reviewed,
     }
 }
@@ -250,15 +250,31 @@ mod tests {
                     .into_iter()
                     .collect(),
             },
-            reviews: MyReviews {
+            reviews: Some(MyReviews {
                 nodes: my_reviews
                     .iter()
                     .map(|s| MyReview {
                         submitted_at: Some(s.to_string()),
                     })
                     .collect(),
-            },
+            }),
         }
+    }
+
+    #[test]
+    fn unknown_reviews_count_as_none() {
+        let mut unknown = node(1, "alice", Some("2026-06-10T00:00:00Z"), &[]);
+        unknown.reviews = None;
+        assert_eq!(review_state(true, &unknown), ReviewState::Awaiting);
+        assert_eq!(review_state(false, &unknown), ReviewState::Reviewed);
+
+        let known = node(
+            1,
+            "alice",
+            Some("2026-06-10T00:00:00Z"),
+            &["2026-06-09T00:00:00Z"],
+        );
+        assert_eq!(review_state(false, &known), ReviewState::Updated);
     }
 
     #[test]

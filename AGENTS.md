@@ -145,6 +145,11 @@ watch event loop); everything else is testable modules:
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   GraphQL partial-data errors warn in each affected section, including a
   section that consumes warned shared rule data; the cache adds no requests.
+  A Reviews node whose `reviews` field errors (`ReviewPrNode.reviews` is an
+  `Option`) keeps its row and counts as having none of my reviews: `Awaiting`
+  from `requested`, `Reviewed` from `reviewed`. A failed `requested`/`reviewed`
+  alias or a null `commits` node still fails the section: both fields are
+  non-null in the schema, so the null propagates and no row survives.
   Watch mode also keeps a session-only memo for required-context lookups,
   both in separate Mine fetches and when combined with Reviews.
   It skips commit-context POSTs only for matching PR, commit, base-ref,

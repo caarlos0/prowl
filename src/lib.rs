@@ -4656,6 +4656,107 @@ mod tests {
     }
 
     #[test]
+    fn reviews_keep_rows_when_a_nodes_reviews_field_errors() {
+        let repo = Repo::parse("o/r").unwrap();
+        let reviews_only = || {
+            let mut response: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/reviews.json")).unwrap();
+            response["data"]["reviewedMerged"] = serde_json::json!({ "nodes": [] });
+            (
+                [(GRAPHQL.to_string(), response.to_string())].to_vec(),
+                Cli::try_parse_from(["prowl", "--view", "reviews"]).unwrap(),
+                false,
+            )
+        };
+        let combined = || {
+            let routes = tagged_watch();
+            let (_, body) = routes.iter().find(|(route, _)| route == GRAPHQL).unwrap();
+            let mut response: serde_json::Value = serde_json::from_str(body).unwrap();
+            let mut nodes = response["data"]["requested"]["nodes"].clone();
+            for node in nodes.as_array_mut().unwrap() {
+                let number = node["number"].as_i64().unwrap();
+                node["number"] = (number + 100).into();
+            }
+            response["data"]["reviewed"] = serde_json::json!({ "issueCount": 3, "nodes": nodes });
+            let routes = routes
+                .into_iter()
+                .map(|(route, body)| {
+                    if route == GRAPHQL {
+                        (route, response.to_string())
+                    } else {
+                        (route, body)
+                    }
+                })
+                .collect();
+            (routes, Cli::try_parse_from(["prowl"]).unwrap(), true)
+        };
+
+        for (search, state) in [
+            ("requested", status::ReviewState::Awaiting),
+            ("reviewed", status::ReviewState::Reviewed),
+        ] {
+            for (routes, cli, want_mine) in [reviews_only(), combined()] {
+                let mut response: serde_json::Value = serde_json::from_str(
+                    &routes.iter().find(|(route, _)| route == GRAPHQL).unwrap().1,
+                )
+                .unwrap();
+                let total = response["data"]["requested"]["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+                    + response["data"]["reviewed"]["nodes"]
+                        .as_array()
+                        .unwrap()
+                        .len();
+                let number = response["data"][search]["nodes"][1]["number"]
+                    .as_i64()
+                    .unwrap();
+                response["data"][search]["nodes"][1]["reviews"] = serde_json::Value::Null;
+                response["errors"] = serde_json::json!([{
+                    "message": "reviews unavailable",
+                    "path": [search, "nodes", 1, "reviews"]
+                }]);
+                let routes: Vec<_> = routes
+                    .into_iter()
+                    .map(|(route, body)| {
+                        if route == GRAPHQL {
+                            (route, response.to_string())
+                        } else {
+                            (route, body)
+                        }
+                    })
+                    .collect();
+                let (client, fake) = github::fake::client(routes);
+                let outcome = fetch(
+                    &cli,
+                    &client,
+                    &repo,
+                    "me",
+                    &mut Some("main".to_string()),
+                    want_mine,
+                    true,
+                );
+
+                assert_eq!(outcome.issues.len(), 1, "{search}: {:?}", outcome.issues);
+                assert_eq!(outcome.issues[0].scope, FetchScope::Reviews);
+                assert!(outcome.issues[0].warning, "{search}: not stale");
+                assert!(outcome.issues[0].message.contains("reviews unavailable"));
+                let rows = outcome.sections.reviews.as_ref().expect("rows kept");
+                assert_eq!(rows.len(), total, "{search}");
+                let row = rows.iter().find(|row| row.number == number).unwrap();
+                assert_eq!(row.state, state, "{search}");
+                assert_eq!(
+                    fake.requests()
+                        .iter()
+                        .filter(|request| request.as_str() == GRAPHQL)
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn scrolling_queue_accounts_for_search_status_and_selection() {
         let sections = Sections {
             queue: Some((0..=40).map(|n| queue_row(n, n == 0, n == 0)).collect()),
