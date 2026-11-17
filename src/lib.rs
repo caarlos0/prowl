@@ -620,9 +620,11 @@ fn fetch(
         repo,
         me,
         default_branch,
-        want_mine,
-        want_reviews,
-        true,
+        Due {
+            mine: want_mine,
+            reviews: want_reviews,
+            shipments: true,
+        },
     )
 }
 
@@ -632,42 +634,32 @@ fn fetch_scheduled(
     repo: &Repo,
     me: &str,
     default_branch: &mut Option<String>,
-    want_mine: bool,
-    want_reviews: bool,
-    scan_shipments: bool,
+    due: Due,
 ) -> FetchOutcome {
     let mut issues = Vec::new();
-    let mut shipment_scan = want_mine && scan_shipments && cli.show_shipments();
-    let branch_error = if want_mine && scan_shipments && cli.show_shipments() {
+    let mut shipment_scan = due.mine && due.shipments && cli.show_shipments();
+    let branch_error = if due.mine && due.shipments && cli.show_shipments() {
         resolve_default_branch(client, repo, default_branch)
     } else {
         None
     };
-    let default_branch = if want_mine && scan_shipments && cli.show_shipments() {
+    let default_branch = if due.mine && due.shipments && cli.show_shipments() {
         default_branch.as_deref()
     } else {
         None
     };
 
-    let (commit_stats, mut release_map) = fetch_release_data(
-        cli,
-        client,
-        repo,
-        me,
-        default_branch,
-        want_mine,
-        scan_shipments,
-        &mut issues,
-    );
+    let (commit_stats, mut release_map) =
+        fetch_release_data(cli, client, repo, me, default_branch, due, &mut issues);
     if let Some(error) = branch_error {
         issues.push(FetchIssue::new(FetchScope::Upcoming, &error));
     }
 
     let fetched_reviews =
-        fetch_review_sections(cli, client, repo, me, want_mine, want_reviews, &mut issues);
+        fetch_review_sections(cli, client, repo, me, due.mine, due.reviews, &mut issues);
     let merged_nodes = fetched_reviews.merged_nodes;
-    if want_mine
-        && scan_shipments
+    if due.mine
+        && due.shipments
         && !cli.show_shipments()
         && let Some(nodes) = merged_nodes.as_deref()
     {
@@ -677,7 +669,7 @@ fn fetch_scheduled(
     let merged =
         merged_nodes.map(|nodes| merged::build_rows(nodes, cli.merged_limit, &release_map));
     let mut required_context_cache = model::RequiredContextCache::default();
-    let (queue, queue_next_eta) = if want_mine && cli.show_queue() {
+    let (queue, queue_next_eta) = if due.mine && cli.show_queue() {
         graphql_section(
             FetchScope::Queue,
             model::fetch_queue_with_context_cache(
@@ -693,7 +685,7 @@ fn fetch_scheduled(
     } else {
         (None, None)
     };
-    let prs = if want_mine && cli.show_mine() {
+    let prs = if due.mine && cli.show_mine() {
         graphql_section(
             FetchScope::Mine,
             model::fetch_my_prs_with_context_cache(
@@ -717,7 +709,7 @@ fn fetch_scheduled(
     } else {
         None
     };
-    let commits = if want_mine && cli.show_shipments() {
+    let commits = if due.mine && cli.show_shipments() {
         commit_stats
     } else {
         None
@@ -761,12 +753,11 @@ fn fetch_release_data(
     repo: &Repo,
     me: &str,
     default_branch: Option<&str>,
-    want_mine: bool,
-    scan_shipments: bool,
+    due: Due,
     issues: &mut Vec<FetchIssue>,
 ) -> (Option<commits::CommitStats>, commits::ReleaseMap) {
     // Shipment counts also supply merged-row release annotations.
-    if want_mine && scan_shipments && cli.show_shipments() {
+    if due.mine && due.shipments && cli.show_shipments() {
         match commits::fetch(client, repo, me, default_branch, cli.include_pre_releases) {
             Ok((stats, release_map, errors)) => {
                 release_errors(errors, issues, FetchScope::Shipments, cli.show_merged());
@@ -783,7 +774,7 @@ fn fetch_release_data(
                 )
             }
         }
-    } else if want_mine && !scan_shipments {
+    } else if due.mine && !due.shipments {
         (None, commits::ReleaseMap::incomplete())
     } else {
         (None, commits::ReleaseMap::new())
@@ -2657,16 +2648,7 @@ impl<'a> App<'a> {
                 if resolve {
                     me = client.me()?;
                 }
-                let outcome = fetch_scheduled(
-                    &cli,
-                    &client,
-                    &repo,
-                    &me,
-                    &mut default_branch,
-                    due.mine,
-                    due.reviews,
-                    due.shipments,
-                );
+                let outcome = fetch_scheduled(&cli, &client, &repo, &me, &mut default_branch, due);
                 Ok((me, default_branch, outcome))
             })();
             let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
@@ -5441,18 +5423,9 @@ mod tests {
         let cli = Cli::try_parse_from(["prowl"]).unwrap();
         let repo = Repo::parse("o/r").unwrap();
         let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
-        let fetch_views = |client: &Client, mine, reviews, shipments| {
+        let fetch_views = |client: &Client, due| {
             let mut branch = Some("main".to_string());
-            fetch_scheduled(
-                &cli,
-                client,
-                &repo,
-                "me",
-                &mut branch,
-                mine,
-                reviews,
-                shipments,
-            )
+            fetch_scheduled(&cli, client, &repo, "me", &mut branch, due)
         };
         let render = |sections: &Sections, view| {
             render_to_string(
@@ -5484,12 +5457,19 @@ mod tests {
                 fake.set_response(GRAPHQL, 200, &[], graphql);
                 // Baseline: a refresh that fetches both views.
                 let (base_client, base_fake) = github::fake::client(routes.clone());
-                let base = fetch_views(&base_client, true, true, true);
+                let base = fetch_views(
+                    &base_client,
+                    Due {
+                        mine: true,
+                        reviews: true,
+                        shipments: true,
+                    },
+                );
                 let before = counts(&base_fake.requests());
 
                 let sent = fake.requests().len();
                 let due = schedule.next(active, manual, true);
-                let outcome = fetch_views(&client, due.mine, due.reviews, due.shipments);
+                let outcome = fetch_views(&client, due);
                 let after = counts(&fake.requests()[sent..]);
                 let now = start + chrono::TimeDelta::minutes(5 * tick);
                 schedule.record(due, &outcome.issues, now, outcome.shipment_scan);
@@ -5503,20 +5483,15 @@ mod tests {
                 assert_eq!(due.includes(inactive), inactive_due, "{label}: {due:?}");
                 assert_eq!(before, (4, 3), "{label}");
                 assert_eq!(due.shipments, shipments_due, "{label}: {due:?}");
-                assert_eq!(
-                    after,
-                    (
-                        if due.shipments { before.0 } else { 0 },
-                        if due.reviews {
-                            if due.mine { before.1 } else { 1 }
-                        } else if due.mine {
-                            before.1
-                        } else {
-                            0
-                        },
-                    ),
-                    "{label}"
+                let expected_after = (
+                    if due.shipments { before.0 } else { 0 },
+                    if due.mine {
+                        before.1
+                    } else {
+                        usize::from(due.reviews)
+                    },
                 );
+                assert_eq!(after, expected_after, "{label}");
                 assert!(outcome.issues.is_empty(), "{label}: {:?}", outcome.issues);
                 assert_eq!(
                     render(&outcome.sections, active),
@@ -6444,16 +6419,7 @@ mod tests {
 
         let first_due = schedule.next(View::Mine, false, true);
         assert!(first_due.shipments);
-        let first = fetch_scheduled(
-            &cli,
-            &client,
-            &repo,
-            "me",
-            &mut branch,
-            first_due.mine,
-            first_due.reviews,
-            first_due.shipments,
-        );
+        let first = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, first_due);
         assert!(first.shipment_scan);
         schedule.record(
             first_due,
@@ -6474,16 +6440,7 @@ mod tests {
         let sent = fake.requests().len();
         let second_due = schedule.next(View::Mine, false, true);
         assert!(!second_due.shipments);
-        let second = fetch_scheduled(
-            &cli,
-            &client,
-            &repo,
-            "me",
-            &mut branch,
-            second_due.mine,
-            second_due.reviews,
-            second_due.shipments,
-        );
+        let second = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, second_due);
         assert!(!second.shipment_scan);
         assert_eq!(fake.requests()[sent..], [GRAPHQL]);
         schedule.record(
