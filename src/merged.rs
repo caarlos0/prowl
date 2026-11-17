@@ -16,8 +16,10 @@ pub struct MergedRow {
     #[serde(default)]
     pub branch: String,
     pub url: String,
-    /// The release that shipped this PR, or `None` when it hasn't shipped yet.
+    /// The release that shipped this PR, if known.
     pub release: Option<ReleaseRef>,
+    #[serde(default)]
+    pub release_unknown: bool,
     pub merged_at: Option<String>,
 }
 
@@ -26,13 +28,17 @@ pub struct MergedRow {
 pub fn build_rows(nodes: Vec<MergedNode>, limit: usize, releases: &ReleaseMap) -> Vec<MergedRow> {
     let mut rows: Vec<MergedRow> = nodes
         .into_iter()
-        .map(|n| MergedRow {
-            number: n.number,
-            title: n.title,
-            branch: n.head_ref_name.unwrap_or_default(),
-            url: n.url,
-            release: releases.get(&n.number).cloned(),
-            merged_at: n.merged_at,
+        .map(|n| {
+            let release = releases.get(&n.number).cloned();
+            MergedRow {
+                number: n.number,
+                title: n.title,
+                branch: n.head_ref_name.unwrap_or_default(),
+                url: n.url,
+                release_unknown: release.is_none() && !releases.is_complete(),
+                release,
+                merged_at: n.merged_at,
+            }
         })
         .collect();
     // RFC 3339 timestamps in a fixed `...Z` form sort lexically == chronologically.
@@ -54,9 +60,10 @@ pub fn to_table(
     let dim = Style::new().faint();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        // The release tag links to its release page; an unshipped PR shows a dash.
+        // An unknown release lookup must not look like a confirmed unshipped PR.
         let release = match &r.release {
             Some(rr) => Cell::link(rr.tag.clone(), rr.url.clone()),
+            None if r.release_unknown => Cell::styled("?".to_string(), &dim),
             None => Cell::styled("\u{2014}".to_string(), &dim),
         };
         let mut row = vec![
@@ -149,5 +156,19 @@ mod tests {
         assert_eq!(rows[0].number, 2);
         assert_eq!(rows[0].release.as_ref().unwrap().tag, "v1.2.0");
         assert!(rows[1].release.is_none());
+    }
+
+    #[test]
+    fn unknown_release_is_not_rendered_as_unshipped() {
+        let rows = build_rows(
+            vec![node(1, "2026-06-10T00:00:00Z")],
+            10,
+            &ReleaseMap::incomplete(),
+        );
+        assert!(rows[0].release_unknown);
+        assert_eq!(
+            to_table(&rows, true, &HashSet::new(), false).rows[0][4].text,
+            "?"
+        );
     }
 }
