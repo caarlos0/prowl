@@ -909,6 +909,7 @@ fn fetch_required_contexts(
     mut fetch: impl FnMut(&str, serde_json::Value) -> Result<(RequiredRefsData, Vec<GqlError>)>,
 ) -> Result<Vec<GqlError>> {
     let mut errors = Vec::new();
+    let mut errors_by_ref = HashMap::<String, Vec<GqlError>>::new();
     let mut seen = HashSet::new();
     let mut pending: Vec<_> = ids
         .iter()
@@ -944,8 +945,7 @@ fn fetch_required_contexts(
                     .cloned()
                     .collect::<Vec<_>>();
                 if !relevant.is_empty() {
-                    context_cache
-                        .errors
+                    errors_by_ref
                         .entry(item.id.clone())
                         .or_default()
                         .extend(relevant);
@@ -972,6 +972,13 @@ fn fetch_required_contexts(
                     .contexts
                     .insert(item.id.clone(), std::mem::take(&mut item.contexts));
                 context_cache.pending.remove(&item.id);
+                if let Some(errors) = errors_by_ref.remove(&item.id) {
+                    context_cache
+                        .errors
+                        .entry(item.id.clone())
+                        .or_default()
+                        .extend(errors);
+                }
                 false
             }
         });
@@ -1965,7 +1972,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mine_errors[0].message, "required rules unavailable");
-        assert!(fake.requests().is_empty());
+        assert_eq!(fake.requests(), Vec::<String>::new());
     }
 
     #[test]
@@ -2177,6 +2184,53 @@ mod tests {
             cache.contexts["ref"],
             HashSet::from(["classic".into(), "test".into(), "lint".into()])
         );
+    }
+
+    #[test]
+    fn failed_rule_response_errors_do_not_taint_a_successful_retry() {
+        let error: GqlError = serde_json::from_value(serde_json::json!({
+            "message": "required rules unavailable",
+            "path": ["r0", "rules"]
+        }))
+        .unwrap();
+        let mut cache = RequiredContextCache::default();
+        let ids = ["ref".to_string()];
+        let failed = fetch_required_contexts(&ids, &mut cache, |_, _| {
+            Ok((
+                RequiredRefsData {
+                    refs: HashMap::from([("r0".to_string(), serde_json::Value::Null)]),
+                },
+                vec![error.clone()],
+            ))
+        });
+        assert!(failed.is_err());
+        assert!(!cache.errors.contains_key("ref"));
+
+        fetch_required_contexts(&ids, &mut cache, |_, variables| {
+            let after = variables["after0"].as_str();
+            Ok((
+                RequiredRefsData {
+                    refs: HashMap::from([("r0".to_string(), required_rule_page(after))]),
+                },
+                Vec::new(),
+            ))
+        })
+        .unwrap();
+
+        let (client, fake) = crate::github::fake::client([]);
+        let (_, errors) = fetch_required(
+            &client,
+            &[RequiredTarget {
+                pull_request_number: 1,
+                commit_id: None,
+                base_ref_id: Some("ref".to_string()),
+            }],
+            false,
+            &mut cache,
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(fake.requests(), Vec::<String>::new());
     }
 
     #[test]
