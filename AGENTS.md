@@ -486,7 +486,9 @@ still performs all teardown through `finish`.
 - **Queue dedup:** a PR of mine that's in the merge queue is shown only in the
   Merge Queue section, not the open-PRs list (`prs::without_queued`, applied at
   layout time only while the queue section is enabled, so `--only mine` still
-  lists it).
+  lists it). It drops only PR numbers present in the displayed queue rows, so
+  rendering and `nav` agree; a PR with a `mergeQueueEntry` that a stale or
+  missing queue lacks stays in My PRs and selectable.
 - **Drafts:** `--no-draft` hides draft PRs from both the Mine open-PRs list and
   the Reviews list (`prs::without_drafts` / `reviews::without_drafts`). It also
   adds `draft:false` to the Mine open search (`model::mine_search`), so drafts
@@ -501,7 +503,9 @@ still performs all teardown through `finish`.
   successful fetch its data is at most two intervals old. A view with a failed
   section is not marked fetched, so the next refresh retries it and its age
   stays that of its last successful fetch; a partial-data warning still counts
-  as fetched. The first refresh, including after a cached start, and every
+  as fetched. A failed shipment scan (REST) does not count: the Mine view's age
+  follows its GraphQL sections, and shipments keep their own age note. The
+  first refresh, including after a cached start, and every
   `Ctrl-R` refresh fetch both views. A refresh that skips a view keeps that
   view's sections, section errors, and warnings
   (`FetchOutcome::merge`), so Tab switches instantly from `last_good` with no
@@ -516,9 +520,13 @@ still performs all teardown through `finish`.
   `--once`/piped fetches only the
   selected view.
   The REST shipment scan has its own cadence in the same schedule: it runs
-  every second Mine refresh, while `Ctrl-R` forces it. Cached shipment counts
-  and release annotations show their age; an unmapped PR stays `?` until the
-  next scan. A top tab strip marks the active view.
+  every second attempted Mine refresh, even while a Mine section keeps
+  failing, and `Ctrl-R` forces it. When the merged search fails in a scan
+  refresh, the watch keeps that scan's release map (`App::unapplied_releases`,
+  session-only) and builds the next merged rows from it, with no extra REST
+  scan. Cached shipment counts
+  and release annotations show their age; otherwise an unmapped PR stays `?`
+  until the next scan. A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
   reviewed by me), `ReReview` (requested again after I reviewed: a requested
   PR with a review of mine), `Updated` (I
@@ -537,7 +545,13 @@ still performs all teardown through `finish`.
   `/` search, the first number counts the matching rows.
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
-  not ring). The first refresh is silent. Changed rows get a `▸` marker. Bell
+  not ring). The open-PR and merged baselines arm the bell independently
+  (`lib.rs::Armed`, `lib.rs::track_changes`): each arms after a refresh that
+  replaced it with trusted live data (no Mine issue for open PRs, no Merged
+  issue for merged PRs, warnings included). Until then that baseline's changes
+  are silent, so a cached start with a partial first refresh never rings for
+  changes made while prowl was closed, and a repeated warning in one section
+  does not silence the other. Changed rows get a `▸` marker. Bell
   and change markers track the **Mine** view only (the Reviews view conveys
   state through its per-row glyph instead). While Reviews is active, Mine
   changes are detected when the Mine view is next fetched (at most two
@@ -567,6 +581,10 @@ still performs all teardown through `finish`.
   GraphQL responses with usable data and errors keep their rows and show a
   `partial data` warning in the affected section and status line. Warnings do
   not replace the section with stale data or change bell and unread tracking.
+  A null `repository` or `mergeQueue` with an error at `[repository]`,
+  `[repository, mergeQueue]` or no path is a failed Merge Queue section, in the
+  queue-only request and the combined one alike, so `--once --only queue` exits
+  non-zero and watch keeps the retained rows.
   One-shot output succeeds with warnings and exits with an error only when a
   section failed. If a section first becomes available after a cold failure, it
   seeds change detection without reporting historical merges as new.
@@ -633,7 +651,8 @@ still performs all teardown through `finish`.
 - **Cache:** on a watch start, prowl paints the cached `Sections` immediately
   (entering the alt screen straight away), seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
-  but stays silent (no startup bell). A refresh writes the cache only when all
+  but stays silent (no startup bell, even when the first refresh is partial).
+  A refresh writes the cache only when all
   enabled section fetches succeeded; partial data remains in memory only. With
   no cache it shows an inline
   `Loading...` frame and enters the alt screen only once the first fetch lands.
