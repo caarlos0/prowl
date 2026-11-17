@@ -250,6 +250,9 @@ watch event loop); everything else is testable modules:
   trailing dim column) and a `ReleaseMap` (PR number → the release that
   shipped it, parsed from each commit subject's trailing `(#NNN)`, the squash /
   merge-commit convention) that annotates the merged section's `RELEASE` column.
+  A compare range capped at 250 commits keeps its lower-bound `N+` count and
+  marks the release map incomplete, so unmapped merged PRs show `?`; the cap is
+  not a fetch issue and does not block cache saves or successful one-shot output.
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
   Release tags are collected before any ranges are scanned, so a failed
   pagination request cannot change a comparison base. Completed buckets remain
@@ -491,6 +494,8 @@ still performs all teardown through `finish`.
   Partial shipment scans retain completed buckets, mark failed buckets
   unavailable, and render unknown release lookups as `?`. Partial fetches do
   not write the cache, so degraded data is never saved as a fresh snapshot.
+  Capped compare ranges keep lower-bound counts and incomplete release maps
+  without becoming fetch issues.
   GraphQL responses with usable data and errors keep their rows and show a
   `partial data` warning in the affected section and status line. Warnings do
   not replace the section with stale data or change bell and unread tracking.
