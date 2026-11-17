@@ -86,6 +86,9 @@ pub struct Sections {
     pub commits: Option<commits::CommitStats>,
     /// Reviews view: open PRs awaiting / under my review.
     pub reviews: Option<Vec<reviews::ReviewRow>>,
+    /// Total open-review PR count when one of the searches hit its 50-row cap.
+    #[serde(default)]
+    pub reviews_total: Option<usize>,
     /// Reviews view: merged PRs I reviewed.
     pub reviewed_merged: Option<Vec<reviews::ReviewedMergedRow>>,
 }
@@ -100,6 +103,7 @@ impl Sections {
         prs: None,
         commits: None,
         reviews: None,
+        reviews_total: None,
         reviewed_merged: None,
     };
 }
@@ -211,6 +215,7 @@ struct FetchOutcome {
 struct FetchedReviewSections {
     merged_nodes: Option<Vec<model::MergedNode>>,
     reviews: Option<Vec<reviews::ReviewRow>>,
+    reviews_total: Option<usize>,
     reviewed_merged: Option<Vec<reviews::ReviewedMergedRow>>,
 }
 
@@ -727,6 +732,7 @@ fn fetch_scheduled_with_context_memo(
             prs: mine_sections.prs,
             commits,
             reviews: fetched_reviews.reviews,
+            reviews_total: fetched_reviews.reviews_total,
             reviewed_merged: fetched_reviews.reviewed_merged,
         },
         issues,
@@ -990,15 +996,19 @@ fn map_reviews_and_merged(
         FetchScope::Reviews,
         fetched.reviews,
         |data| {
+            let total = data.is_capped().then(|| data.total_count());
             let rows = reviews::build_open_rows(data);
-            if cli.no_draft {
+            let rows = if cli.no_draft {
                 reviews::without_drafts(rows)
             } else {
                 rows
-            }
+            };
+            (rows, total)
         },
         issues,
     );
+    let (reviews, reviews_total) =
+        reviews.map_or((None, None), |(rows, total)| (Some(rows), total));
     let reviewed_merged = graphql_section(
         FetchScope::ReviewedMerged,
         fetched.reviewed_merged,
@@ -1008,6 +1018,7 @@ fn map_reviews_and_merged(
     FetchedReviewSections {
         merged_nodes,
         reviews,
+        reviews_total,
         reviewed_merged,
     }
 }
@@ -1040,6 +1051,7 @@ fn failed_review_sections(
     FetchedReviewSections {
         merged_nodes,
         reviews,
+        reviews_total: None,
         reviewed_merged,
     }
 }
@@ -1104,7 +1116,7 @@ fn paint_section(
     s: &mut impl TextSurface,
     title: &str,
     accent: Color,
-    count: usize,
+    count: impl std::fmt::Display,
     note: Option<&str>,
     empty_msg: &str,
     table: Option<&render::Table>,
@@ -1347,7 +1359,10 @@ fn paint_reviews(
             s,
             "Reviews",
             status::LAVENDER,
-            rows.len(),
+            sections.reviews_total.map_or_else(
+                || rows.len().to_string(),
+                |total| format!("{} of {total}", rows.len()),
+            ),
             warnings
                 .contains(&FetchScope::Reviews)
                 .then_some("partial data"),
@@ -4465,6 +4480,72 @@ mod tests {
     }
 
     #[test]
+    fn reviews_header_shows_capped_total() {
+        let sections = Sections {
+            reviews: Some(vec![review_row(7)]),
+            reviews_total: Some(154),
+            ..Sections::EMPTY
+        };
+        let body = body(&sections, &ui(View::Reviews));
+        assert!(body.contains("Reviews (1 of 154)"));
+    }
+
+    #[test]
+    fn capped_reviews_fetch_keeps_rereview_and_shows_total_in_one_post() {
+        let mut response: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/reviews.json")).unwrap();
+        let request_template = response["data"]["requested"]["nodes"][0].clone();
+        response["data"]["requested"]["issueCount"] = 117.into();
+        response["data"]["requested"]["nodes"] = serde_json::Value::Array(
+            (1..=51)
+                .filter(|number| *number != 7)
+                .take(50)
+                .map(|number| {
+                    let mut node = request_template.clone();
+                    node["number"] = number.into();
+                    node
+                })
+                .collect(),
+        );
+        let mut reviewed = response["data"]["reviewed"]["nodes"][0].clone();
+        reviewed["number"] = 7.into();
+        response["data"]["reviewed"]["issueCount"] = 56.into();
+        response["data"]["reviewed"]["nodes"] = serde_json::json!([reviewed]);
+        response["data"]["rereviewed"] = serde_json::json!({
+            "issueCount": 19,
+            "nodes": [{ "number": 7 }]
+        });
+        response["data"]["reviewedMerged"] = serde_json::json!({ "nodes": [] });
+        response["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mineMerged");
+
+        let cli = Cli::try_parse_from(["prowl", "--view", "reviews"]).unwrap();
+        let (client, fake) =
+            github::fake::client([("POST /graphql".to_string(), response.to_string())]);
+        let outcome = fetch(
+            &cli,
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            &mut None,
+            false,
+            true,
+        );
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        assert_eq!(fake.requests(), ["POST /graphql"]);
+        assert_eq!(outcome.sections.reviews_total, Some(154));
+        let rows = outcome.sections.reviews.as_ref().unwrap();
+        assert_eq!(rows.len(), 51);
+        assert_eq!(
+            rows.iter().find(|row| row.number == 7).unwrap().state,
+            status::ReviewState::ReReview
+        );
+        assert!(body(&outcome.sections, &ui(View::Reviews)).contains("Reviews (51 of 154)"));
+    }
+
+    #[test]
     fn scrolling_queue_accounts_for_search_status_and_selection() {
         let sections = Sections {
             queue: Some((0..=40).map(|n| queue_row(n, n == 0, n == 0)).collect()),
@@ -5265,8 +5346,10 @@ mod tests {
         fake.set_graphql_responder(move |body| {
             let mut response: serde_json::Value = serde_json::from_str(&mine(body)).unwrap();
             if body["variables"].get("requested").is_some() {
-                response["data"]["requested"] = serde_json::json!({ "nodes": [] });
-                response["data"]["reviewed"] = serde_json::json!({ "nodes": [] });
+                response["data"]["requested"] = serde_json::json!({ "issueCount": 0, "nodes": [] });
+                response["data"]["reviewed"] = serde_json::json!({ "issueCount": 0, "nodes": [] });
+                response["data"]["rereviewed"] =
+                    serde_json::json!({ "issueCount": 0, "nodes": [] });
                 response["data"]["reviewedMerged"] = serde_json::json!({ "nodes": [] });
                 response["data"]["mineMerged"] = serde_json::json!({ "nodes": [] });
             }
@@ -5297,6 +5380,7 @@ mod tests {
         assert_eq!(numbers, [12, 10, 9, 7, 6, 4, 3, 1]);
         let searches = searches.lock().unwrap();
         assert_eq!(searches.len(), 2);
+        assert_eq!(fake.requests().len(), 2);
         assert!(
             searches.iter().all(|q| q.contains(" draft:false ")),
             "{searches:?}"

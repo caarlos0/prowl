@@ -392,7 +392,7 @@ pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: Strin
   }
 }"#;
 
-const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeQueue: Boolean!, $me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
+const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeQueue: Boolean!, $me: String!, $requested: String!, $reviewed: String!, $rereviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef {
       id
@@ -447,8 +447,9 @@ const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!,
       }
     }
   }
-  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...watchReview } }
-  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...watchReview } }
+  requested: search(type: ISSUE, first: 50, query: $requested) { issueCount nodes { ...watchReview } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount nodes { ...watchReview } }
+  rereviewed: search(type: ISSUE, first: 100, query: $rereviewed) { issueCount nodes { ... on PullRequest { number } } }
   reviewedMerged: search(type: ISSUE, first: $mergedLimit, query: $reviewedMerged) { nodes { ...watchMerged } }
   mineMerged: search(type: ISSUE, first: $mergedLimit, query: $mineMerged) @include(if: $includeMineMerged) { nodes { ...watchMerged } }
 }
@@ -851,6 +852,7 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
 ) -> Result<MineReviewsQueueResults> {
     let q = mine_search(repo, me, sort, options.no_draft);
     let (requested, reviewed) = reviews_searches(repo, me, options.requested_qualifier);
+    let rereviewed = rereview_search(repo, me, options.requested_qualifier);
     let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
         WATCH_MINE_REVIEWS_QUERY,
         serde_json::json!({
@@ -862,6 +864,7 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
             "me": me,
             "requested": requested,
             "reviewed": reviewed,
+            "rereviewed": rereviewed,
             "reviewedMerged": reviewed_merged_search(repo, me, options.since),
             "mineMerged": merged_search(repo, me, options.since),
             "mergedLimit": options.merged_limit.clamp(1, 100),
@@ -877,7 +880,7 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
                     .as_ref()
                     .and_then(|path| path.first())
                     .and_then(serde_json::Value::as_str),
-                Some("requested" | "reviewed" | "mineMerged" | "reviewedMerged")
+                Some("requested" | "reviewed" | "rereviewed" | "mineMerged" | "reviewedMerged")
             )
         })
         .cloned()
@@ -1956,7 +1959,13 @@ fn merged_alias(
 }
 
 fn alias_errors(errors: &[GqlError], aliases: &[&str]) -> Vec<GqlError> {
-    const KNOWN_ALIASES: &[&str] = &["requested", "reviewed", "mineMerged", "reviewedMerged"];
+    const KNOWN_ALIASES: &[&str] = &[
+        "requested",
+        "reviewed",
+        "rereviewed",
+        "mineMerged",
+        "reviewedMerged",
+    ];
     errors
         .iter()
         .filter(|error| {
@@ -1976,9 +1985,10 @@ fn alias_errors(errors: &[GqlError], aliases: &[&str]) -> Vec<GqlError> {
 // ----------------------------------------------------------------------------
 
 /// Standalone Reviews and merged searches when the combined watch query is not selected.
-pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
-  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
-  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
+pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!, $rereviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
+  requested: search(type: ISSUE, first: 50, query: $requested) { issueCount nodes { ...rev } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount nodes { ...rev } }
+  rereviewed: search(type: ISSUE, first: 100, query: $rereviewed) { issueCount nodes { ... on PullRequest { number } } }
   reviewedMerged: search(type: ISSUE, first: $mergedLimit, query: $reviewedMerged) { nodes { ...merged } }
   mineMerged: search(type: ISSUE, first: $mergedLimit, query: $mineMerged) @include(if: $includeMineMerged) { nodes { ...merged } }
 }
@@ -1992,9 +2002,10 @@ fragment merged on PullRequest {
   number title url headRefName mergedAt author { login }
 }"#;
 
-const REVIEWS_ONLY_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!) {
-  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
-  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
+const REVIEWS_ONLY_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!, $rereviewed: String!) {
+  requested: search(type: ISSUE, first: 50, query: $requested) { issueCount nodes { ...rev } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount nodes { ...rev } }
+  rereviewed: search(type: ISSUE, first: 100, query: $rereviewed) { issueCount nodes { ... on PullRequest { number } } }
 }
 fragment rev on PullRequest {
   number title url headRefName isDraft updatedAt
@@ -2009,11 +2020,41 @@ pub struct ReviewsData {
     pub requested: ReviewSearch,
     /// PRs I have already reviewed.
     pub reviewed: ReviewSearch,
+    /// PRs requesting another review after I have reviewed them.
+    pub rereviewed: ReviewNumberSearch,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReviewSearch {
+    #[serde(rename = "issueCount")]
+    pub issue_count: usize,
     pub nodes: Vec<ReviewPrNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewNumberSearch {
+    #[serde(rename = "issueCount")]
+    pub issue_count: usize,
+    pub nodes: Vec<ReviewNumberNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewNumberNode {
+    pub number: i64,
+}
+
+impl ReviewsData {
+    pub fn total_count(&self) -> usize {
+        self.requested
+            .issue_count
+            .saturating_add(self.reviewed.issue_count)
+            .saturating_sub(self.rereviewed.issue_count)
+    }
+
+    pub fn is_capped(&self) -> bool {
+        self.requested.nodes.len() < self.requested.issue_count
+            || self.reviewed.nodes.len() < self.reviewed.issue_count
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2075,6 +2116,13 @@ pub fn reviews_searches(repo: &Repo, me: &str, requested_qualifier: &str) -> (St
     (requested, reviewed)
 }
 
+fn rereview_search(repo: &Repo, me: &str, requested_qualifier: &str) -> String {
+    format!(
+        "repo:{}/{} is:pr is:open {}:{} reviewed-by:{} -author:{} archived:false sort:updated-desc",
+        repo.owner, repo.name, requested_qualifier, me, me, me
+    )
+}
+
 pub fn fetch_reviews(
     client: &Client,
     repo: &Repo,
@@ -2091,9 +2139,15 @@ pub(crate) fn fetch_reviews_with_errors(
     requested_qualifier: &str,
 ) -> Result<GraphqlData<ReviewsData>> {
     let (requested, reviewed) = reviews_searches(repo, me, requested_qualifier);
+    let rereviewed = rereview_search(repo, me, requested_qualifier);
     let (data, errors) = client.graphql_with_errors(
         REVIEWS_ONLY_QUERY,
-        serde_json::json!({ "me": me, "requested": requested, "reviewed": reviewed }),
+        serde_json::json!({
+            "me": me,
+            "requested": requested,
+            "reviewed": reviewed,
+            "rereviewed": rereviewed,
+        }),
     )?;
     Ok(GraphqlData { data, errors })
 }
@@ -2114,12 +2168,14 @@ pub(crate) fn fetch_reviews_and_merged(
     include_mine: bool,
 ) -> Result<ReviewsAndMerged> {
     let (requested, reviewed) = reviews_searches(repo, me, requested_qualifier);
+    let rereviewed = rereview_search(repo, me, requested_qualifier);
     let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
         REVIEWS_QUERY,
         serde_json::json!({
             "me": me,
             "requested": requested,
             "reviewed": reviewed,
+            "rereviewed": rereviewed,
             "reviewedMerged": reviewed_merged_search(repo, me, since),
             "mineMerged": merged_search(repo, me, since),
             "mergedLimit": limit.clamp(1, 100),
@@ -2134,7 +2190,7 @@ fn parse_reviews_and_merged(
     errors: &[GqlError],
     include_mine: bool,
 ) -> ReviewsAndMerged {
-    let review_errors = alias_errors(errors, &["requested", "reviewed"]);
+    let review_errors = alias_errors(errors, &["requested", "reviewed", "rereviewed"]);
     let reviews = match serde_json::from_value(data.clone()) {
         Ok(data) => Ok(GraphqlData {
             data,
@@ -2335,14 +2391,59 @@ mod tests {
         assert!(REVIEWS_QUERY.contains("mineMerged: search"));
         assert!(REVIEWS_QUERY.contains("@include(if: $includeMineMerged)"));
         assert!(REVIEWS_QUERY.contains("first: $mergedLimit"));
+        for query in [REVIEWS_QUERY, REVIEWS_ONLY_QUERY, WATCH_MINE_REVIEWS_QUERY] {
+            assert!(query.contains(
+                "requested: search(type: ISSUE, first: 50, query: $requested) { issueCount"
+            ));
+            assert!(query.contains(
+                "reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount"
+            ));
+            assert!(query.contains(
+                "rereviewed: search(type: ISSUE, first: 100, query: $rereviewed) { issueCount"
+            ));
+        }
+        assert_eq!(
+            reviews_searches(&repo, "me", "review-requested"),
+            (
+                "repo:o/r is:pr is:open review-requested:me -author:me archived:false sort:updated-desc".into(),
+                "repo:o/r is:pr is:open reviewed-by:me -author:me archived:false sort:updated-desc".into(),
+            )
+        );
+        assert_eq!(
+            rereview_search(&repo, "me", "review-requested"),
+            "repo:o/r is:pr is:open review-requested:me reviewed-by:me -author:me archived:false sort:updated-desc"
+        );
+    }
+
+    #[test]
+    fn reviews_only_fetch_uses_one_post() {
+        let response = serde_json::json!({
+            "data": {
+                "requested": { "issueCount": 0, "nodes": [] },
+                "reviewed": { "issueCount": 0, "nodes": [] },
+                "rereviewed": { "issueCount": 0, "nodes": [] }
+            }
+        });
+        let (client, fake) =
+            crate::github::fake::client([("POST /graphql".to_string(), response.to_string())]);
+        let data = fetch_reviews_with_errors(
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            "review-requested",
+        )
+        .unwrap();
+        assert_eq!(data.data.total_count(), 0);
+        assert_eq!(fake.requests(), ["POST /graphql"]);
     }
 
     #[test]
     fn reviews_merged_fetch_keeps_successful_aliases_on_partial_error() {
         let response = serde_json::json!({
             "data": {
-                "requested": { "nodes": [] },
-                "reviewed": { "nodes": [] },
+                "requested": { "issueCount": 0, "nodes": [] },
+                "reviewed": { "issueCount": 0, "nodes": [] },
+                "rereviewed": { "issueCount": 0, "nodes": [] },
                 "mineMerged": null,
                 "reviewedMerged": {
                     "nodes": [{
@@ -2387,6 +2488,7 @@ mod tests {
         let response = serde_json::json!({
             "data": {
                 "requested": {
+                    "issueCount": 1,
                     "nodes": [{
                         "number": 1,
                         "title": "review",
@@ -2399,7 +2501,8 @@ mod tests {
                         "reviews": { "nodes": [] }
                     }]
                 },
-                "reviewed": { "nodes": [] },
+                "reviewed": { "issueCount": 0, "nodes": [] },
+                "rereviewed": { "issueCount": 0, "nodes": [] },
                 "mineMerged": {
                     "nodes": [{
                         "number": 41,

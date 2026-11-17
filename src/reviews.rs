@@ -6,7 +6,7 @@ use crate::model::{MergedNode, ReviewPrNode, ReviewsData};
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, ReviewState};
 use crate::timefmt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uncurses::style::Style;
 
 /// Author logins are truncated to this many display columns (matches the queue).
@@ -75,6 +75,12 @@ fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
 /// last update (most recent first).
 pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
     let mut nodes: HashMap<i64, (ReviewPrNode, bool)> = HashMap::new();
+    let rereviewed: HashSet<i64> = data
+        .rereviewed
+        .nodes
+        .into_iter()
+        .map(|node| node.number)
+        .collect();
     for n in data.requested.nodes {
         nodes.entry(n.number).or_insert((n, true));
     }
@@ -85,7 +91,11 @@ pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
     let mut rows: Vec<ReviewRow> = nodes
         .into_values()
         .map(|(n, requested)| {
-            let state = review_state(requested, &n);
+            let state = if rereviewed.contains(&n.number) {
+                ReviewState::ReReview
+            } else {
+                review_state(requested, &n)
+            };
             ReviewRow {
                 number: n.number,
                 is_draft: n.is_draft,
@@ -266,6 +276,7 @@ mod tests {
         let data = ReviewsData {
             // #1 awaiting (requested, never reviewed); #2 re-review (requested + reviewed).
             requested: ReviewSearch {
+                issue_count: 2,
                 nodes: vec![
                     node(1, "alice", Some("2026-06-10T00:00:00Z"), &[]),
                     node(
@@ -278,6 +289,7 @@ mod tests {
             },
             // #2 also here (re-review); #3 updated (commit after review); #4 reviewed.
             reviewed: ReviewSearch {
+                issue_count: 3,
                 nodes: vec![
                     node(
                         2,
@@ -299,6 +311,10 @@ mod tests {
                     ),
                 ],
             },
+            rereviewed: crate::model::ReviewNumberSearch {
+                issue_count: 1,
+                nodes: vec![crate::model::ReviewNumberNode { number: 2 }],
+            },
         };
         let rows = build_open_rows(data);
         // De-duplicated to four unique PRs.
@@ -316,17 +332,57 @@ mod tests {
     }
 
     #[test]
+    fn re_review_state_survives_the_requested_search_cap() {
+        let requested = (1..=51)
+            .filter(|number| *number != 7)
+            .take(50)
+            .map(|number| node(number, "alice", None, &[]))
+            .collect();
+        let data = ReviewsData {
+            requested: ReviewSearch {
+                issue_count: 117,
+                nodes: requested,
+            },
+            reviewed: ReviewSearch {
+                issue_count: 56,
+                nodes: vec![node(7, "bob", None, &["2026-06-09T00:00:00Z"])],
+            },
+            rereviewed: crate::model::ReviewNumberSearch {
+                issue_count: 19,
+                nodes: vec![crate::model::ReviewNumberNode { number: 7 }],
+            },
+        };
+        assert!(data.is_capped());
+        assert_eq!(data.total_count(), 154);
+
+        let rows = build_open_rows(data);
+        assert_eq!(rows.len(), 51);
+        assert_eq!(
+            rows.iter().find(|row| row.number == 7).unwrap().state,
+            ReviewState::ReReview
+        );
+    }
+
+    #[test]
     fn reviewed_without_new_commits_is_not_updated() {
         // Commit predates my review -> Reviewed, not Updated.
         let data = ReviewsData {
-            requested: ReviewSearch { nodes: vec![] },
+            requested: ReviewSearch {
+                issue_count: 0,
+                nodes: vec![],
+            },
             reviewed: ReviewSearch {
+                issue_count: 1,
                 nodes: vec![node(
                     9,
                     "eve",
                     Some("2026-06-01T00:00:00Z"),
                     &["2026-06-10T00:00:00Z"],
                 )],
+            },
+            rereviewed: crate::model::ReviewNumberSearch {
+                issue_count: 0,
+                nodes: vec![],
             },
         };
         let rows = build_open_rows(data);
@@ -337,9 +393,17 @@ mod tests {
     fn open_table_uses_ascii_glyphs_and_author() {
         let data = ReviewsData {
             requested: ReviewSearch {
+                issue_count: 1,
                 nodes: vec![node(1, "alice", None, &[])],
             },
-            reviewed: ReviewSearch { nodes: vec![] },
+            reviewed: ReviewSearch {
+                issue_count: 0,
+                nodes: vec![],
+            },
+            rereviewed: crate::model::ReviewNumberSearch {
+                issue_count: 0,
+                nodes: vec![],
+            },
         };
         let rows = build_open_rows(data);
         let without_branch = open_to_table(&rows, true, false);

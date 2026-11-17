@@ -121,8 +121,11 @@ watch event loop); everything else is testable modules:
   (`METHOD /path?query`) and the `If-None-Match` value.
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
-  the Mine query paths plus `REVIEWS_QUERY`, which combines the `requested:`
-  and `reviewed:` open-review searches with the reviewed-merged search.
+  the Mine query paths plus `REVIEWS_QUERY`, which combines the capped
+  `requested:` and `reviewed:` open-review searches, a number-only `rereviewed:`
+  search, and the reviewed-merged search. The Reviews searches return
+  `issueCount`; the re-review search also supplies exact overlap counts and
+  marks re-requested PRs outside the requested page.
   `WATCH_MINE_REVIEWS_QUERY` combines the first Mine page, optional queue, and
   Reviews searches when both views are due; it includes the Mine merged search
   exactly once when that section is enabled. Alias errors stay scoped to their
@@ -246,9 +249,10 @@ watch event loop); everything else is testable modules:
   its release, looked up from the `commits::ReleaseMap`.
 - `reviews.rs` — the Reviews view's rows/tables. `ReviewRow` (open: `glyph PR
   TITLE [BRANCH] AUTHOR UPDATED`, glyph = the `ReviewState`) via `build_open_rows`
-  (de-dupes the two searches, derives the state, sorts by state rank then
-  `updatedAt`) + `open_to_table`; `ReviewedMergedRow` (`glyph PR TITLE [BRANCH]
-  AUTHOR MERGED`) via `build_merged_rows` + `merged_to_table`.
+  (de-dupes the capped searches, derives ReReview from the re-review number
+  alias, sorts by state rank then `updatedAt`) + `open_to_table`;
+  `ReviewedMergedRow` (`glyph PR TITLE [BRANCH] AUTHOR MERGED`) via
+  `build_merged_rows` + `merged_to_table`.
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
   never fatal. `fetch` returns both the `CommitStats` (rendered as the "My
@@ -318,6 +322,8 @@ watch event loop); everything else is testable modules:
   Loading re-sorts My open PRs using the current `--sort-open` value rather
   than the order saved by a previous run. Caches from before missing required
   checks were included in the queue's `RUN` and stored separately are invalidated.
+  The cached Reviews cap total is stored with `Sections`; the cache version is
+  bumped when this field is added.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 `run()` loads CLI/config settings, then creates a
@@ -490,12 +496,15 @@ still performs all teardown through `finish`.
   and release annotations show their age; an unmapped PR stays `?` until the
   next scan. A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
-  reviewed by me), `ReReview` (requested again after I reviewed), `Updated` (I
+  reviewed by me), `ReReview` (matched by the scoped requested-and-reviewed
+  search, even if it is outside the first 50 requested nodes), `Updated` (I
   reviewed; last commit `committedDate` > my latest review `submittedAt`), or
   `Reviewed`. `--review-scope` picks the requested search: `all` →
   `review-requested:<me>` (me + my teams, default), `direct` →
   `user-review-requested:<me>` (only me). Both review searches exclude my own
-  PRs (`-author:<me>`).
+  PRs (`-author:<me>`). If either 50-node search is capped, the Reviews header
+  shows the fetched unique row count and exact total (`requested.issueCount +
+  reviewed.issueCount - rereviewed.issueCount`); this cap is not a fetch error.
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
   not ring). The first refresh is silent. Changed rows get a `▸` marker. Bell
@@ -685,15 +694,20 @@ still performs all teardown through `finish`.
   standalone search path. An error on one alias leaves the other sections usable
   and names the failed one. A request-level failure reports each section
   included in that request.
-- Reviews (one POST, three aliased searches; combined with the first Mine
-  request in a two-view watch): `requested: search(is:pr is:open
-  <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
-  reviewed-by:<me> -author:<me>)`, each node carrying `author`, `headRefName`,
-  last commit `committedDate`, and `reviews(author:<me>)` `submittedAt`s.
-  Re-review = a PR in both result sets. The request includes the
-  reviewed-and-merged search. When both watch views are due, it shares the
-  first Mine request, which carries the Mine merged alias exactly once when
-  enabled.
+- Reviews uses one POST. All three query paths include `requested: search(is:pr
+  is:open <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
+  reviewed-by:<me> -author:<me>)`, each returning `issueCount` and up to 50
+  nodes, plus `rereviewed: search(is:pr is:open <scope>:<me> reviewed-by:<me>
+  -author:<me>)` returns its `issueCount` and up to 100 PR numbers only; it
+  identifies re-reviews missing from the requested page. The two full node
+  searches carry `author`, `headRefName`, last commit `committedDate`, and
+  `reviews(author:<me>)` `submittedAt`s. The Reviews header shows
+  `<fetched unique rows> of <requested issueCount + reviewed issueCount -
+  rereviewed issueCount>` when either node search is capped. `REVIEWS_QUERY`
+  also includes reviewed-and-merged and optional Mine-merged searches. The
+  Reviews-only query has only the three open-review searches. When both watch
+  views are due, they share the first Mine request, which carries the Mine
+  merged alias exactly once when enabled.
 - Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
   merged:>=<since>)`, aliased into the Reviews request with the configured
   merged limit.

@@ -284,6 +284,7 @@ pub(crate) fn filter(s: &Sections, query: &str) -> Sections {
         merged: s.merged.as_deref().map(|r| matching(r, &q)),
         commits: s.commits.as_ref().map(|c| filter_commits(c, &q)),
         reviews: s.reviews.as_deref().map(|r| matching(r, &q)),
+        reviews_total: s.reviews_total,
         reviewed_merged: s.reviewed_merged.as_deref().map(|r| matching(r, &q)),
     }
 }
@@ -420,6 +421,7 @@ mod tests {
             prs: None,
             commits: None,
             reviews: None,
+            reviews_total: None,
             reviewed_merged: None,
         }
     }

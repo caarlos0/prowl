@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bump when the cached data model changes; older files are then ignored.
-const VERSION: u32 = 17;
+const VERSION: u32 = 18;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]
@@ -172,6 +172,23 @@ mod tests {
         .unwrap();
         let cached = parse(&encoded, false, OpenSort::Updated).unwrap();
         assert_eq!(cached.sections.prs, sections.prs);
+    }
+
+    #[test]
+    fn cached_review_cap_round_trips() {
+        let sections = Sections {
+            reviews_total: Some(154),
+            ..Sections::EMPTY
+        };
+        let encoded = serde_json::to_vec(&CacheRef {
+            version: VERSION,
+            required: false,
+            saved_at: "12:00:00",
+            sections: &sections,
+        })
+        .unwrap();
+        let cached = parse(&encoded, false, OpenSort::Updated).unwrap();
+        assert_eq!(cached.sections.reviews_total, Some(154));
     }
 
     #[test]
