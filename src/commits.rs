@@ -146,7 +146,7 @@ const RELEASES: usize = 4;
 /// older release to compare against.
 const MAX_PAGES: usize = 5;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct ReleaseInfo {
     tag_name: String,
     draft: bool,
@@ -160,24 +160,24 @@ struct Tag {
     published_at: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct Comparison {
     total_commits: usize,
     commits: Vec<CommitNode>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct CommitNode {
     author: Option<Author>,
     commit: CommitMeta,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct CommitMeta {
     message: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct Author {
     login: String,
 }

@@ -1105,20 +1105,6 @@ pub fn merged_query(limit: usize) -> String {
     )
 }
 
-pub(crate) fn merged_watch_query(limit: usize) -> String {
-    let first = limit.clamp(1, 100);
-    format!(
-        r#"query($mine: String!, $reviewed: String!) {{
-  mine: search(type: ISSUE, first: {first}, query: $mine) {{
-    nodes {{ ... on PullRequest {{ number title url headRefName mergedAt author {{ login }} }} }}
-  }}
-  reviewed: search(type: ISSUE, first: {first}, query: $reviewed) {{
-    nodes {{ ... on PullRequest {{ number title url headRefName mergedAt author {{ login }} }} }}
-  }}
-}}"#
-    )
-}
-
 pub fn merged_search(repo: &Repo, me: &str, since: &str) -> String {
     // GitHub search can't sort by merge time, but a merge bumps `updatedAt` and
     // later edits only bump it further, so `updated-desc` still surfaces the most
@@ -1163,51 +1149,12 @@ pub fn fetch_reviewed_merged(
     Ok(data.search.nodes)
 }
 
-pub(crate) struct MergedPair {
-    pub(crate) mine: Result<Vec<MergedNode>>,
-    pub(crate) reviewed: Result<Vec<MergedNode>>,
-}
-
-pub(crate) fn fetch_merged_pair(
-    client: &Client,
-    repo: &Repo,
-    me: &str,
-    since: &str,
-    limit: usize,
-) -> Result<MergedPair> {
-    let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
-        &merged_watch_query(limit),
-        serde_json::json!({
-            "mine": merged_search(repo, me, since),
-            "reviewed": reviewed_merged_search(repo, me, since),
-        }),
-    )?;
-    Ok(MergedPair {
-        mine: merged_alias(&data, &errors, "mine"),
-        reviewed: merged_alias(&data, &errors, "reviewed"),
-    })
-}
-
 fn merged_alias(
     data: &serde_json::Value,
     errors: &[GqlError],
     alias: &str,
 ) -> Result<Vec<MergedNode>> {
-    let errors = errors
-        .iter()
-        .filter(|error| {
-            error
-                .path
-                .as_ref()
-                .and_then(|path| path.first())
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|root| root == alias || !matches!(root, "mine" | "reviewed"))
-        })
-        .map(|error| error.message.as_str())
-        .collect::<Vec<_>>();
-    if !errors.is_empty() {
-        return Err(anyhow!("GraphQL error: {}", errors.join("; ")));
-    }
+    alias_error(errors, &[alias])?;
 
     let search = data
         .get(alias)
@@ -1218,15 +1165,50 @@ fn merged_alias(
     Ok(search.nodes)
 }
 
+fn alias_error(errors: &[GqlError], aliases: &[&str]) -> Result<()> {
+    let known_aliases = ["requested", "reviewed", "mineMerged", "reviewedMerged"];
+    let messages = errors
+        .iter()
+        .filter(|error| {
+            error
+                .path
+                .as_ref()
+                .and_then(|path| path.first())
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|root| aliases.contains(&root) || !known_aliases.contains(&root))
+        })
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("GraphQL error: {}", messages.join("; ")))
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Reviews (open PRs awaiting / under my review)
 // ----------------------------------------------------------------------------
 
-/// Two aliased searches in one request: PRs whose review is requested from me
-/// (`requested`) and PRs I've already reviewed (`reviewed`). A PR can appear in
-/// both (a re-review). Each node carries my own reviews (so we know if/when I
-/// reviewed) and its last commit date (so we can flag "updated since").
-pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!) {
+/// The review searches and merged searches share one request.
+/// The Mine merged alias is included only when the watch fetches both views.
+pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
+  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
+  reviewedMerged: search(type: ISSUE, first: $mergedLimit, query: $reviewedMerged) { nodes { ...merged } }
+  mineMerged: search(type: ISSUE, first: $mergedLimit, query: $mineMerged) @include(if: $includeMineMerged) { nodes { ...merged } }
+}
+fragment rev on PullRequest {
+  number title url headRefName isDraft updatedAt
+  author { login }
+  commits(last: 1) { nodes { commit { committedDate } } }
+  reviews(author: $me, first: 20, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) { nodes { submittedAt } }
+}
+fragment merged on PullRequest {
+  number title url headRefName mergedAt author { login }
+}"#;
+
+const REVIEWS_ONLY_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!) {
   requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
   reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
 }
@@ -1317,9 +1299,46 @@ pub fn fetch_reviews(
 ) -> Result<ReviewsData> {
     let (requested, reviewed) = reviews_searches(repo, me, requested_qualifier);
     client.graphql(
-        REVIEWS_QUERY,
+        REVIEWS_ONLY_QUERY,
         serde_json::json!({ "me": me, "requested": requested, "reviewed": reviewed }),
     )
+}
+
+pub(crate) struct ReviewsAndMerged {
+    pub(crate) reviews: Result<ReviewsData>,
+    pub(crate) mine_merged: Option<Result<Vec<MergedNode>>>,
+    pub(crate) reviewed_merged: Result<Vec<MergedNode>>,
+}
+
+pub(crate) fn fetch_reviews_and_merged(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    requested_qualifier: &str,
+    since: &str,
+    limit: usize,
+    include_mine: bool,
+) -> Result<ReviewsAndMerged> {
+    let (requested, reviewed) = reviews_searches(repo, me, requested_qualifier);
+    let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
+        REVIEWS_QUERY,
+        serde_json::json!({
+            "me": me,
+            "requested": requested,
+            "reviewed": reviewed,
+            "reviewedMerged": reviewed_merged_search(repo, me, since),
+            "mineMerged": merged_search(repo, me, since),
+            "mergedLimit": limit.clamp(1, 100),
+            "includeMineMerged": include_mine,
+        }),
+    )?;
+    Ok(ReviewsAndMerged {
+        reviews: alias_error(&errors, &["requested", "reviewed"]).and_then(|()| {
+            serde_json::from_value(data.clone()).context("parsing Reviews searches")
+        }),
+        mine_merged: include_mine.then(|| merged_alias(&data, &errors, "mineMerged")),
+        reviewed_merged: merged_alias(&data, &errors, "reviewedMerged"),
+    })
 }
 
 #[cfg(test)]
@@ -1461,11 +1480,30 @@ mod tests {
     }
 
     #[test]
-    fn merged_watch_fetch_keeps_the_successful_alias_on_partial_error() {
+    fn reviews_query_aliases_merged_searches() {
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(
+            merged_search(&repo, "me", "2026-01-01"),
+            "repo:o/r is:pr is:merged author:me merged:>=2026-01-01 sort:updated-desc"
+        );
+        assert_eq!(
+            reviewed_merged_search(&repo, "me", "2026-01-01"),
+            "repo:o/r is:pr is:merged reviewed-by:me -author:me merged:>=2026-01-01 sort:updated-desc"
+        );
+        assert!(REVIEWS_QUERY.contains("reviewedMerged: search"));
+        assert!(REVIEWS_QUERY.contains("mineMerged: search"));
+        assert!(REVIEWS_QUERY.contains("@include(if: $includeMineMerged)"));
+        assert!(REVIEWS_QUERY.contains("first: $mergedLimit"));
+    }
+
+    #[test]
+    fn reviews_merged_fetch_keeps_successful_aliases_on_partial_error() {
         let response = serde_json::json!({
             "data": {
-                "mine": null,
-                "reviewed": {
+                "requested": { "nodes": [] },
+                "reviewed": { "nodes": [] },
+                "mineMerged": null,
+                "reviewedMerged": {
                     "nodes": [{
                         "number": 42,
                         "title": "reviewed",
@@ -1478,43 +1516,29 @@ mod tests {
             },
             "errors": [{
                 "message": "Mine search unavailable",
-                "path": ["mine"]
+                "path": ["mineMerged"]
             }]
         });
         let (client, fake) =
             crate::github::fake::client([("POST /graphql".to_string(), response.to_string())]);
-        let pair = fetch_merged_pair(
+        let fetched = fetch_reviews_and_merged(
             &client,
             &Repo::parse("o/r").unwrap(),
             "me",
+            "review-requested",
             "2026-01-01",
             20,
+            true,
         )
         .unwrap();
 
+        assert!(fetched.reviews.is_ok());
         assert_eq!(
-            pair.mine.unwrap_err().to_string(),
+            fetched.mine_merged.unwrap().unwrap_err().to_string(),
             "GraphQL error: Mine search unavailable"
         );
-        assert_eq!(pair.reviewed.unwrap()[0].number, 42);
+        assert_eq!(fetched.reviewed_merged.unwrap()[0].number, 42);
         assert_eq!(fake.requests(), ["POST /graphql"]);
-    }
-
-    #[test]
-    fn merged_watch_query_preserves_search_filters_and_page_limit() {
-        let repo = Repo::parse("o/r").unwrap();
-        assert_eq!(
-            merged_search(&repo, "me", "2026-01-01"),
-            "repo:o/r is:pr is:merged author:me merged:>=2026-01-01 sort:updated-desc"
-        );
-        assert_eq!(
-            reviewed_merged_search(&repo, "me", "2026-01-01"),
-            "repo:o/r is:pr is:merged reviewed-by:me -author:me merged:>=2026-01-01 sort:updated-desc"
-        );
-        let query = merged_watch_query(200);
-        assert!(query.contains("mine: search(type: ISSUE, first: 100, query: $mine)"));
-        assert!(query.contains("reviewed: search(type: ISSUE, first: 100, query: $reviewed)"));
-        assert!(query.contains("number title url headRefName mergedAt author { login }"));
     }
 
     #[test]
