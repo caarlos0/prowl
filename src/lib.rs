@@ -703,7 +703,7 @@ fn fetch_scheduled_with_context_memo(
     }
 
     let (fetched_reviews, mine_sections) =
-        if due.mine && due.reviews && (cli.show_mine() || cli.show_merged()) {
+        if due.mine && due.reviews && (cli.show_mine() || cli.show_queue() || cli.show_merged()) {
             fetch_mine_reviews_sections(cli, client, repo, me, &mut issues, required_context_memo)
         } else {
             let fetched_reviews =
@@ -5736,6 +5736,172 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn combined_watch_with_only_queue_sends_one_request_without_mine() {
+        for only in ["queue", "queue,shipments"] {
+            for active in [View::Mine, View::Reviews] {
+                let cli = Cli::try_parse_from(["prowl", "--only", only]).unwrap();
+                let repo = Repo::parse("o/r").unwrap();
+                let routes = tagged_watch();
+                let graphql = routes
+                    .iter()
+                    .find(|(route, _)| route == GRAPHQL)
+                    .unwrap()
+                    .1
+                    .clone();
+                let (client, fake) = github::fake::client(routes);
+                let variables = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let seen = std::sync::Arc::clone(&variables);
+                fake.set_graphql_responder(move |body| {
+                    seen.lock().unwrap().push(body["variables"].clone());
+                    graphql.clone()
+                });
+                let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+                let mut schedule = Schedule::default();
+                let mut branch = Some("main".to_string());
+                let mut posts = Vec::new();
+
+                for tick in 0..6 {
+                    let due = schedule.next(active, false, cli.show_shipments());
+                    let sent = fake.requests().len();
+                    let outcome = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+                    posts.push(shipment_request_counts(&fake.requests()[sent..]).1);
+                    assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+                    assert_eq!(outcome.sections.queue.is_some(), due.mine);
+                    assert_eq!(outcome.sections.reviews.is_some(), due.reviews);
+                    assert_eq!(outcome.sections.reviewed_merged.is_some(), due.reviews);
+                    assert!(outcome.sections.prs.is_none());
+                    assert!(outcome.sections.merged.is_none());
+                    schedule.record(
+                        due,
+                        &outcome.issues,
+                        start + chrono::TimeDelta::minutes(5 * tick),
+                        outcome.shipment_scan,
+                        outcome.has_fresh_mine_data(),
+                    );
+                }
+
+                println!("QUEUE_WATCH only={only} active={active:?} POST={posts:?}");
+                assert_eq!(posts, [1; 6], "{only}, {active:?}");
+                let variables = variables.lock().unwrap();
+                assert_eq!(variables.len(), 6);
+                for tick in [0, 2, 4] {
+                    assert_eq!(variables[tick]["includeMine"], false);
+                    assert_eq!(variables[tick]["includeMineMerged"], false);
+                    assert_eq!(variables[tick]["includeQueue"], true);
+                    assert_eq!(variables[tick]["includeDefaultBranchRef"], true);
+                    assert!(variables[tick].get("requested").is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn combined_watch_with_only_queue_scopes_errors_to_their_sections() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "queue"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        for scope in [FetchScope::Reviews, FetchScope::Queue] {
+            let routes = tagged_watch();
+            let (_, body) = routes.iter().find(|(route, _)| route == GRAPHQL).unwrap();
+            let mut response: serde_json::Value = serde_json::from_str(body).unwrap();
+            let path = if scope == FetchScope::Reviews {
+                response["data"]["repository"]["mergeQueue"] = serde_json::json!({
+                    "entries": { "nodes": [{
+                        "position": 1,
+                        "pullRequest": {
+                            "number": 4,
+                            "title": "Queued PR",
+                            "url": "https://github.com/o/r/pull/4"
+                        }
+                    }] }
+                });
+                serde_json::json!(["requested", "nodes", 0, "title"])
+            } else {
+                serde_json::json!(["repository", "mergeQueue"])
+            };
+            response["errors"] = serde_json::json!([{
+                "message": "injected alias error",
+                "path": path
+            }]);
+            let (client, fake) = github::fake::client(routes);
+            fake.set_response_on_call(GRAPHQL, 1, 200, &[], &response.to_string());
+
+            let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, true);
+            assert_eq!(outcome.issues.len(), 1, "{:?}", outcome.issues);
+            assert_eq!(outcome.issues[0].scope, scope);
+            assert_eq!(outcome.issues[0].warning, scope == FetchScope::Reviews);
+            assert!(outcome.issues[0].message.contains("injected alias error"));
+            assert_eq!(
+                outcome.sections.queue.as_ref().map(Vec::len),
+                (scope != FetchScope::Queue).then_some(1)
+            );
+            assert_eq!(outcome.sections.reviews.as_ref().unwrap().len(), 3);
+            assert_eq!(outcome.sections.reviewed_merged.as_ref().unwrap().len(), 3);
+            assert_eq!(fake.requests(), [GRAPHQL]);
+        }
+
+        let (client, fake) = github::fake::client(tagged_watch());
+        fake.set_response_on_call(GRAPHQL, 1, 502, &[], "bad gateway");
+        let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, true);
+
+        let scopes: Vec<_> = outcome.issues.iter().map(|issue| issue.scope).collect();
+        assert_eq!(scopes.len(), 3, "{scopes:?}");
+        for scope in [
+            FetchScope::Queue,
+            FetchScope::Reviews,
+            FetchScope::ReviewedMerged,
+        ] {
+            assert!(scopes.contains(&scope), "{scopes:?}");
+        }
+        assert!(outcome.issues.iter().all(|issue| !issue.warning));
+        assert!(outcome.sections.queue.is_none());
+        assert!(outcome.sections.reviews.is_none());
+        assert!(outcome.sections.reviewed_merged.is_none());
+        assert_eq!(fake.requests(), [GRAPHQL]);
+    }
+
+    #[test]
+    fn combined_watch_with_only_queue_preserves_required_checks() {
+        for required_only in [false, true] {
+            let mut cli = Cli::try_parse_from(["prowl", "--only", "queue"]).unwrap();
+            cli.required = required_only;
+            let (client, fake) =
+                github::fake::client([required_rules_graphql("ref-1", &["test", "lint"])]);
+            let outcome = fetch(
+                &cli,
+                &client,
+                &Repo::parse("o/r").unwrap(),
+                "me",
+                &mut None,
+                true,
+                true,
+            );
+
+            assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+            let queue = outcome.sections.queue.unwrap();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(
+                queue[0].checks,
+                status::Checks {
+                    fail: u64::from(!required_only),
+                    running: 1,
+                    pass: 1,
+                }
+            );
+            assert_eq!(queue[0].missing_required_checks, 1);
+            assert_eq!(
+                queue[0].build_started_at.as_deref(),
+                Some(if required_only {
+                    "2026-08-28T10:00:00Z"
+                } else {
+                    "2026-08-28T09:00:00Z"
+                })
+            );
+            assert!(outcome.sections.reviews.is_some());
+            assert_eq!(fake.requests(), [GRAPHQL, GRAPHQL]);
+        }
     }
 
     #[test]
