@@ -137,11 +137,14 @@ watch event loop); everything else is testable modules:
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   GraphQL partial-data errors warn in each affected section, including a
   section that consumes warned shared rule data; the cache adds no requests.
-  Watch mode also keeps a session-only memo for complete required-context
-  lookups, both in separate Mine fetches and when combined with Reviews.
+  Watch mode also keeps a session-only memo for required-context lookups,
+  both in separate Mine fetches and when combined with Reviews.
   It skips commit-context POSTs only for matching PR, commit, base-ref,
   and rule identity (including active-rule integration IDs) when every expected
-  context was reported. It is not used by one-shot output or `--required`;
+  context was reported, or, for an incomplete result, when the commit's
+  sorted `checkRunCountsByState` / `statusContextCountsByState` from the
+  current section response also match the lookup that stored it. A hit
+  recomputes `missing` from the stored reported set. It is not used by one-shot output or `--required`;
   skipped or failed sections keep their entries, while successful sections
   discard entries for targets no longer shown. The memo is not persisted.
   It reads required context names from each distinct base ref's `refUpdateRule`
@@ -445,15 +448,22 @@ still performs all teardown through `finish`.
   With `--required`, prowl follows those contexts page by page in a second
   batched GraphQL query and uses each context's `isRequired(pullRequestNumber:)`
   value for both the semaphore and the merge queue's BUILD start.
-  In watch mode without `--required`, complete context results are memoized for
+  In watch mode without `--required`, context results are memoized for
   the session by PR number, commit ID, base-ref ID, and rule identity. The
   identity includes classic contexts and each active required-check context's
   `integrationId`, so a new head, speculative queue commit, retarget, added
-  check, or changed integration is fetched again. Missing contexts are never
-  memoized. Memo hits do not replace fresh rollup counts. One-shot and
+  check, or changed integration is fetched again. A complete result hits on
+  that key alone. An incomplete result (a required check that never reports,
+  such as a skipped workflow) also stores the commit's per-state rollup counts
+  and hits only while they stay the same, so any count change is fetched
+  again. Counts only detect change; they never prove completeness. Memo hits
+  do not replace fresh rollup counts. One-shot and
   `--required` always fetch contexts; the memo is not written to the disk cache.
-  A deleted check run can remain treated as reported until its target or rule
-  identity changes.
+  Known risk: a deleted check run can remain treated as reported until its
+  target or rule identity changes, and a stored incomplete result is wrong if,
+  within one refresh interval on the same commit, a required context appears
+  while another context in the same state leaves the rollup (the counts match).
+  The next head, retarget, rule change, or count change corrects it.
   `STALE` lights no lamp (it neither blocks nor runs).
 - **Status precedence** (the bell key only): `conflicts > fail > running > pass
   > none`.

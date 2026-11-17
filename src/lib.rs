@@ -6540,6 +6540,34 @@ mod tests {
         serde_json::to_string(&response).unwrap()
     }
 
+    const CHECK_RUN_COUNTS: &str = "checkRunCountsByState";
+    const STATUS_CONTEXT_COUNTS: &str = "statusContextCountsByState";
+
+    fn set_rollup_counts(
+        body: &str,
+        field: &str,
+        pr: Option<&[(&str, u64)]>,
+        queue: Option<&[(&str, u64)]>,
+    ) -> String {
+        let counts = |states: &[(&str, u64)]| {
+            let counts: Vec<_> = states
+                .iter()
+                .map(|(state, count)| serde_json::json!({ "state": state, "count": count }))
+                .collect();
+            serde_json::json!(counts)
+        };
+        let mut response: serde_json::Value = serde_json::from_str(body).unwrap();
+        if let Some(pr) = pr {
+            response["data"]["search"]["nodes"][0]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]
+                ["contexts"][field] = counts(pr);
+        }
+        if let Some(queue) = queue {
+            response["data"]["repository"]["mergeQueue"]["entries"]["nodes"][0]["headCommit"]["statusCheckRollup"]
+                ["contexts"][field] = counts(queue);
+        }
+        response.to_string()
+    }
+
     fn assert_context_memo_matches_uncached(
         cli: &Cli,
         body: &str,
@@ -6612,6 +6640,62 @@ mod tests {
                     assert_eq!(requests, vec![GRAPHQL; per_refresh * refresh], "{case}");
                     assert!(branch.is_none());
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn watch_context_memo_skips_stuck_required_check_with_same_counts() {
+        let repo = Repo::parse("o/r").unwrap();
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
+        for want_reviews in [false, true] {
+            for (reported, want_posts) in [
+                (&["test"][..], [3, 1, 1, 1]),
+                (&["test", "lint"], [3, 1, 1, 1]),
+            ] {
+                let (client, fake) = github::fake::client([]);
+                let body = required_context_memo_graphql(
+                    "ref-1",
+                    &["test", "lint"],
+                    reported,
+                    "PR_HEAD",
+                    "QUEUE_HEAD",
+                    1,
+                );
+                fake.set_response(GRAPHQL, 200, &[], &body);
+                let mut memo = model::RequiredContextMemo::default();
+                let mut posts = Vec::new();
+                for _ in 0..4 {
+                    let before = fake.requests().len();
+                    let outcome = fetch_scheduled_with_context_memo(
+                        &cli,
+                        &client,
+                        &repo,
+                        "me",
+                        &mut None,
+                        Due {
+                            mine: true,
+                            reviews: want_reviews,
+                            shipments: false,
+                        },
+                        Some(&mut memo),
+                    );
+                    assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+                    let missing = u64::from(reported.len() < 2);
+                    assert_eq!(
+                        outcome.sections.queue.as_ref().unwrap()[0].missing_required_checks,
+                        missing
+                    );
+                    assert_eq!(
+                        outcome.sections.prs.as_ref().unwrap()[0].checks.running,
+                        missing
+                    );
+                    posts.push(fake.requests().len() - before);
+                }
+                println!(
+                    "STUCK_REFRESH reviews={want_reviews} reported={reported:?} POST={posts:?}"
+                );
+                assert_eq!(posts, want_posts);
             }
         }
     }
@@ -6701,6 +6785,20 @@ mod tests {
                 );
                 if index == 1 {
                     refresh(&cli, &body, 0, 0, "inactive-view skip");
+                    let changed = set_rollup_counts(
+                        &body,
+                        CHECK_RUN_COUNTS,
+                        Some(&[("SUCCESS", 3)]),
+                        Some(&[("FAILURE", 3)]),
+                    );
+                    let outcome = refresh(
+                        &cli,
+                        &changed,
+                        warm_posts,
+                        cold_posts,
+                        "complete target with changed counts",
+                    );
+                    assert_eq!(outcome.sections.prs.as_ref().unwrap()[0].checks.running, 0);
                 }
             }
 
@@ -6798,12 +6896,99 @@ mod tests {
             );
             let missing = refresh(&cli, &body, 4, 4, "missing required context");
             assert_eq!(missing.sections.prs.as_ref().unwrap()[0].checks.running, 1);
-            let missing = refresh(&cli, &body, 4, 4, "missing context still queried");
-            assert_eq!(missing.sections.prs.as_ref().unwrap()[0].checks.running, 1);
-            assert_eq!(
-                missing.sections.queue.as_ref().unwrap()[0].missing_required_checks,
-                1
+            let assert_missing = |outcome: &FetchOutcome, missing: u64| {
+                assert_eq!(
+                    outcome.sections.prs.as_ref().unwrap()[0].checks.running,
+                    missing
+                );
+                assert_eq!(
+                    outcome.sections.queue.as_ref().unwrap()[0].missing_required_checks,
+                    missing
+                );
+            };
+            let outcome = refresh(&cli, &body, 2, 4, "missing context with same counts");
+            assert_missing(&outcome, 1);
+            let outcome = refresh(&cli, &body, 2, 4, "missing context with same counts again");
+            assert_missing(&outcome, 1);
+
+            let reordered = set_rollup_counts(
+                &body,
+                CHECK_RUN_COUNTS,
+                Some(&[("FAILURE", 1), ("SUCCESS", 1)]),
+                Some(&[("FAILURE", 1), ("SUCCESS", 1)]),
             );
+            let outcome = refresh(&cli, &reordered, 2, 4, "reordered counts");
+            assert_missing(&outcome, 1);
+            let pr_changed =
+                set_rollup_counts(&body, CHECK_RUN_COUNTS, Some(&[("SUCCESS", 2)]), None);
+            let outcome = refresh(&cli, &pr_changed, 3, 4, "PR count change");
+            assert_missing(&outcome, 1);
+            let outcome = refresh(&cli, &pr_changed, 2, 4, "PR count change settled");
+            assert_missing(&outcome, 1);
+            let queue_changed =
+                set_rollup_counts(&pr_changed, CHECK_RUN_COUNTS, None, Some(&[("FAILURE", 2)]));
+            let outcome = refresh(&cli, &queue_changed, 3, 4, "queue count change");
+            assert_missing(&outcome, 1);
+            let outcome = refresh(&cli, &queue_changed, 2, 4, "queue count change settled");
+            assert_missing(&outcome, 1);
+
+            let mut status_reported: serde_json::Value =
+                serde_json::from_str(&queue_changed).unwrap();
+            status_reported["data"]["c0"]["statusCheckRollup"]["contexts"]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "__typename": "StatusContext",
+                    "required": true,
+                    "context": "lint",
+                    "state": "SUCCESS"
+                }));
+            let status_reported = set_rollup_counts(
+                &status_reported.to_string(),
+                STATUS_CONTEXT_COUNTS,
+                Some(&[("SUCCESS", 1)]),
+                Some(&[("SUCCESS", 1)]),
+            );
+            let outcome = refresh(&cli, &status_reported, 4, 4, "status context reported");
+            assert_missing(&outcome, 0);
+            let outcome = refresh(&cli, &status_reported, 2, 4, "status context memoized");
+            assert_missing(&outcome, 0);
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test", "lint", "security"],
+                &["test"],
+                "PR_HEAD_MISSING",
+                "QUEUE_MISSING",
+                2,
+            );
+            let body = set_rollup_counts(
+                &body,
+                CHECK_RUN_COUNTS,
+                Some(&[("SUCCESS", 2)]),
+                Some(&[("FAILURE", 2)]),
+            );
+            let outcome = refresh(&cli, &body, 4, 4, "added required context while missing");
+            assert_missing(&outcome, 2);
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test", "lint"],
+                &["test", "lint"],
+                "PR_HEAD_MISSING",
+                "QUEUE_MISSING",
+                2,
+            );
+            let body = set_rollup_counts(
+                &body,
+                CHECK_RUN_COUNTS,
+                Some(&[("SUCCESS", 3)]),
+                Some(&[("FAILURE", 3)]),
+            );
+            let outcome = refresh(&cli, &body, 4, 4, "missing context reported");
+            assert_missing(&outcome, 0);
+            let outcome = refresh(&cli, &body, 2, 4, "reported context memoized");
+            assert_missing(&outcome, 0);
 
             let mut required_cli = cli.clone();
             required_cli.required = true;
