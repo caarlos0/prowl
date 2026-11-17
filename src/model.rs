@@ -32,7 +32,7 @@ pub const QUEUE_QUERY: &str = r#"query($owner: String!, $name: String!) {
           parameters {
             __typename
             ... on RequiredStatusChecksParameters {
-              requiredStatusChecks { context }
+              requiredStatusChecks { context integrationId }
             }
           }
         }
@@ -262,6 +262,16 @@ pub(crate) fn fetch_queue_with_context_cache(
     required_only: bool,
     context_cache: &mut RequiredContextCache,
 ) -> Result<GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>> {
+    fetch_queue_with_context_memo(client, repo, required_only, context_cache, None)
+}
+
+pub(crate) fn fetch_queue_with_context_memo(
+    client: &Client,
+    repo: &Repo,
+    required_only: bool,
+    context_cache: &mut RequiredContextCache,
+    memo: Option<&mut RequiredContextMemo>,
+) -> Result<GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>> {
     let (mut data, mut errors): (QueueData, _) = client.graphql_with_errors(
         QUEUE_QUERY,
         serde_json::json!({ "owner": repo.owner, "name": repo.name }),
@@ -283,8 +293,16 @@ pub(crate) fn fetch_queue_with_context_cache(
     let eta = queue_next_eta(&data);
     let mut nodes = queue_nodes(data);
     let targets: Vec<_> = nodes.iter().map(QueueEntryNode::required_target).collect();
-    let (summaries, required_errors) =
-        fetch_required(client, &targets, required_only, context_cache)?;
+    let rule_data_trusted = errors.is_empty();
+    let (summaries, required_errors) = fetch_required_with_memo(
+        client,
+        &targets,
+        required_only,
+        context_cache,
+        memo,
+        RequiredMemoScope::Queue,
+        rule_data_trusted,
+    )?;
     errors.extend(required_errors);
     for (node, summary) in nodes.iter_mut().zip(summaries) {
         node.apply_required(summary, required_only);
@@ -310,7 +328,7 @@ pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: Strin
           parameters {
             __typename
             ... on RequiredStatusChecksParameters {
-              requiredStatusChecks { context }
+              requiredStatusChecks { context integrationId }
             }
           }
         }
@@ -575,6 +593,18 @@ pub(crate) fn fetch_my_prs_with_context_cache(
     required_only: bool,
     context_cache: &mut RequiredContextCache,
 ) -> Result<GraphqlData<Vec<PrNode>>> {
+    fetch_my_prs_with_context_memo(client, repo, me, sort, required_only, context_cache, None)
+}
+
+pub(crate) fn fetch_my_prs_with_context_memo(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    sort: OpenSort,
+    required_only: bool,
+    context_cache: &mut RequiredContextCache,
+    memo: Option<&mut RequiredContextMemo>,
+) -> Result<GraphqlData<Vec<PrNode>>> {
     let q = mine_search(repo, me, sort);
     let mut nodes = Vec::new();
     let mut errors = Vec::new();
@@ -630,8 +660,16 @@ pub(crate) fn fetch_my_prs_with_context_cache(
             base_ref_id: node.base_ref.as_ref().map(|base| base.id.clone()),
         })
         .collect();
-    let (summaries, required_errors) =
-        fetch_required(client, &targets, required_only, context_cache)?;
+    let rule_data_trusted = errors.is_empty();
+    let (summaries, required_errors) = fetch_required_with_memo(
+        client,
+        &targets,
+        required_only,
+        context_cache,
+        memo,
+        RequiredMemoScope::Mine,
+        rule_data_trusted,
+    )?;
     errors.extend(required_errors);
     for (node, summary) in nodes.iter_mut().zip(summaries) {
         node.apply_required(summary, required_only);
@@ -700,17 +738,37 @@ enum RuleParameters {
 #[derive(Debug, Deserialize)]
 struct RequiredCheck {
     context: String,
+    #[serde(rename = "integrationId")]
+    integration_id: Option<i64>,
 }
 
 impl RequiredRef {
-    fn add_to(self, contexts: &mut HashSet<String>) -> Result<Option<String>> {
+    fn add_to(
+        self,
+        contexts: &mut HashSet<String>,
+        rule_identity: &mut HashSet<RequiredRuleIdentity>,
+    ) -> Result<Option<String>> {
         if let Some(rule) = self.update_rule {
-            contexts.extend(rule.contexts.into_iter().flatten());
+            for context in rule.contexts.into_iter().flatten() {
+                contexts.insert(context.clone());
+                rule_identity.insert(RequiredRuleIdentity {
+                    source: RequiredRuleSource::Classic,
+                    context,
+                    integration_id: None,
+                });
+            }
         }
         for rule in self.rules.nodes {
             if let Some(RuleParameters::RequiredStatusChecksParameters { checks }) = rule.parameters
             {
-                contexts.extend(checks.into_iter().map(|check| check.context));
+                for check in checks {
+                    contexts.insert(check.context.clone());
+                    rule_identity.insert(RequiredRuleIdentity {
+                        source: RequiredRuleSource::Ruleset,
+                        context: check.context,
+                        integration_id: check.integration_id,
+                    });
+                }
             }
         }
         self.rules.page_info.next_cursor()
@@ -727,9 +785,44 @@ struct RequiredTarget {
 #[derive(Debug, Default)]
 pub(crate) struct RequiredContextCache {
     contexts: HashMap<String, HashSet<String>>,
+    rule_identity: HashMap<String, Vec<RequiredRuleIdentity>>,
     errors: HashMap<String, Vec<GqlError>>,
     pending: HashMap<String, String>,
+    pending_rule_identity: HashMap<String, HashSet<RequiredRuleIdentity>>,
     default_branch_ref_id: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RequiredContextMemo {
+    contexts: HashMap<RequiredMemoKey, HashSet<String>>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct RequiredMemoKey {
+    scope: RequiredMemoScope,
+    pull_request_number: i64,
+    commit_id: String,
+    base_ref_id: String,
+    rule_identity: Vec<RequiredRuleIdentity>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+enum RequiredMemoScope {
+    Mine,
+    Queue,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
+struct RequiredRuleIdentity {
+    source: RequiredRuleSource,
+    context: String,
+    integration_id: Option<i64>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
+enum RequiredRuleSource {
+    Classic,
+    Ruleset,
 }
 
 #[derive(Debug, Default)]
@@ -862,6 +955,7 @@ struct PendingRequiredRules {
     id: String,
     after: Option<String>,
     contexts: HashSet<String>,
+    rule_identity: HashSet<RequiredRuleIdentity>,
 }
 
 fn required_rules_query(pending: &[PendingRequiredRules]) -> (String, serde_json::Value) {
@@ -881,7 +975,7 @@ fn required_rules_query(pending: &[PendingRequiredRules]) -> (String, serde_json
         parameters {{
           __typename
           ... on RequiredStatusChecksParameters {{
-            requiredStatusChecks {{ context }}
+            requiredStatusChecks {{ context integrationId }}
           }}
         }}
       }}
@@ -914,13 +1008,20 @@ fn fetch_required_contexts(
     let mut pending: Vec<_> = ids
         .iter()
         .filter(|id| {
-            (!context_cache.contexts.contains_key(*id) || context_cache.pending.contains_key(*id))
+            (!context_cache.contexts.contains_key(*id)
+                || !context_cache.rule_identity.contains_key(*id)
+                || context_cache.pending.contains_key(*id))
                 && seen.insert(id.as_str())
         })
         .map(|id| PendingRequiredRules {
             id: id.clone(),
             after: context_cache.pending.get(id).cloned(),
             contexts: context_cache.contexts.get(id).cloned().unwrap_or_default(),
+            rule_identity: context_cache
+                .pending_rule_identity
+                .get(id)
+                .cloned()
+                .unwrap_or_default(),
         })
         .collect();
 
@@ -961,7 +1062,7 @@ fn fetch_required_contexts(
                 let rule = rule.with_context(|| {
                     format!("required-check base branch {} was unavailable", item.id)
                 })?;
-                item.after = rule.add_to(&mut item.contexts)?;
+                item.after = rule.add_to(&mut item.contexts, &mut item.rule_identity)?;
             }
         }
         pending.retain_mut(|item| {
@@ -971,7 +1072,15 @@ fn fetch_required_contexts(
                 context_cache
                     .contexts
                     .insert(item.id.clone(), std::mem::take(&mut item.contexts));
+                let mut identity: Vec<_> = std::mem::take(&mut item.rule_identity)
+                    .into_iter()
+                    .collect();
+                identity.sort_unstable();
+                context_cache
+                    .rule_identity
+                    .insert(item.id.clone(), identity);
                 context_cache.pending.remove(&item.id);
+                context_cache.pending_rule_identity.remove(&item.id);
                 if let Some(errors) = errors_by_ref.remove(&item.id) {
                     context_cache
                         .errors
@@ -995,10 +1104,19 @@ fn seed_default_branch_ref(
     };
     if !context_cache.contexts.contains_key(&branch.id) {
         let mut contexts = HashSet::new();
-        if let Some(after) = branch.required.add_to(&mut contexts)? {
+        let mut rule_identity = HashSet::new();
+        if let Some(after) = branch.required.add_to(&mut contexts, &mut rule_identity)? {
             context_cache.pending.insert(branch.id.clone(), after);
+            context_cache
+                .pending_rule_identity
+                .insert(branch.id.clone(), rule_identity.clone());
         }
         context_cache.contexts.insert(branch.id.clone(), contexts);
+        let mut identity: Vec<_> = rule_identity.into_iter().collect();
+        identity.sort_unstable();
+        context_cache
+            .rule_identity
+            .insert(branch.id.clone(), identity);
     }
     context_cache.default_branch_ref_id = Some(branch.id);
     Ok(())
@@ -1095,11 +1213,32 @@ fn fetch_required_pages(
     Ok(())
 }
 
+#[cfg(test)]
 fn fetch_required(
     client: &Client,
     targets: &[RequiredTarget],
     required_only: bool,
     context_cache: &mut RequiredContextCache,
+) -> Result<(Vec<RequiredSummary>, Vec<GqlError>)> {
+    fetch_required_with_memo(
+        client,
+        targets,
+        required_only,
+        context_cache,
+        None,
+        RequiredMemoScope::Mine,
+        true,
+    )
+}
+
+fn fetch_required_with_memo(
+    client: &Client,
+    targets: &[RequiredTarget],
+    required_only: bool,
+    context_cache: &mut RequiredContextCache,
+    memo: Option<&mut RequiredContextMemo>,
+    scope: RequiredMemoScope,
+    rule_data_trusted: bool,
 ) -> Result<(Vec<RequiredSummary>, Vec<GqlError>)> {
     let base_ref_ids: Vec<_> = targets
         .iter()
@@ -1120,10 +1259,47 @@ fn fetch_required(
     let mut summaries: Vec<_> = (0..targets.len())
         .map(|_| RequiredSummary::default())
         .collect();
+    let memo = memo.filter(|_| !required_only && rule_data_trusted);
+    let memo_keys: Vec<_> = targets
+        .iter()
+        .map(|target| {
+            let base_ref_id = target.base_ref_id.as_ref()?;
+            if expected(target).is_empty() || context_cache.errors.contains_key(base_ref_id) {
+                return None;
+            }
+            let commit_id = target.commit_id.as_ref()?;
+            let rule_identity = context_cache.rule_identity.get(base_ref_id)?.clone();
+            Some(RequiredMemoKey {
+                scope: scope.clone(),
+                pull_request_number: target.pull_request_number,
+                commit_id: commit_id.clone(),
+                base_ref_id: base_ref_id.clone(),
+                rule_identity,
+            })
+        })
+        .collect();
+    let mut memo_hits = vec![false; targets.len()];
+    if let Some(memo) = memo.as_deref() {
+        for (index, ((key, target), summary)) in memo_keys
+            .iter()
+            .zip(targets)
+            .zip(&mut summaries)
+            .enumerate()
+        {
+            if let Some(key) = key
+                && let Some(reported) = memo.contexts.get(key)
+                && expected(target).is_subset(reported)
+            {
+                summary.contexts.clone_from(reported);
+                memo_hits[index] = true;
+            }
+        }
+    }
     let pending: Vec<_> = targets
         .iter()
         .enumerate()
         .filter(|(_, item)| required_only || !expected(item).is_empty())
+        .filter(|(index, _)| !memo_hits[*index])
         .filter_map(|(target, item)| {
             item.commit_id.as_ref().map(|id| PendingRequired {
                 target,
@@ -1146,6 +1322,20 @@ fn fetch_required(
             && let Some(ref_errors) = context_cache.errors.get(ref_id)
         {
             errors.extend(ref_errors.iter().cloned());
+        }
+    }
+    if errors.is_empty()
+        && let Some(memo) = memo
+    {
+        let current: HashSet<_> = memo_keys.iter().flatten().cloned().collect();
+        memo.contexts
+            .retain(|key, _| key.scope != scope || current.contains(key));
+        for (key, summary) in memo_keys.into_iter().zip(&summaries) {
+            if let Some(key) = key
+                && summary.missing == 0
+            {
+                memo.contexts.insert(key, summary.contexts.clone());
+            }
         }
     }
     Ok((summaries, errors))
@@ -1825,6 +2015,7 @@ mod tests {
     #[test]
     fn required_contexts_combine_branch_protection_and_all_rule_pages() {
         let mut contexts = HashSet::new();
+        let mut identity = HashSet::new();
         for (page, expected_cursor) in [
             (
                 serde_json::json!({
@@ -1861,7 +2052,10 @@ mod tests {
         ] {
             let rules: RequiredRef = serde_json::from_value(page).unwrap();
             assert_eq!(
-                rules.add_to(&mut contexts).unwrap().as_deref(),
+                rules
+                    .add_to(&mut contexts, &mut identity)
+                    .unwrap()
+                    .as_deref(),
                 expected_cursor
             );
         }
@@ -1874,6 +2068,14 @@ mod tests {
                 "security".into()
             ])
         );
+        assert!(
+            identity.iter().any(|rule| {
+                rule.source == RequiredRuleSource::Classic && rule.context == "test"
+            })
+        );
+        assert!(identity.iter().any(|rule| {
+            rule.source == RequiredRuleSource::Ruleset && rule.context == "security"
+        }));
     }
 
     #[test]
@@ -1930,6 +2132,16 @@ mod tests {
         assert_eq!(
             cache.contexts["default"],
             HashSet::from(["classic".into(), "inline".into(), "later".into()])
+        );
+        assert!(
+            cache.rule_identity["default"]
+                .iter()
+                .any(|rule| rule.context == "inline")
+        );
+        assert!(
+            cache.rule_identity["default"]
+                .iter()
+                .any(|rule| rule.context == "later")
         );
         assert!(!cache.pending.contains_key("default"));
     }
@@ -2310,8 +2522,10 @@ mod tests {
             }))
             .unwrap();
             let mut contexts = HashSet::new();
-            assert_eq!(rules.add_to(&mut contexts).unwrap(), None);
+            let mut identity = HashSet::new();
+            assert_eq!(rules.add_to(&mut contexts, &mut identity).unwrap(), None);
             assert!(contexts.is_empty(), "{contexts:?}");
+            assert!(identity.is_empty(), "{identity:?}");
         }
     }
 

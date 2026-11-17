@@ -126,6 +126,12 @@ watch event loop); everything else is testable modules:
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   GraphQL partial-data errors warn in each affected section, including a
   section that consumes warned shared rule data; the cache adds no requests.
+  Watch mode also keeps a session-only memo for complete required-context
+  lookups. It skips commit-context POSTs only for matching PR, commit, base-ref,
+  and rule identity (including active-rule integration IDs) when every expected
+  context was reported. It is not used by one-shot output or `--required`;
+  skipped or failed sections keep their entries, while successful sections
+  discard entries for targets no longer shown. The memo is not persisted.
   It reads required context names from each distinct base ref's `refUpdateRule`
   and all pages of active `rules`, in groups of up to five refs per GraphQL
   request, once per distinct ref across the enabled sections. The queue request
@@ -418,6 +424,15 @@ still performs all teardown through `finish`.
   With `--required`, prowl follows those contexts page by page in a second
   batched GraphQL query and uses each context's `isRequired(pullRequestNumber:)`
   value for both the semaphore and the merge queue's BUILD start.
+  In watch mode without `--required`, complete context results are memoized for
+  the session by PR number, commit ID, base-ref ID, and rule identity. The
+  identity includes classic contexts and each active required-check context's
+  `integrationId`, so a new head, speculative queue commit, retarget, added
+  check, or changed integration is fetched again. Missing contexts are never
+  memoized. Memo hits do not replace fresh rollup counts. One-shot and
+  `--required` always fetch contexts; the memo is not written to the disk cache.
+  A deleted check run can remain treated as reported until its target or rule
+  identity changes.
   `STALE` lights no lamp (it neither blocks nor runs).
 - **Status precedence** (the bell key only): `conflicts > fail > running > pass
   > none`.

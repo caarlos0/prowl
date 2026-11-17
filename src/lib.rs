@@ -407,6 +407,29 @@ fn fetch(
     want_mine: bool,
     want_reviews: bool,
 ) -> FetchOutcome {
+    fetch_with_context_memo(
+        cli,
+        client,
+        repo,
+        me,
+        default_branch,
+        want_mine,
+        want_reviews,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_with_context_memo(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    default_branch: &mut Option<String>,
+    want_mine: bool,
+    want_reviews: bool,
+    mut required_context_memo: Option<&mut model::RequiredContextMemo>,
+) -> FetchOutcome {
     let mut issues = Vec::new();
     let branch_error = if want_mine && cli.show_shipments() {
         resolve_default_branch(client, repo, default_branch)
@@ -446,11 +469,12 @@ fn fetch(
     let (queue, queue_next_eta) = if want_mine && cli.show_queue() {
         graphql_section(
             FetchScope::Queue,
-            model::fetch_queue_with_context_cache(
+            model::fetch_queue_with_context_memo(
                 client,
                 repo,
                 cli.required,
                 &mut required_context_cache,
+                required_context_memo.as_deref_mut(),
             ),
             |(nodes, eta)| (queue::build_rows(nodes, me), eta),
             &mut issues,
@@ -462,13 +486,14 @@ fn fetch(
     let prs = if want_mine && cli.show_mine() {
         graphql_section(
             FetchScope::Mine,
-            model::fetch_my_prs_with_context_cache(
+            model::fetch_my_prs_with_context_memo(
                 client,
                 repo,
                 me,
                 cli.sort_open,
                 cli.required,
                 &mut required_context_cache,
+                required_context_memo,
             ),
             |nodes| {
                 let rows = prs::build_rows(nodes, cli.sort_open);
@@ -2195,6 +2220,7 @@ struct App<'a> {
     repo: &'a Repo,
     me: String,
     default_branch: Option<String>,
+    required_context_memo: model::RequiredContextMemo,
     /// The constant next-refresh ETA shown in the key-hint footer.
     eta: String,
     /// Change-detection baseline and the latest combined section data.
@@ -2245,6 +2271,7 @@ impl<'a> App<'a> {
             repo,
             me: String::new(),
             default_branch: None,
+            required_context_memo: model::RequiredContextMemo::default(),
             prev: None,
             last_good: None,
             unread: Changes::default(),
@@ -2404,6 +2431,7 @@ impl<'a> App<'a> {
         let (cli, client, repo) = (self.cli.clone(), self.client.clone(), self.repo.clone());
         let mut me = self.me.clone();
         let mut default_branch = self.default_branch.clone();
+        let mut required_context_memo = self.required_context_memo.clone();
         let resolve = me.is_empty();
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2413,8 +2441,17 @@ impl<'a> App<'a> {
                     me = client.me()?;
                 }
                 // Both views every refresh, so Tab switches instantly.
-                let outcome = fetch(&cli, &client, &repo, &me, &mut default_branch, true, true);
-                Ok((me, default_branch, outcome))
+                let outcome = fetch_with_context_memo(
+                    &cli,
+                    &client,
+                    &repo,
+                    &me,
+                    &mut default_branch,
+                    true,
+                    true,
+                    Some(&mut required_context_memo),
+                );
+                Ok((me, default_branch, required_context_memo, outcome))
             })();
             let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
         });
@@ -2424,9 +2461,10 @@ impl<'a> App<'a> {
                 return Ok(Flow::Quit);
             }
             match rx.try_recv() {
-                Ok(Ok((me, default_branch, outcome))) => {
+                Ok(Ok((me, default_branch, required_context_memo, outcome))) => {
                     self.me = me;
                     self.default_branch = default_branch;
+                    self.required_context_memo = required_context_memo;
                     // Cleared before painting, so the result frame already shows
                     // the plain `^R refresh` hint again.
                     self.refreshing = false;
@@ -5157,6 +5195,69 @@ mod tests {
         (GRAPHQL.to_string(), response.to_string())
     }
 
+    fn required_context_memo_graphql(
+        mine_ref: &str,
+        required: &[&str],
+        reported: &[&str],
+        pr_head: &str,
+        queue_head: &str,
+        integration_id: i64,
+    ) -> String {
+        let (_, body) = required_rules_graphql(mine_ref, required);
+        let mut response: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let check_runs: Vec<_> = reported
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "__typename": "CheckRun",
+                    "required": true,
+                    "name": name,
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-08-28T10:00:00Z"
+                })
+            })
+            .collect();
+        response["data"]["c0"]["statusCheckRollup"]["contexts"]["nodes"] =
+            serde_json::json!(check_runs);
+        response["data"]["search"]["nodes"][0]["commits"]["nodes"][0]["commit"]["id"] =
+            serde_json::json!(pr_head);
+        response["data"]["repository"]["mergeQueue"]["entries"]["nodes"][0]["headCommit"]["id"] =
+            serde_json::json!(queue_head);
+
+        let required_status_checks: Vec<_> = required
+            .iter()
+            .map(|context| {
+                serde_json::json!({
+                    "context": context,
+                    "integrationId": integration_id
+                })
+            })
+            .collect();
+        let rules = serde_json::json!([{
+            "parameters": {
+                "__typename": "RequiredStatusChecksParameters",
+                "requiredStatusChecks": required_status_checks
+            }
+        }]);
+        response["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"] = rules.clone();
+        response["data"]["r0"]["rules"]["nodes"] = rules;
+        serde_json::to_string(&response).unwrap()
+    }
+
+    fn assert_context_memo_matches_uncached(cli: &Cli, body: &str, cached: &FetchOutcome) -> usize {
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client([]);
+        fake.set_response(GRAPHQL, 200, &[], body);
+        let outcome = fetch(cli, &client, &repo, "me", &mut None, true, false);
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        assert_eq!(
+            serde_json::to_value(&cached.sections).unwrap(),
+            serde_json::to_value(&outcome.sections).unwrap()
+        );
+        fake.requests().len()
+    }
+
     #[test]
     fn required_rules_follow_the_production_refresh_lifetime() {
         let repo = Repo::parse("o/r").unwrap();
@@ -5212,6 +5313,189 @@ mod tests {
                     assert!(branch.is_none());
                 }
             }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn watch_context_memo_skips_only_complete_unchanged_targets() {
+        let repo = Repo::parse("o/r").unwrap();
+        for (case, initial_ref, cold_posts, warm_posts) in
+            [("shared", "ref-1", 4, 2), ("disjoint", "ref-2", 5, 3)]
+        {
+            let cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
+            let (client, fake) = github::fake::client([]);
+            let mut memo = model::RequiredContextMemo::default();
+            let mut previous_posts = 0;
+            let mut refresh =
+                |cli: &Cli, body: &str, expected_posts: usize, cold_posts: usize, label: &str| {
+                    if expected_posts != 0 {
+                        fake.set_response(GRAPHQL, 200, &[], body);
+                    }
+                    let outcome = fetch_with_context_memo(
+                        cli,
+                        &client,
+                        &repo,
+                        "me",
+                        &mut None,
+                        expected_posts != 0,
+                        false,
+                        Some(&mut memo),
+                    );
+                    assert!(outcome.issues.is_empty(), "{label}: {:?}", outcome.issues);
+                    let requests = fake.requests();
+                    let request_count = requests.len() - previous_posts;
+                    previous_posts = requests.len();
+                    println!("MEMO_REFRESH {case} {label} POST={request_count}");
+                    assert_eq!(request_count, expected_posts, "{label}");
+                    let cold_count = if expected_posts == 0 {
+                        0
+                    } else {
+                        assert_context_memo_matches_uncached(cli, body, &outcome)
+                    };
+                    assert_eq!(cold_count, cold_posts, "{label}: uncached request count");
+                    outcome
+                };
+
+            for index in 0..3 {
+                let body = required_context_memo_graphql(
+                    initial_ref,
+                    &["test"],
+                    &["test"],
+                    "PR_HEAD",
+                    "QUEUE_HEAD",
+                    1,
+                );
+                let expected_posts = if index == 0 { cold_posts } else { warm_posts };
+                let outcome = refresh(
+                    &cli,
+                    &body,
+                    expected_posts,
+                    cold_posts,
+                    &format!("steady-{}", index + 1),
+                );
+                assert_eq!(outcome.sections.prs.as_ref().unwrap()[0].checks.running, 0);
+                assert_eq!(
+                    outcome.sections.queue.as_ref().unwrap()[0].missing_required_checks,
+                    0
+                );
+                if index == 1 {
+                    refresh(&cli, &body, 0, 0, "inactive-view skip");
+                }
+            }
+
+            let body = required_context_memo_graphql(
+                initial_ref,
+                &["test"],
+                &["test"],
+                "PR_HEAD_NEW",
+                "QUEUE_HEAD",
+                1,
+            );
+            refresh(&cli, &body, warm_posts + 1, cold_posts, "new PR head");
+
+            let body = required_context_memo_graphql(
+                initial_ref,
+                &["test"],
+                &["test"],
+                "PR_HEAD_NEW",
+                "QUEUE_HEAD",
+                1,
+            );
+            let mut response: serde_json::Value = serde_json::from_str(&body).unwrap();
+            response["data"]["search"]["nodes"][0]["number"] = serde_json::json!(99);
+            refresh(
+                &cli,
+                &serde_json::to_string(&response).unwrap(),
+                warm_posts + 1,
+                cold_posts,
+                "new PR number",
+            );
+
+            let body = required_context_memo_graphql(
+                initial_ref,
+                &["test"],
+                &["test"],
+                "PR_HEAD",
+                "QUEUE_HEAD",
+                1,
+            );
+            refresh(
+                &cli,
+                &body,
+                warm_posts + 1,
+                cold_posts,
+                "reappeared PR head",
+            );
+
+            let body = required_context_memo_graphql(
+                initial_ref,
+                &["test"],
+                &["test"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                1,
+            );
+            refresh(&cli, &body, warm_posts + 1, cold_posts, "queue rebuild");
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test"],
+                &["test"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                1,
+            );
+            refresh(&cli, &body, 4, 5, "base retarget");
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test", "lint"],
+                &["test", "lint"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                1,
+            );
+            refresh(&cli, &body, 5, 5, "added required context");
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test", "lint"],
+                &["test", "lint"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                2,
+            );
+            refresh(&cli, &body, 5, 5, "changed integration");
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test", "lint"],
+                &["test"],
+                "PR_HEAD_MISSING",
+                "QUEUE_MISSING",
+                2,
+            );
+            let missing = refresh(&cli, &body, 5, 5, "missing required context");
+            assert_eq!(missing.sections.prs.as_ref().unwrap()[0].checks.running, 1);
+            let missing = refresh(&cli, &body, 5, 5, "missing context still queried");
+            assert_eq!(missing.sections.prs.as_ref().unwrap()[0].checks.running, 1);
+            assert_eq!(
+                missing.sections.queue.as_ref().unwrap()[0].missing_required_checks,
+                1
+            );
+
+            let mut required_cli = cli.clone();
+            required_cli.required = true;
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test"],
+                &["test"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                2,
+            );
+            refresh(&required_cli, &body, 5, 5, "--required");
         }
     }
 
