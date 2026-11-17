@@ -258,7 +258,11 @@ impl FetchOutcome {
         self.sections.merged.is_some()
             || self.sections.queue.is_some()
             || self.sections.prs.is_some()
-            || self.sections.commits.is_some()
+            || self
+                .sections
+                .commits
+                .as_ref()
+                .is_some_and(|stats| stats.available)
     }
 
     fn reconcile(mut self, previous: Option<Sections>) -> Self {
@@ -8276,6 +8280,49 @@ mod tests {
                 .as_deref(),
             Some("updated 5m ago")
         );
+    }
+
+    #[test]
+    fn failed_shipment_scan_with_failed_mine_does_not_age_shipments() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine,merged,shipments"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch_with_merged(&[3, 2, 1]));
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let mut schedule = Schedule::default();
+        let mut branch = Some("main".to_string());
+        let mut previous = None;
+        let mut previous_issues = Vec::new();
+        let mut dues = Vec::new();
+        let mut notes = Vec::new();
+
+        for tick in 1..=4 {
+            match tick {
+                2 => fake.set_response(GRAPHQL, 500, &[], r#"{"message":"graphql down"}"#),
+                3 => fake.set_response(RELEASES, 500, &[], r#"{"message":"rest down"}"#),
+                _ => {}
+            }
+            let due = schedule.next(View::Mine, false, true);
+            dues.push(due.shipments);
+            let outcome = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+            let now = start + chrono::TimeDelta::minutes(5 * tick);
+            schedule.record(
+                due,
+                &outcome.issues,
+                now,
+                outcome.shipment_scan,
+                outcome.has_fresh_mine_data(),
+            );
+            if tick == 3 {
+                assert!(!outcome.has_fresh_mine_data());
+            }
+            notes.push(schedule.shipments_age_note(now));
+            let merged = outcome.merge(previous.take(), previous_issues, due);
+            previous = Some(merged.sections);
+            previous_issues = merged.issues;
+        }
+
+        assert_eq!(dues, [true, false, true, true]);
+        assert_eq!(notes, [None, None, None, None]);
     }
 
     #[test]

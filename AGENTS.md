@@ -306,7 +306,8 @@ watch event loop); everything else is testable modules:
   section. No compare request uses a guessed
   branch. In watch mode, the REST shipment scan runs every second Mine refresh;
   `Ctrl-R` forces it immediately. Cached shipment counts and release annotations
-  show an age while newer Mine data is displayed.
+  show an age while newer Mine data is displayed; only a fetched Mine section
+  or an available shipment scan counts as newer data.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
