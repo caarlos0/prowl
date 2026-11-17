@@ -292,9 +292,31 @@ pub(crate) fn fetch_queue_with_context_memo(
     }
     let eta = queue_next_eta(&data);
     let mut nodes = queue_nodes(data);
-    let targets: Vec<_> = nodes.iter().map(QueueEntryNode::required_target).collect();
     let rule_data_trusted = errors.is_empty();
-    let (summaries, required_errors) = fetch_required_with_memo(
+    errors.extend(apply_queue_required(
+        client,
+        &mut nodes,
+        required_only,
+        context_cache,
+        memo,
+        rule_data_trusted,
+    )?);
+    Ok(GraphqlData {
+        data: (nodes, eta),
+        errors,
+    })
+}
+
+fn apply_queue_required(
+    client: &Client,
+    nodes: &mut [QueueEntryNode],
+    required_only: bool,
+    context_cache: &mut RequiredContextCache,
+    memo: Option<&mut RequiredContextMemo>,
+    rule_data_trusted: bool,
+) -> Result<Vec<GqlError>> {
+    let targets: Vec<_> = nodes.iter().map(QueueEntryNode::required_target).collect();
+    let (summaries, errors) = fetch_required_with_memo(
         client,
         &targets,
         required_only,
@@ -303,21 +325,17 @@ pub(crate) fn fetch_queue_with_context_memo(
         RequiredMemoScope::Queue,
         rule_data_trusted,
     )?;
-    errors.extend(required_errors);
     for (node, summary) in nodes.iter_mut().zip(summaries) {
         node.apply_required(summary, required_only);
     }
-    Ok(GraphqlData {
-        data: (nodes, eta),
-        errors,
-    })
+    Ok(errors)
 }
 
 // ----------------------------------------------------------------------------
 // My open PRs
 // ----------------------------------------------------------------------------
 
-pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeDefaultBranchRef: Boolean!) {
+pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeDefaultBranchRef: Boolean!, $includeQueue: Boolean!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef @include(if: $includeDefaultBranchRef) {
       id
@@ -331,6 +349,26 @@ pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: Strin
               requiredStatusChecks { context integrationId }
             }
           }
+        }
+      }
+    }
+    mergeQueue @include(if: $includeQueue) {
+      nextEntryEstimatedTimeToMerge
+      entries(first: 100) {
+        nodes {
+          position
+          enqueuedAt
+          headCommit {
+            id
+            statusCheckRollup {
+              contexts(first: 40) {
+                checkRunCountsByState { state count }
+                statusContextCountsByState { state count }
+                nodes { ... on CheckRun { startedAt } }
+              }
+            }
+          }
+          pullRequest { number title url headRefName baseRef { id } author { login } }
         }
       }
     }
@@ -606,24 +644,20 @@ pub(crate) fn fetch_my_prs_with_context_memo(
     memo: Option<&mut RequiredContextMemo>,
 ) -> Result<GraphqlData<Vec<PrNode>>> {
     let q = mine_search(repo, me, sort);
-    let mut nodes = Vec::new();
-    let mut errors = Vec::new();
-    let mut after: Option<String> = None;
-    loop {
-        let include_default_branch_ref =
-            after.is_none() && context_cache.default_branch_ref_id.is_none();
-        let (data, page_errors): (MineData, _) = client.graphql_with_errors(
-            MINE_QUERY,
-            serde_json::json!({
-                "owner": repo.owner,
-                "name": repo.name,
-                "q": q,
-                "after": after,
-                "includeDefaultBranchRef": include_default_branch_ref,
-            }),
-        )?;
-        if include_default_branch_ref
-            && could_affect_default_branch_rules(&page_errors)
+    let include_default_branch_ref = context_cache.default_branch_ref_id.is_none();
+    let (data, errors): (MineData, _) = client.graphql_with_errors(
+        MINE_QUERY,
+        serde_json::json!({
+            "owner": repo.owner,
+            "name": repo.name,
+            "q": q,
+            "after": null,
+            "includeDefaultBranchRef": include_default_branch_ref,
+            "includeQueue": false,
+        }),
+    )?;
+    if include_default_branch_ref {
+        if could_affect_default_branch_rules(&errors)
             && let Some(branch) = data
                 .repository
                 .as_ref()
@@ -633,20 +667,233 @@ pub(crate) fn fetch_my_prs_with_context_memo(
                 .errors
                 .entry(branch.id.clone())
                 .or_default()
-                .extend(page_errors.iter().cloned());
+                .extend(errors.iter().cloned());
         }
-        errors.extend(page_errors);
-        if include_default_branch_ref {
-            seed_default_branch_ref(
-                data.repository
-                    .and_then(|repository| repository.default_branch_ref),
+        seed_default_branch_ref(
+            data.repository
+                .and_then(|repository| repository.default_branch_ref),
+            context_cache,
+        )?;
+    }
+    fetch_mine_pages(
+        client,
+        repo,
+        me,
+        sort,
+        required_only,
+        context_cache,
+        memo,
+        GraphqlData {
+            data: data.search,
+            errors,
+        },
+    )
+}
+
+pub(crate) struct MineQueueResults {
+    pub mine: Result<GraphqlData<Vec<PrNode>>>,
+    pub queue: Result<GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>>,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn fetch_mine_and_queue_with_context_memo(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    sort: OpenSort,
+    required_only: bool,
+    context_cache: &mut RequiredContextCache,
+    mut memo: Option<&mut RequiredContextMemo>,
+) -> Result<MineQueueResults> {
+    let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
+        MINE_QUERY,
+        serde_json::json!({
+            "owner": repo.owner,
+            "name": repo.name,
+            "q": mine_search(repo, me, sort),
+            "after": null,
+            "includeDefaultBranchRef": true,
+            "includeQueue": true,
+        }),
+    )?;
+    let mine_error = mine_queue_graphql_error(&errors, false);
+    let queue_error = mine_queue_graphql_error(&errors, true);
+
+    let repository = data.get("repository").filter(|value| !value.is_null());
+    let default_branch_ref = repository
+        .and_then(|repository| repository.get("defaultBranchRef"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let default_branch_ref: Option<DefaultBranchRef> =
+        serde_json::from_value(default_branch_ref).context("parsing default branch rules")?;
+    seed_default_branch_ref(default_branch_ref, context_cache)?;
+    if could_affect_default_branch_rules(&errors)
+        && let Some(id) = &context_cache.default_branch_ref_id
+    {
+        let rule_errors = errors
+            .iter()
+            .filter(|error| could_affect_default_branch_rules(std::slice::from_ref(*error)))
+            .cloned()
+            .collect::<Vec<_>>();
+        context_cache
+            .errors
+            .entry(id.clone())
+            .or_default()
+            .extend(rule_errors);
+    }
+
+    let merge_queue = repository
+        .and_then(|repository| repository.get("mergeQueue"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let queue = match serde_json::from_value::<Option<MergeQueue>>(merge_queue)
+        .context("parsing merge queue")
+    {
+        Ok(Some(merge_queue)) => {
+            let eta = merge_queue.next_entry_estimated_time_to_merge;
+            let mut nodes = merge_queue.entries.nodes;
+            let mut warnings = mine_queue_graphql_warnings(&errors, true);
+            let rule_data_trusted = warnings.is_empty();
+            apply_queue_required(
+                client,
+                &mut nodes,
+                required_only,
                 context_cache,
-            )?;
+                memo.as_deref_mut(),
+                rule_data_trusted,
+            )
+            .map(|required_warnings| {
+                warnings.extend(required_warnings);
+                GraphqlData {
+                    data: (nodes, eta),
+                    errors: warnings,
+                }
+            })
         }
+        Ok(None) => {
+            if let Some(error) = queue_error {
+                Err(error)
+            } else {
+                let mut warnings = mine_queue_graphql_warnings(&errors, true);
+                let rule_data_trusted = warnings.is_empty();
+                apply_queue_required(
+                    client,
+                    &mut [],
+                    required_only,
+                    context_cache,
+                    memo.as_deref_mut(),
+                    rule_data_trusted,
+                )
+                .map(|required_warnings| {
+                    warnings.extend(required_warnings);
+                    GraphqlData {
+                        data: (Vec::new(), None),
+                        errors: warnings,
+                    }
+                })
+            }
+        }
+        Err(parse_error) => Err(queue_error.unwrap_or(parse_error)),
+    };
+    let first_page = data
+        .get("search")
+        .cloned()
+        .context("GraphQL response omitted My PRs search")
+        .and_then(|search| {
+            serde_json::from_value::<MineNodes>(search).context("parsing My PRs search")
+        });
+    let mine = match first_page {
+        Ok(first_page) => fetch_mine_pages(
+            client,
+            repo,
+            me,
+            sort,
+            required_only,
+            context_cache,
+            memo,
+            GraphqlData {
+                data: first_page,
+                errors: mine_queue_graphql_warnings(&errors, false),
+            },
+        ),
+        Err(parse_error) => Err(mine_error.unwrap_or(parse_error)),
+    };
+    Ok(MineQueueResults { mine, queue })
+}
+
+fn mine_queue_graphql_warnings(errors: &[GqlError], queue: bool) -> Vec<GqlError> {
+    errors
+        .iter()
+        .filter(|error| {
+            let path = error.path.as_deref().unwrap_or_default();
+            let root = path.first().and_then(serde_json::Value::as_str);
+            let search_error = root == Some("search");
+            let queue_error = root == Some("repository")
+                && path.get(1).and_then(serde_json::Value::as_str) == Some("mergeQueue");
+            !(if queue { search_error } else { queue_error })
+        })
+        .cloned()
+        .collect()
+}
+
+fn mine_queue_graphql_error(errors: &[GqlError], queue: bool) -> Option<anyhow::Error> {
+    let messages = errors
+        .iter()
+        .filter(|error| {
+            let path = error.path.as_deref().unwrap_or_default();
+            match path.first().and_then(serde_json::Value::as_str) {
+                Some("search") => !queue,
+                Some("repository")
+                    if path.get(1).and_then(serde_json::Value::as_str) == Some("mergeQueue") =>
+                {
+                    queue
+                }
+                Some("repository")
+                    if path.get(1).and_then(serde_json::Value::as_str)
+                        == Some("defaultBranchRef") =>
+                {
+                    false
+                }
+                _ => true,
+            }
+        })
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
+    (!messages.is_empty()).then(|| anyhow!("GraphQL error: {}", messages.join("; ")))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_mine_pages(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    sort: OpenSort,
+    required_only: bool,
+    context_cache: &mut RequiredContextCache,
+    memo: Option<&mut RequiredContextMemo>,
+    first_page: GraphqlData<MineNodes>,
+) -> Result<GraphqlData<Vec<PrNode>>> {
+    let GraphqlData {
+        data: first_page,
+        mut errors,
+    } = first_page;
+    let q = mine_search(repo, me, sort);
+    let mut nodes = Vec::new();
+    let mut after = first_page.add_to(&mut nodes)?;
+    while let Some(cursor) = after {
+        let (data, page_errors): (MineData, _) = client.graphql_with_errors(
+            MINE_QUERY,
+            serde_json::json!({
+                "owner": repo.owner,
+                "name": repo.name,
+                "q": q,
+                "after": cursor,
+                "includeDefaultBranchRef": false,
+                "includeQueue": false,
+            }),
+        )?;
+        errors.extend(page_errors);
         after = data.search.add_to(&mut nodes)?;
-        if after.is_none() {
-            break;
-        }
     }
     let targets: Vec<_> = nodes
         .iter()
@@ -1809,6 +2056,14 @@ mod tests {
         assert!(MINE_QUERY.contains("reviewDecision"), "{MINE_QUERY}");
         assert!(
             MINE_QUERY.contains("latestOpinionatedReviews"),
+            "{MINE_QUERY}"
+        );
+        assert!(
+            MINE_QUERY.contains("mergeQueue @include(if: $includeQueue)"),
+            "{MINE_QUERY}"
+        );
+        assert!(
+            MINE_QUERY.contains("      }\n    }\n    mergeQueue @include(if: $includeQueue)"),
             "{MINE_QUERY}"
         );
     }
