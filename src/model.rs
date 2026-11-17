@@ -648,6 +648,7 @@ pub(crate) fn fetch_my_prs_with_context_cache(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_my_prs_with_context_memo(
     client: &Client,
     repo: &Repo,
