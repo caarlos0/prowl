@@ -214,6 +214,7 @@ struct MineSectionsToFetch {
     merged: bool,
 }
 
+#[derive(Default)]
 struct FetchedMineSections {
     prs: Option<Vec<prs::PrRow>>,
     queue: Option<Vec<queue::QueueRow>>,
@@ -680,13 +681,15 @@ fn fetch_scheduled(
         issues.push(FetchIssue::new(FetchScope::Upcoming, &error));
     }
 
-    let fetched_reviews = fetch_review_sections(cli, client, repo, me, due.reviews, &mut issues);
-    let FetchedMineSections {
-        prs,
-        queue,
-        queue_next_eta,
-        merged_nodes,
-    } = fetch_mine_sections(cli, client, repo, me, due.mine, &mut issues);
+    let (fetched_reviews, mine_sections) = if due.mine && due.reviews && cli.show_mine() {
+        fetch_mine_reviews_sections(cli, client, repo, me, &mut issues)
+    } else {
+        let fetched_reviews =
+            fetch_review_sections(cli, client, repo, me, due.reviews, &mut issues);
+        let mine_sections = fetch_mine_sections(cli, client, repo, me, due.mine, &mut issues);
+        (fetched_reviews, mine_sections)
+    };
+    let merged_nodes = mine_sections.merged_nodes;
     if due.mine
         && due.shipments
         && !cli.show_shipments()
@@ -706,9 +709,9 @@ fn fetch_scheduled(
     FetchOutcome {
         sections: Sections {
             merged,
-            queue,
-            queue_next_eta,
-            prs,
+            queue: mine_sections.queue,
+            queue_next_eta: mine_sections.queue_next_eta,
+            prs: mine_sections.prs,
             commits,
             reviews: fetched_reviews.reviews,
             reviewed_merged: fetched_reviews.reviewed_merged,
@@ -828,59 +831,67 @@ fn fetch_combined_mine_sections(
                 .map(|query| (query, cli.merged_limit)),
         },
     ) {
-        Ok(fetched) => {
-            let queue = fetched.queue.and_then(|result| {
-                graphql_section(
-                    FetchScope::Queue,
-                    result,
-                    |(nodes, eta)| (queue::build_rows(nodes, me), eta),
-                    issues,
-                )
-            });
-            let prs = fetched.mine.and_then(|result| {
-                graphql_section(
-                    FetchScope::Mine,
-                    result,
-                    |nodes| {
-                        let rows = prs::build_rows(nodes, cli.sort_open);
-                        if cli.no_draft {
-                            prs::without_drafts(rows)
-                        } else {
-                            rows
-                        }
-                    },
-                    issues,
-                )
-            });
-            let merged_nodes = fetched.merged.and_then(|result| {
-                graphql_section(FetchScope::Merged, result, |nodes| nodes, issues)
-            });
-            let (queue, eta) = queue.map_or((None, None), |(rows, eta)| (Some(rows), eta));
-            FetchedMineSections {
-                prs,
-                queue,
-                queue_next_eta: eta,
-                merged_nodes,
-            }
-        }
-        Err(error) => {
-            if sections.queue {
-                issues.push(FetchIssue::new(FetchScope::Queue, &error));
-            }
-            if sections.mine {
-                issues.push(FetchIssue::new(FetchScope::Mine, &error));
-            }
-            if sections.merged {
-                issues.push(FetchIssue::new(FetchScope::Merged, &error));
-            }
-            FetchedMineSections {
-                prs: None,
-                queue: None,
-                queue_next_eta: None,
-                merged_nodes: None,
-            }
-        }
+        Ok(fetched) => map_mine_section_results(cli, me, fetched, issues),
+        Err(error) => failed_mine_sections(sections, &error, issues),
     }
+}
+
+fn map_mine_section_results(
+    cli: &Cli,
+    me: &str,
+    fetched: model::MineSectionResults,
+    issues: &mut Vec<FetchIssue>,
+) -> FetchedMineSections {
+    let queue = fetched.queue.and_then(|result| {
+        graphql_section(
+            FetchScope::Queue,
+            result,
+            |(nodes, eta)| (queue::build_rows(nodes, me), eta),
+            issues,
+        )
+    });
+    let prs = fetched.mine.and_then(|result| {
+        graphql_section(
+            FetchScope::Mine,
+            result,
+            |nodes| {
+                let rows = prs::build_rows(nodes, cli.sort_open);
+                if cli.no_draft {
+                    prs::without_drafts(rows)
+                } else {
+                    rows
+                }
+            },
+            issues,
+        )
+    });
+    let merged_nodes = fetched
+        .merged
+        .and_then(|result| graphql_section(FetchScope::Merged, result, |nodes| nodes, issues));
+    let (queue, eta) = queue.map_or((None, None), |(rows, eta)| (Some(rows), eta));
+    FetchedMineSections {
+        prs,
+        queue,
+        queue_next_eta: eta,
+        merged_nodes,
+    }
+}
+
+fn failed_mine_sections(
+    sections: MineSectionsToFetch,
+    error: &anyhow::Error,
+    issues: &mut Vec<FetchIssue>,
+) -> FetchedMineSections {
+    if sections.queue {
+        issues.push(FetchIssue::new(FetchScope::Queue, error));
+    }
+    if sections.mine {
+        issues.push(FetchIssue::new(FetchScope::Mine, error));
+    }
+    if sections.merged {
+        issues.push(FetchIssue::new(FetchScope::Merged, error));
+    }
+    FetchedMineSections::default()
 }
 
 fn resolve_default_branch(
@@ -988,47 +999,101 @@ fn fetch_review_sections(
         &since,
         cli.merged_limit,
     ) {
-        Ok(fetched) => {
-            let reviews = graphql_section(
-                FetchScope::Reviews,
-                fetched.reviews,
-                |data| {
-                    let rows = reviews::build_open_rows(data);
-                    if cli.no_draft {
-                        reviews::without_drafts(rows)
-                    } else {
-                        rows
-                    }
-                },
-                issues,
-            );
-            let reviewed_merged = graphql_section(
-                FetchScope::ReviewedMerged,
-                fetched.reviewed_merged,
-                |nodes| reviews::build_merged_rows(nodes, cli.merged_limit),
-                issues,
-            );
-            FetchedReviewSections {
-                reviews,
-                reviewed_merged,
+        Ok(fetched) => map_reviews_and_merged(cli, fetched, issues),
+        Err(error) => failed_review_sections(&error, issues),
+    }
+}
+
+fn map_reviews_and_merged(
+    cli: &Cli,
+    fetched: model::ReviewsAndMerged,
+    issues: &mut Vec<FetchIssue>,
+) -> FetchedReviewSections {
+    let reviews = graphql_section(
+        FetchScope::Reviews,
+        fetched.reviews,
+        |data| {
+            let rows = reviews::build_open_rows(data);
+            if cli.no_draft {
+                reviews::without_drafts(rows)
+            } else {
+                rows
             }
-        }
+        },
+        issues,
+    );
+    let reviewed_merged = graphql_section(
+        FetchScope::ReviewedMerged,
+        fetched.reviewed_merged,
+        |nodes| reviews::build_merged_rows(nodes, cli.merged_limit),
+        issues,
+    );
+    FetchedReviewSections {
+        reviews,
+        reviewed_merged,
+    }
+}
+
+fn failed_review_sections(
+    error: &anyhow::Error,
+    issues: &mut Vec<FetchIssue>,
+) -> FetchedReviewSections {
+    let message = format!("{error:#}");
+    let reviews = section(
+        FetchScope::Reviews,
+        Err(anyhow::anyhow!("{message}")),
+        issues,
+    );
+    let reviewed_merged = section(
+        FetchScope::ReviewedMerged,
+        Err(anyhow::anyhow!("{message}")),
+        issues,
+    );
+    FetchedReviewSections {
+        reviews,
+        reviewed_merged,
+    }
+}
+
+fn fetch_mine_reviews_sections(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    issues: &mut Vec<FetchIssue>,
+) -> (FetchedReviewSections, FetchedMineSections) {
+    let since = timefmt::since_date(&cli.merged_window);
+    let mut context_cache = model::RequiredContextCache::default();
+    match model::fetch_mine_queue_reviews_with_context_cache(
+        client,
+        repo,
+        me,
+        cli.sort_open,
+        cli.required,
+        &mut context_cache,
+        model::WatchQueryOptions {
+            requested_qualifier: cli.review_scope.qualifier(),
+            since: &since,
+            merged_limit: cli.merged_limit,
+            no_draft: cli.no_draft,
+            include_queue: cli.show_queue(),
+            include_mine_merged: cli.show_merged(),
+        },
+    ) {
+        Ok(fetched) => (
+            map_reviews_and_merged(cli, fetched.reviews, issues),
+            map_mine_section_results(cli, me, fetched.mine, issues),
+        ),
         Err(error) => {
-            let message = format!("{error:#}");
-            let reviews = section(
-                FetchScope::Reviews,
-                Err(anyhow::anyhow!("{message}")),
-                issues,
-            );
-            let reviewed_merged = section(
-                FetchScope::ReviewedMerged,
-                Err(anyhow::anyhow!("{message}")),
-                issues,
-            );
-            FetchedReviewSections {
-                reviews,
-                reviewed_merged,
-            }
+            let sections = MineSectionsToFetch {
+                mine: true,
+                queue: cli.show_queue(),
+                merged: cli.show_merged(),
+            };
+            (
+                failed_review_sections(&error, issues),
+                failed_mine_sections(sections, &error, issues),
+            )
         }
     }
 }
@@ -5156,6 +5221,67 @@ mod tests {
             searches.iter().all(|q| q.contains(" draft:false ")),
             "{searches:?}"
         );
+
+        let (combined, combined_requests, combined_searches) =
+            run(&["prowl", "--only", "mine,queue", "--no-draft"], true);
+        assert_eq!(combined, ready);
+        assert_eq!(combined_requests, requests);
+        assert_eq!(combined_searches.len(), searches.len());
+        assert!(
+            combined_searches
+                .iter()
+                .all(|q| q.contains(" draft:false ")),
+            "{combined_searches:?}"
+        );
+    }
+
+    #[test]
+    fn no_draft_keeps_draft_filter_in_combined_watch_pages() {
+        const DRAFTS: &[i64] = &[2, 5, 8, 11];
+        let cli = Cli::try_parse_from(["prowl", "--no-draft"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let searches = std::sync::Arc::default();
+        let (client, fake) = github::fake::client([]);
+        let mine = mine_server(DRAFTS, true, std::sync::Arc::clone(&searches));
+        fake.set_graphql_responder(move |body| {
+            let mut response: serde_json::Value = serde_json::from_str(&mine(body)).unwrap();
+            if body["variables"].get("requested").is_some() {
+                response["data"]["requested"] = serde_json::json!({ "nodes": [] });
+                response["data"]["reviewed"] = serde_json::json!({ "nodes": [] });
+                response["data"]["reviewedMerged"] = serde_json::json!({ "nodes": [] });
+                response["data"]["mineMerged"] = serde_json::json!({ "nodes": [] });
+            }
+            response.to_string()
+        });
+
+        let outcome = fetch_scheduled(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut None,
+            Due {
+                mine: true,
+                reviews: true,
+                shipments: false,
+            },
+        );
+
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        let numbers: Vec<_> = outcome
+            .sections
+            .prs
+            .unwrap()
+            .iter()
+            .map(|row| row.number)
+            .collect();
+        assert_eq!(numbers, [12, 10, 9, 7, 6, 4, 3, 1]);
+        let searches = searches.lock().unwrap();
+        assert_eq!(searches.len(), 2);
+        assert!(
+            searches.iter().all(|q| q.contains(" draft:false ")),
+            "{searches:?}"
+        );
     }
 
     #[test]
@@ -5268,72 +5394,56 @@ mod tests {
     }
 
     #[test]
-    fn each_section_failure_preserves_other_fetched_sections() {
+    fn combined_request_failure_reports_every_included_section() {
         let cli = Cli::try_parse_from(["prowl"]).unwrap();
         let repo = Repo::parse("o/r").unwrap();
-        for call in 1..=2 {
-            let (client, fake) = github::fake::client(tagged_watch());
-            fake.set_response_on_call(
-                GRAPHQL,
-                call,
-                500,
-                &[],
-                r#"{"message":"injected section failure"}"#,
-            );
-            let outcome = fetch(
-                &cli,
-                &client,
-                &repo,
-                "me",
-                &mut Some("main".to_string()),
-                true,
-                true,
-            );
-            let requests = fake.requests();
-            let posts = requests.iter().filter(|r| r.as_str() == GRAPHQL).count();
-            assert_eq!(posts, 2, "GraphQL call {call}: {requests:?}");
-            assert_eq!(outcome.issues.len(), if call == 1 { 2 } else { 3 });
-            let expected_scopes = match call {
-                1 => vec![FetchScope::Reviews, FetchScope::ReviewedMerged],
-                2 => vec![FetchScope::Queue, FetchScope::Mine, FetchScope::Merged],
-                _ => unreachable!(),
-            };
-            assert_eq!(
-                outcome
-                    .issues
-                    .iter()
-                    .map(|issue| issue.scope)
-                    .collect::<Vec<_>>(),
-                expected_scopes
-            );
-            assert!(
-                outcome
-                    .issues
-                    .iter()
-                    .all(|issue| issue.message.contains("500"))
-            );
-            assert!(outcome.issues.iter().all(|issue| !issue.stale));
-            assert_eq!(outcome.status().lines().count(), outcome.issues.len());
-            match call {
-                1 => {
-                    assert!(outcome.sections.merged.is_some());
-                    assert!(outcome.sections.reviews.is_none());
-                    assert!(outcome.sections.reviewed_merged.is_none());
-                }
-                2 => {
-                    assert!(outcome.sections.queue.is_none());
-                    assert!(outcome.sections.prs.is_none());
-                    assert!(outcome.sections.merged.is_none());
-                }
-                _ => unreachable!(),
-            }
-            assert_eq!(outcome.sections.merged.is_some(), call != 2);
-            assert_eq!(outcome.sections.queue.is_some(), call != 2);
-            assert_eq!(outcome.sections.prs.is_some(), call != 2);
-            assert_eq!(outcome.sections.reviews.is_some(), call != 1);
-            assert_eq!(outcome.sections.reviewed_merged.is_some(), call != 1);
-            assert!(outcome.sections.commits.is_some());
-        }
+        let (client, fake) = github::fake::client(tagged_watch());
+        fake.set_response_on_call(
+            GRAPHQL,
+            1,
+            500,
+            &[],
+            r#"{"message":"injected request failure"}"#,
+        );
+        let outcome = fetch(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            true,
+        );
+        let requests = fake.requests();
+        let posts = requests.iter().filter(|r| r.as_str() == GRAPHQL).count();
+        assert_eq!(posts, 1, "{requests:?}");
+        assert_eq!(
+            outcome
+                .issues
+                .iter()
+                .map(|issue| issue.scope)
+                .collect::<Vec<_>>(),
+            [
+                FetchScope::Reviews,
+                FetchScope::ReviewedMerged,
+                FetchScope::Queue,
+                FetchScope::Mine,
+                FetchScope::Merged,
+            ]
+        );
+        assert!(
+            outcome
+                .issues
+                .iter()
+                .all(|issue| issue.message.contains("500") && !issue.stale)
+        );
+        assert_eq!(outcome.status().lines().count(), outcome.issues.len());
+        assert!(outcome.sections.merged.is_none());
+        assert!(outcome.sections.queue.is_none());
+        assert!(outcome.sections.prs.is_none());
+        assert!(outcome.sections.reviews.is_none());
+        assert!(outcome.sections.reviewed_merged.is_none());
+        assert!(outcome.sections.commits.is_some());
     }
 
     #[test]
@@ -5360,7 +5470,7 @@ mod tests {
                 _ => unreachable!(),
             }
             let (client, fake) = github::fake::client(routes);
-            fake.set_response_on_call(GRAPHQL, 2, 200, &[], &response.to_string());
+            fake.set_response_on_call(GRAPHQL, 1, 200, &[], &response.to_string());
 
             let outcome = fetch(
                 &Cli::try_parse_from(["prowl"]).unwrap(),
@@ -5384,12 +5494,14 @@ mod tests {
                 expected_scope != FetchScope::Mine
             );
             assert!(outcome.sections.merged.is_some());
+            assert!(outcome.sections.reviews.is_some());
+            assert!(outcome.sections.reviewed_merged.is_some());
             assert_eq!(
                 fake.requests()
                     .iter()
                     .filter(|request| request.as_str() == GRAPHQL)
                     .count(),
-                2
+                1
             );
         }
     }
@@ -5412,7 +5524,7 @@ mod tests {
         response["data"]["search"] = serde_json::Value::Null;
         response["data"]["repository"]["mergeQueue"] = serde_json::Value::Null;
         let (client, fake) = github::fake::client(routes);
-        fake.set_response_on_call(GRAPHQL, 2, 200, &[], &response.to_string());
+        fake.set_response_on_call(GRAPHQL, 1, 200, &[], &response.to_string());
 
         let outcome = fetch(
             &Cli::try_parse_from(["prowl"]).unwrap(),
@@ -5444,12 +5556,42 @@ mod tests {
         );
         assert!(outcome.sections.queue.is_none());
         assert!(outcome.sections.prs.is_none());
+        assert!(outcome.sections.merged.is_some());
+        assert!(outcome.sections.reviews.is_some());
+        assert!(outcome.sections.reviewed_merged.is_some());
         assert_eq!(
             fake.requests()
                 .iter()
                 .filter(|request| request.as_str() == GRAPHQL)
                 .count(),
-            2
+            1
+        );
+    }
+
+    #[test]
+    fn combined_watch_honors_only_mine_without_fetching_queue_rows() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine"]).unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        let outcome = fetch(
+            &cli,
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            true,
+        );
+
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        assert!(outcome.sections.prs.is_some());
+        assert!(outcome.sections.queue.is_none());
+        assert!(outcome.sections.merged.is_none());
+        assert_eq!(
+            fake.requests()
+                .iter()
+                .filter(|request| request.as_str() == GRAPHQL)
+                .count(),
+            1
         );
     }
 
@@ -5488,7 +5630,7 @@ mod tests {
                 "path": path
             }]);
             let (client, fake) = github::fake::client(routes);
-            fake.set_response_on_call(GRAPHQL, 2, 200, &[], &response.to_string());
+            fake.set_response_on_call(GRAPHQL, 1, 200, &[], &response.to_string());
 
             let outcome = fetch(
                 &Cli::try_parse_from(["prowl"]).unwrap(),
@@ -5523,7 +5665,7 @@ mod tests {
                     .iter()
                     .filter(|request| request.as_str() == GRAPHQL)
                     .count(),
-                2
+                1
             );
         }
     }
@@ -5661,12 +5803,11 @@ mod tests {
     #[test]
     fn capped_release_range_is_successful_across_watch_refreshes_and_once() {
         const CAPPED: &str = r#"{"total_commits":300,"commits":[{"author":{"login":"me"},"commit":{"message":"feat: two (#2)"}}]}"#;
-        const REQUESTS: [&str; 6] = [
+        const REQUESTS: [&str; 5] = [
             RELEASES,
             "GET /repos/o/r/compare/v2...main",
             "GET /repos/o/r/compare/v1...v2",
             "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
-            GRAPHQL,
             GRAPHQL,
         ];
         let cli = Cli::try_parse_from(["prowl"]).unwrap();
@@ -5779,24 +5920,31 @@ mod tests {
         let (client, fake) = github::fake::client(tagged_watch());
         fake.set_response_on_call(
             GRAPHQL,
-            2,
+            1,
             500,
             &[],
-            r#"{"message":"injected queue failure"}"#,
+            r#"{"message":"injected combined request failure"}"#,
         );
         let current =
             fetch(&cli, &client, &repo, "me", &mut branch, true, true).reconcile(Some(previous));
 
-        assert_eq!(current.issues.len(), 3);
+        assert_eq!(current.issues.len(), 5);
         assert_eq!(
             current
                 .issues
                 .iter()
                 .map(|issue| issue.scope)
                 .collect::<Vec<_>>(),
-            [FetchScope::Queue, FetchScope::Mine, FetchScope::Merged]
+            [
+                FetchScope::Reviews,
+                FetchScope::ReviewedMerged,
+                FetchScope::Queue,
+                FetchScope::Mine,
+                FetchScope::Merged,
+            ]
         );
         assert!(current.issues.iter().all(|issue| issue.stale));
+        assert!(current.sections.merged.is_some());
         assert_eq!(current.sections.queue_next_eta, Some(42));
         assert!(
             current
@@ -5808,9 +5956,13 @@ mod tests {
                 .all(|row| row.title == "old snapshot"),
             "the combined request failure must retain the previous My PRs data"
         );
+        assert!(current.sections.reviews.is_some());
+        assert!(current.sections.reviewed_merged.is_some());
         assert!(current.status().contains("Merge Queue stale"));
         assert!(current.status().contains("My PRs stale"));
         assert!(current.status().contains("My Merged PRs stale"));
+        assert!(current.status().contains("Reviews stale"));
+        assert!(current.status().contains("Reviewed & merged stale"));
         assert_eq!(
             serde_json::to_value(&current.sections.merged).unwrap(),
             previous_merged
@@ -5930,9 +6082,9 @@ mod tests {
 
                 assert!(due.includes(active), "{label}: {due:?}");
                 assert_eq!(due.includes(inactive), inactive_due, "{label}: {due:?}");
-                assert_eq!(before, (4, 2), "{label}");
+                assert_eq!(before, (4, 1), "{label}");
                 assert_eq!(due.shipments, shipments_due, "{label}: {due:?}");
-                let expected_posts = usize::from(due.mine) + usize::from(due.reviews);
+                let expected_posts = usize::from(due.mine || due.reviews);
                 let expected_after = (if due.shipments { before.0 } else { 0 }, expected_posts);
                 assert_eq!(after, expected_after, "{label}");
                 assert!(outcome.issues.is_empty(), "{label}: {:?}", outcome.issues);
@@ -6305,9 +6457,9 @@ mod tests {
                 4,
                 1,
             ),
-            ("watch_mine_view", &[], true, 6, 2),
-            ("watch_reviews", &["--view", "reviews"], true, 6, 2),
-            ("watch_mine_only", &["--only", "mine"], true, 1, 2),
+            ("watch_mine_view", &[], true, 6, 1),
+            ("watch_reviews", &["--view", "reviews"], true, 6, 1),
+            ("watch_mine_only", &["--only", "mine"], true, 1, 1),
         ];
         let repo = Repo::parse("o/r").unwrap();
         for &(name, args, watch, expected_gets, posts) in cases {
@@ -6543,7 +6695,7 @@ mod tests {
             serde_json::to_value(&watch.sections.reviews).unwrap(),
             serde_json::to_value(&reviews.sections.reviews).unwrap()
         );
-        assert_eq!((watch_posts, mine_posts, reviews_posts), (2, 1, 1));
+        assert_eq!((watch_posts, mine_posts, reviews_posts), (1, 1, 1));
     }
 
     #[test]
@@ -6551,6 +6703,7 @@ mod tests {
         for (alias, scope) in [
             ("mineMerged", FetchScope::Merged),
             ("requested", FetchScope::Reviews),
+            ("reviewed", FetchScope::Reviews),
             ("reviewedMerged", FetchScope::ReviewedMerged),
         ] {
             let routes = tagged_watch();
@@ -6563,8 +6716,7 @@ mod tests {
             }]);
             let partial = response.to_string();
             let (client, fake) = github::fake::client(routes);
-            let call = if alias == "mineMerged" { 2 } else { 1 };
-            fake.set_response_on_call(GRAPHQL, call, 200, &[], &partial);
+            fake.set_response_on_call(GRAPHQL, 1, 200, &[], &partial);
             let outcome = fetch(
                 &Cli::try_parse_from(["prowl"]).unwrap(),
                 &client,
@@ -6593,12 +6745,14 @@ mod tests {
                 outcome.sections.reviewed_merged.is_none(),
                 scope == FetchScope::ReviewedMerged
             );
+            assert!(outcome.sections.prs.is_some());
+            assert!(outcome.sections.queue.is_some());
             assert_eq!(
                 fake.requests()
                     .iter()
                     .filter(|request| request.as_str() == GRAPHQL)
                     .count(),
-                2
+                1
             );
         }
     }

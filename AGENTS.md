@@ -121,13 +121,16 @@ watch event loop); everything else is testable modules:
   (`METHOD /path?query`) and the `If-None-Match` value.
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
-  the three Mine queries plus `REVIEWS_QUERY`, which combines the `requested:`
+  the Mine query paths plus `REVIEWS_QUERY`, which combines the `requested:`
   and `reviewed:` open-review searches with the reviewed-merged search. The Mine
   merged search rides in the first Mine GraphQL request: the combined queue-
   and-Mine request, the queue request when My PRs are hidden, or Mine page 1
-  when the queue is hidden. Reviews never carries Mine merged; a standalone
-  search is needed only when neither My PRs nor Merge Queue can carry it. Alias
-  errors stay scoped to their sections. My PRs and
+  when the queue is hidden. `WATCH_MINE_REVIEWS_QUERY` combines the first Mine
+  page, optional queue, and Reviews searches when both views are due and My PRs
+  is shown; it includes the Mine merged search exactly once when that section is
+  enabled. `REVIEWS_QUERY` never carries Mine merged; a standalone search is
+  needed only when neither My PRs nor Merge Queue can carry it. Alias errors
+  stay scoped to their sections. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   GraphQL partial-data errors warn in each affected section, including a
   section that consumes warned shared rule data; the cache adds no requests.
@@ -465,9 +468,12 @@ still performs all teardown through `finish`.
   (`FetchOutcome::merge`), so Tab switches instantly from `last_good` with no
   request; the next refresh fetches the newly active view. When the shown view
   was fetched before the other, a dim `updated 6m ago` status line
-  (`Schedule::age_note`) shows its age. Mine merged is fetched with the Mine
-  request when that view is due; Reviews always fetches only its open review
-  searches and reviewed-and-merged search. `--once`/piped fetches only the
+  (`Schedule::age_note`) shows its age. When both views are due and My PRs is
+  enabled, the first Mine page, optional queue, and Reviews searches share one
+  request; the Mine merged search appears once when enabled. Otherwise Mine
+  merged is fetched with the first Mine request when that view is due, and
+  Reviews fetches only its open review searches and reviewed-and-merged search.
+  `--once`/piped fetches only the
   selected view.
   The REST shipment scan has its own cadence in the same schedule: it runs
   every second Mine refresh, while `Ctrl-R` forces it. Cached shipment counts
@@ -664,17 +670,19 @@ still performs all teardown through `finish`.
   (fetched `sort:updated-desc`, since search can't sort by merge time, then
   re-sorted by `mergedAt` for display). The first Mine request carries it as
   `mineMerged`: the combined queue-and-Mine request, the queue request when My
-  PRs are hidden, or Mine page 1 when the queue is hidden. A standalone merged
-  request is used only when no Mine or queue request can carry it. It also
-  fetches `author` (used by the reviewed-and-merged section; the Mine merged
-  section ignores it). An alias error affects only that section; a request-level
-  failure reports each section included in that request.
-- Reviews (one POST, three aliased searches): `requested: search(is:pr is:open
+  PRs are hidden, Mine page 1 when the queue is hidden, or the combined
+  two-view watch request. A standalone merged request is used only when no Mine
+  or queue request can carry it. It also fetches `author` (used by the
+  reviewed-and-merged section; the Mine merged section ignores it). An alias
+  error affects only that section; a request-level failure reports each section
+  included in that request.
+- Reviews (one POST, three aliased searches; combined with the first Mine
+  request in a two-view watch): `requested: search(is:pr is:open
   <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
   reviewed-by:<me> -author:<me>)`, each node carrying `author`, `headRefName`,
   last commit `committedDate`, and `reviews(author:<me>)` `submittedAt`s.
-  Re-review = a PR in both result sets. The same request includes the
-  reviewed-and-merged search.
+  Re-review = a PR in both result sets. The request includes the
+  reviewed-and-merged search. A Reviews-only request never carries Mine merged.
 - Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
   merged:>=<since>)`, aliased into the Reviews request with the configured
   merged limit.
