@@ -287,8 +287,22 @@ watch event loop); everything else is testable modules:
   `--include-pre-releases` also counts prereleases (drafts are always skipped).
   Release tags are collected before any ranges are scanned, so a failed
   pagination request cannot change a comparison base. Completed buckets remain
-  visible when another range fails; failed or rate-limit-skipped buckets show
-  `unavailable`. A rate-limit refusal ends the remaining scan. Incomplete
+  visible when another range fails. A failed or rate-limit-skipped bucket
+  keeps its previous count, marked `stale`, when the previous stats were
+  available and list the same tags in the same order and with the same release
+  URLs (so a new release or a changed `--include-pre-releases` reuses nothing);
+  otherwise it shows `unavailable` and the status line does not say `stale`.
+  The upcoming bucket is kept only when the previous bucket links to the same
+  compare URL as the current scan would (`compare/{latest tag}...{branch}`, or
+  `commits/{branch}` with no tags); a failed default-branch lookup has no URL
+  to match, so it is never kept. When the whole scan fails, the previous
+  available stats are shown again, but marked `stale` only when they hold at
+  least one count. The reuse happens in `FetchOutcome::reconcile`
+  after the scan: it adds no requests, and `commits::fetch`, its order and its
+  rate-limit stop are unchanged. Known limit: the predecessor of the oldest
+  shown tag is not stored, so a changed predecessor (a release inserted below
+  or removed) is not detected, and the oldest bucket may reuse a count for the
+  old range. A rate-limit refusal ends the remaining scan. Incomplete
   release scans mark unmapped merged PRs `?`, not unshipped.
   The upcoming scan runs only when `fetch` receives a default branch;
   `lib::fetch` resolves and passes it only when fetching My Shipments. With
@@ -584,8 +598,10 @@ still performs all teardown through `finish`.
   per-section error lines remain visible through navigation and copy/open
   messages. Release-stat failures also mark merged release metadata; known
   release annotations are retained while fresh merged PR rows still render.
-  Partial shipment scans retain completed buckets, mark failed buckets
-  unavailable, and render unknown release lookups as `?`. Partial fetches do
+  Partial shipment scans retain completed buckets and keep the previous count
+  of a failed bucket (marked `stale`) under the tag-list rule in the Commits
+  section; without one, the bucket is `unavailable`. Unknown release lookups
+  render as `?`. Partial fetches do
   not write the cache, so degraded data is never saved as a fresh snapshot.
   Capped compare ranges keep lower-bound counts and incomplete release maps
   without becoming fetch issues.
