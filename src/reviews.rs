@@ -64,7 +64,8 @@ fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
             }
         }
         // A PR I haven't reviewed and that isn't requesting me shouldn't surface,
-        // but treat it as quietly reviewed rather than panic.
+        // but treat it as quietly reviewed rather than panic. A `reviewed` node
+        // whose `reviews` field errored also lands here, by design.
         (false, false) => ReviewState::Reviewed,
     }
 }
@@ -258,6 +259,22 @@ mod tests {
                     .collect(),
             }),
         }
+    }
+
+    #[test]
+    fn unknown_reviews_count_as_none() {
+        let mut unknown = node(1, "alice", Some("2026-06-10T00:00:00Z"), &[]);
+        unknown.reviews = None;
+        assert_eq!(review_state(true, &unknown), ReviewState::Awaiting);
+        assert_eq!(review_state(false, &unknown), ReviewState::Reviewed);
+
+        let known = node(
+            1,
+            "alice",
+            Some("2026-06-10T00:00:00Z"),
+            &["2026-06-09T00:00:00Z"],
+        );
+        assert_eq!(review_state(false, &known), ReviewState::Updated);
     }
 
     #[test]

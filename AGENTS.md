@@ -586,8 +586,6 @@ still performs all teardown through `finish`.
   GraphQL responses with usable data and errors keep their rows and show a
   `partial data` warning in the affected section and status line. Warnings do
   not replace the section with stale data or change bell and unread tracking.
-  The Reviews section keeps its rows this way only when one node's `reviews`
-  field errors.
   A null `repository` or `mergeQueue` with an error at `[repository]`,
   `[repository, mergeQueue]` or no path is a failed Merge Queue section, in the
   queue-only request and the combined one alike, so `--once --only queue` exits
