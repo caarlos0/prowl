@@ -129,8 +129,11 @@ to the bottom of the screen (`^R refresh (every 5m) - tab switch view - enter op
 and `Ctrl-R` presses are ignored until it finishes. The active view refreshes on
 every interval and the other view on every second one, so `Tab` switches
 instantly; a dim `updated 6m ago` line shows when the shown view is older than
-the other. `Ctrl-R` refreshes both. On narrow screens the footer removes low-priority labels and
-hints instead of clipping. `PgUp`/`PgDn` scroll independently; selection movement follows the row.
+the other. REST shipment scans run every second Mine refresh, with their age
+shown while Mine data is newer; the RELEASE column uses `?` for PRs missing from
+the cached map. `Ctrl-R` refreshes both views and shipments. On narrow screens
+the footer removes low-priority labels and hints instead of clipping.
+`PgUp`/`PgDn` scroll independently; selection movement follows the row.
 Every enabled section stays available in both views, regardless of terminal size.
 The search prompt, status line, and footer stay at the bottom.
 Press `?` to show help at the top of the scrolling body.
