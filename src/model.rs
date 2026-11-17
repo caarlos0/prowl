@@ -173,6 +173,17 @@ impl QueueEntryNode {
                 .base_ref
                 .as_ref()
                 .map(|base| base.id.clone()),
+            counts: self
+                .head_commit
+                .as_ref()
+                .and_then(|commit| commit.status_check_rollup.as_ref())
+                .map(|rollup| {
+                    count_fingerprint(
+                        &rollup.contexts.check_runs,
+                        &rollup.contexts.status_contexts,
+                    )
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -1151,6 +1162,18 @@ fn fetch_mine_pages(
                 .first()
                 .map(|commit| commit.commit.id.clone()),
             base_ref_id: node.base_ref.as_ref().map(|base| base.id.clone()),
+            counts: node
+                .commits
+                .nodes
+                .first()
+                .and_then(|commit| commit.commit.status_check_rollup.as_ref())
+                .map(|rollup| {
+                    count_fingerprint(
+                        &rollup.contexts.check_runs,
+                        &rollup.contexts.status_contexts,
+                    )
+                })
+                .unwrap_or_default(),
         })
         .collect();
     let rule_data_trusted = errors.is_empty();
@@ -1268,11 +1291,33 @@ impl RequiredRef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct RequiredTarget {
     pull_request_number: i64,
     commit_id: Option<String>,
     base_ref_id: Option<String>,
+    counts: CountFingerprint,
+}
+
+/// Sorted per-state rollup counts of one commit, as `(is_status_context,
+/// state, count)`. Only a change detector: counts cannot name contexts.
+type CountFingerprint = Vec<(bool, String, u64)>;
+
+fn count_fingerprint(
+    check_runs: &[StateCount],
+    status_contexts: &[StateCount],
+) -> CountFingerprint {
+    let mut counts: Vec<_> = check_runs
+        .iter()
+        .map(|count| (false, count.state.clone(), count.count))
+        .chain(
+            status_contexts
+                .iter()
+                .map(|count| (true, count.state.clone(), count.count)),
+        )
+        .collect();
+    counts.sort();
+    counts
 }
 
 #[derive(Debug, Default)]
@@ -1287,7 +1332,15 @@ pub(crate) struct RequiredContextCache {
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct RequiredContextMemo {
-    contexts: HashMap<RequiredMemoKey, HashSet<String>>,
+    contexts: HashMap<RequiredMemoKey, RequiredMemoEntry>,
+}
+
+/// A complete entry hits on its key alone. An incomplete one also needs the
+/// same count fingerprint, so a new or changed check is fetched again.
+#[derive(Debug, Clone)]
+struct RequiredMemoEntry {
+    reported: HashSet<String>,
+    counts: CountFingerprint,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -1782,10 +1835,10 @@ fn fetch_required_with_memo(
             .enumerate()
         {
             if let Some(key) = key
-                && let Some(reported) = memo.contexts.get(key)
-                && expected(target).is_subset(reported)
+                && let Some(entry) = memo.contexts.get(key)
+                && (expected(target).is_subset(&entry.reported) || entry.counts == target.counts)
             {
-                summary.contexts.clone_from(reported);
+                summary.contexts.clone_from(&entry.reported);
                 memo_hits[index] = true;
             }
         }
@@ -1825,11 +1878,13 @@ fn fetch_required_with_memo(
         let current: HashSet<_> = memo_keys.iter().flatten().cloned().collect();
         memo.contexts
             .retain(|key, _| key.scope != scope || current.contains(key));
-        for (key, summary) in memo_keys.into_iter().zip(&summaries) {
-            if let Some(key) = key
-                && summary.missing == 0
-            {
-                memo.contexts.insert(key, summary.contexts.clone());
+        for ((key, target), summary) in memo_keys.into_iter().zip(targets).zip(&summaries) {
+            if let Some(key) = key {
+                let entry = RequiredMemoEntry {
+                    reported: summary.contexts.clone(),
+                    counts: target.counts.clone(),
+                };
+                memo.contexts.insert(key, entry);
             }
         }
     }
@@ -2753,6 +2808,7 @@ mod tests {
                 pull_request_number: 1,
                 commit_id: None,
                 base_ref_id: Some("ref".to_string()),
+                ..RequiredTarget::default()
             }],
             false,
             &mut cache,
@@ -2781,6 +2837,7 @@ mod tests {
                             pull_request_number: 100 + i64::from(index),
                             commit_id: Some(format!("commit-{index}")),
                             base_ref_id: Some(format!("ref-{index}")),
+                            ..RequiredTarget::default()
                         })
                         .collect();
                     let (summaries, errors) =
@@ -2817,6 +2874,7 @@ mod tests {
                             pull_request_number: 100 + i64::try_from(index).unwrap(),
                             commit_id: Some(format!("commit-{index}")),
                             base_ref_id: Some(format!("ref-{index}")),
+                            ..RequiredTarget::default()
                         })
                         .collect();
                     let (summaries, errors) =
@@ -3011,6 +3069,7 @@ mod tests {
                 pull_request_number: 1,
                 commit_id: None,
                 base_ref_id: Some("ref".to_string()),
+                ..RequiredTarget::default()
             }],
             false,
             &mut cache,
