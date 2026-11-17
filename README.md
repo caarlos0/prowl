@@ -126,7 +126,10 @@ screen, so quitting hands your shell back exactly as you left it. A footer glued
 to the bottom of the screen (`^R refresh (every 5m) - tab switch view - enter open
 - r/R read - y copy - / search - ? help`) shows the keys and the refresh interval.
 `^R` means `Ctrl-R`. While a refresh is in flight the hint reads `^R refreshing`
-and `Ctrl-R` presses are ignored until it finishes. On narrow screens the footer removes low-priority labels and
+and `Ctrl-R` presses are ignored until it finishes. The active view refreshes on
+every interval and the other view on every second one, so `Tab` switches
+instantly; a dim `updated 6m ago` line shows when the shown view is older than
+the other. `Ctrl-R` refreshes both. On narrow screens the footer removes low-priority labels and
 hints instead of clipping. `PgUp`/`PgDn` scroll independently; selection movement follows the row.
 Every enabled section stays available in both views, regardless of terminal size.
 The search prompt, status line, and footer stay at the bottom.
