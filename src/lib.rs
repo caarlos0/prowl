@@ -188,7 +188,14 @@ impl FetchOutcome {
                     retain(&mut self.sections.merged, &mut previous.merged, issue);
                 }
                 FetchScope::Shipments => {
-                    if previous
+                    if self
+                        .sections
+                        .commits
+                        .as_ref()
+                        .is_some_and(|stats| stats.available)
+                    {
+                        issue.stale = true;
+                    } else if previous
                         .commits
                         .as_ref()
                         .is_some_and(|stats| stats.available)
@@ -214,12 +221,13 @@ impl FetchOutcome {
                         .flatten()
                         .filter_map(|row| row.release.as_ref().map(|release| (row.number, release)))
                         .collect();
-                    issue.stale = !releases.is_empty();
+                    issue.stale |= !releases.is_empty();
                     if let Some(rows) = &mut self.sections.merged {
                         for row in rows {
                             if row.release.is_none() {
                                 row.release =
                                     releases.get(&row.number).map(|release| (*release).clone());
+                                row.release_unknown = row.release.is_none();
                             }
                         }
                     }
@@ -307,12 +315,16 @@ fn fetch_merged_release_map(
         .take(cli.merged_limit)
         .map(|node| node.number)
         .collect();
-    section(
-        FetchScope::ReleaseMetadata,
-        commits::fetch_release_map(client, repo, me, cli.include_pre_releases, &prs),
-        issues,
-    )
-    .unwrap_or_default()
+    match commits::fetch_release_map(client, repo, me, cli.include_pre_releases, &prs) {
+        Ok((map, errors)) => {
+            release_errors(errors, issues, FetchScope::ReleaseMetadata, false);
+            map
+        }
+        Err(error) => {
+            issues.push(FetchIssue::new(FetchScope::ReleaseMetadata, &error));
+            commits::ReleaseMap::incomplete()
+        }
+    }
 }
 
 /// Fetch the sections for the requested views. `want_mine` covers the Mine view
@@ -462,17 +474,56 @@ fn fetch_release_data(
     // Shipment counts also supply merged-row release annotations.
     if want_mine && cli.show_shipments() {
         match commits::fetch(client, repo, me, default_branch, cli.include_pre_releases) {
-            Ok((stats, release_map)) => (Some(stats), release_map),
+            Ok((stats, release_map, errors)) => {
+                release_errors(errors, issues, FetchScope::Shipments, cli.show_merged());
+                (Some(stats), release_map)
+            }
             Err(error) => {
                 issues.push(FetchIssue::new(FetchScope::Shipments, &error));
                 if cli.show_merged() {
                     issues.push(FetchIssue::new(FetchScope::ReleaseMetadata, &error));
                 }
-                (None, commits::ReleaseMap::new())
+                (
+                    Some(commits::CommitStats::unavailable()),
+                    commits::ReleaseMap::incomplete(),
+                )
             }
         }
     } else {
         (None, commits::ReleaseMap::new())
+    }
+}
+
+fn release_errors(
+    errors: Vec<commits::FetchError>,
+    issues: &mut Vec<FetchIssue>,
+    scope: FetchScope,
+    report_metadata: bool,
+) {
+    let mut metadata_issue = None;
+    for error in errors {
+        match error {
+            commits::FetchError::Upcoming(error) => {
+                issues.push(FetchIssue::new(FetchScope::Upcoming, &error));
+            }
+            commits::FetchError::Release { tag, error } => {
+                let mut issue = FetchIssue::new(scope, &error);
+                issue.message = format!("{tag}: {}", issue.message);
+                issue.stale = true;
+                if report_metadata {
+                    metadata_issue.get_or_insert_with(|| {
+                        let mut issue = FetchIssue::new(FetchScope::ReleaseMetadata, &error);
+                        issue.message = format!("{tag}: {}", issue.message);
+                        issue.stale = true;
+                        issue
+                    });
+                }
+                issues.push(issue);
+            }
+        }
+    }
+    if let Some(issue) = metadata_issue {
+        issues.push(issue);
     }
 }
 
@@ -1385,7 +1436,12 @@ fn paint_commits(
         .upcoming
         .iter()
         .map(|b| &b.count)
-        .chain(stats.releases.iter().map(|r| &r.bucket.count))
+        .chain(
+            stats
+                .releases
+                .iter()
+                .filter_map(|release| release.count.as_ref()),
+        )
         .fold((0usize, false), |(n, capped), c| {
             (n + c.mine, capped || c.capped)
         });
@@ -1403,21 +1459,21 @@ fn paint_commits(
     // Each row: the upcoming (unreleased) version first (no publish age), then
     // the shipped releases newest-first with their relative publish age. A row
     // with a URL renders its label as a link to it.
-    let value = |b: Option<&commits::Bucket>| match b {
-        Some(b) => count(&b.count),
+    let value = |c: Option<&commits::Count>| match c {
+        Some(c) => count(c),
         None => "unavailable".to_string(),
     };
     let mut rows: Vec<(String, Option<String>, String, Option<String>)> = vec![(
         "upcoming".to_string(),
         stats.upcoming.as_ref().map(|b| b.url.clone()),
-        value(stats.upcoming.as_ref()),
+        value(stats.upcoming.as_ref().map(|bucket| &bucket.count)),
         None,
     )];
     for r in &stats.releases {
         rows.push((
             r.tag.clone(),
-            Some(r.bucket.url.clone()),
-            value(Some(&r.bucket)),
+            Some(r.url.clone()),
+            value(r.count.as_ref()),
             r.published_at.as_deref().map(|p| timefmt::age_of(Some(p))),
         ));
     }
@@ -2823,6 +2879,7 @@ mod tests {
             branch: String::new(),
             url: format!("https://merged/{n}"),
             release: None,
+            release_unknown: false,
             merged_at: None,
         }
     }
@@ -3146,13 +3203,11 @@ mod tests {
                 }),
                 releases: vec![commits::Release {
                     tag: "v1".into(),
-                    bucket: commits::Bucket {
-                        count: commits::Count {
-                            mine: 1,
-                            capped: false,
-                        },
-                        url: "https://releases/v1".into(),
-                    },
+                    count: Some(commits::Count {
+                        mine: 1,
+                        capped: false,
+                    }),
+                    url: "https://releases/v1".into(),
                     published_at: None,
                 }],
             }),
@@ -3325,13 +3380,11 @@ mod tests {
                 upcoming: None,
                 releases: vec![commits::Release {
                     tag: "v1".into(),
-                    bucket: commits::Bucket {
-                        count: commits::Count {
-                            mine: 1,
-                            capped: false,
-                        },
-                        url: "https://release/v1".into(),
-                    },
+                    count: Some(commits::Count {
+                        mine: 1,
+                        capped: false,
+                    }),
+                    url: "https://release/v1".into(),
                     published_at: None,
                 }],
             }),
@@ -3382,13 +3435,11 @@ mod tests {
                 }),
                 releases: vec![commits::Release {
                     tag: "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}v1".into(),
-                    bucket: commits::Bucket {
-                        count: commits::Count {
-                            mine: 1,
-                            capped: false,
-                        },
-                        url: "https://release/v1".into(),
-                    },
+                    count: Some(commits::Count {
+                        mine: 1,
+                        capped: false,
+                    }),
+                    url: "https://release/v1".into(),
                     published_at: None,
                 }],
             }),
@@ -4501,7 +4552,13 @@ mod tests {
             false,
         );
 
-        assert!(outcome.sections.commits.is_none());
+        assert!(
+            outcome
+                .sections
+                .commits
+                .as_ref()
+                .is_some_and(|stats| !stats.available)
+        );
         assert_eq!(outcome.issues.len(), 1);
         assert_eq!(outcome.issues[0].scope, FetchScope::Shipments);
         assert!(outcome.status().contains("My Shipments unavailable"));
@@ -4541,6 +4598,105 @@ mod tests {
             shipped(&outcome.sections),
             [(3, None), (2, None), (1, None)]
         );
+        let rows = outcome.sections.merged.as_ref().unwrap();
+        assert!(rows.iter().all(|row| row.release_unknown));
+        let table = merged::to_table(rows, true, &HashSet::new(), false);
+        assert!(table.rows.iter().all(|row| row[4].text == "?"));
+    }
+
+    #[test]
+    fn partial_release_failure_keeps_successes_and_marks_unknown_rows() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        fake.set_response(
+            "GET /repos/o/r/compare/v1...v2",
+            500,
+            &[],
+            r#"{"message":"injected release failure"}"#,
+        );
+
+        let outcome = fetch(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            true,
+        );
+
+        let stats = outcome.sections.commits.as_ref().unwrap();
+        assert!(stats.available);
+        assert_eq!(
+            stats
+                .releases
+                .iter()
+                .map(|release| release.count.is_some())
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
+        assert_eq!(
+            shipped(&outcome.sections),
+            [(3, None), (2, None), (1, Some("v1".into()))]
+        );
+        assert!(outcome.status().contains("My Shipments stale"));
+        assert!(outcome.status().contains("Merged release metadata stale"));
+        let rows = outcome.sections.merged.as_ref().unwrap();
+        assert!(rows[0].release_unknown);
+        assert!(rows[1].release_unknown);
+        assert!(!rows[2].release_unknown);
+        let table = merged::to_table(rows, true, &HashSet::new(), false);
+        assert_eq!(table.rows[0][4].text, "?");
+        assert_eq!(table.rows[1][4].text, "?");
+        assert_eq!(table.rows[2][4].text, "v1");
+        assert!(
+            !outcome.issues.is_empty(),
+            "partial outcomes must not be cached"
+        );
+        assert!(
+            fake.requests()
+                .contains(&"GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1".into())
+        );
+    }
+
+    #[test]
+    fn hidden_release_range_failure_keeps_known_annotations_and_marks_unknown_rows() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "merged"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged());
+        fake.set_response(
+            "GET /repos/o/r/compare/v1...v2",
+            500,
+            &[],
+            r#"{"message":"injected release failure"}"#,
+        );
+
+        let outcome = fetch(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            false,
+        );
+
+        assert_eq!(
+            fake.requests(),
+            [
+                GRAPHQL,
+                RELEASES,
+                "GET /repos/o/r/compare/v1...v2",
+                "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+            ]
+        );
+        assert!(outcome.status().contains("Merged release metadata stale"));
+        let rows = outcome.sections.merged.as_ref().unwrap();
+        assert!(rows[0].release_unknown);
+        assert!(rows[1].release_unknown);
+        assert!(!rows[2].release_unknown);
+        assert_eq!(rows[2].release.as_ref().unwrap().tag, "v1");
     }
 
     #[test]
@@ -5184,7 +5340,7 @@ mod tests {
             first_stats
                 .releases
                 .iter()
-                .map(|release| (release.tag.as_str(), release.bucket.count.mine))
+                .map(|release| { (release.tag.as_str(), release.count.as_ref().unwrap().mine) })
                 .collect::<Vec<_>>(),
             [("v2", 1), ("v1", 1)]
         );
@@ -5366,7 +5522,7 @@ mod tests {
         let releases: Vec<_> = stats
             .releases
             .iter()
-            .map(|r| (r.tag.as_str(), r.bucket.count))
+            .map(|r| (r.tag.as_str(), r.count.unwrap()))
             .collect();
         assert_eq!(releases, [("v2", count(1)), ("v1", count(1))]);
 

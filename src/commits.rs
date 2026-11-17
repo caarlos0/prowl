@@ -16,7 +16,8 @@ pub struct CommitStats {
     /// My work heading into the next, still-unreleased version; `None` when
     /// it was not counted.
     pub upcoming: Option<Bucket>,
-    /// The most recent stable releases (newest first) with my work in them.
+    /// The most recent stable releases (newest first), with unavailable counts
+    /// left as `None`.
     pub releases: Vec<Release>,
 }
 
@@ -29,11 +30,12 @@ pub struct Bucket {
     pub url: String,
 }
 
-/// My work in a single shipped release.
+/// A shipped release and its commit count when the range was read successfully.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Release {
     pub tag: String,
-    pub bucket: Bucket,
+    pub count: Option<Count>,
+    pub url: String,
     /// When the release was published (RFC 3339), if known. Stored raw so its
     /// relative age stays fresh across redraws.
     pub published_at: Option<String>,
@@ -54,9 +56,71 @@ pub struct ReleaseRef {
     pub url: String,
 }
 
-/// Maps a PR number to the (earliest) release that includes it. PRs merged
-/// since the latest release are absent (not yet shipped).
-pub type ReleaseMap = HashMap<i64, ReleaseRef>;
+/// Maps a PR number to the (earliest) release that includes it, tracking
+/// whether every relevant release range was read successfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseMap {
+    releases: HashMap<i64, ReleaseRef>,
+    complete: bool,
+}
+
+impl ReleaseMap {
+    pub fn new() -> Self {
+        Self {
+            releases: HashMap::new(),
+            complete: true,
+        }
+    }
+
+    pub fn incomplete() -> Self {
+        Self {
+            complete: false,
+            ..Self::new()
+        }
+    }
+
+    pub fn get(&self, number: &i64) -> Option<&ReleaseRef> {
+        self.releases.get(number)
+    }
+
+    pub fn insert(&mut self, number: i64, release: ReleaseRef) {
+        self.releases.insert(number, release);
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+}
+
+impl Default for ReleaseMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+pub enum FetchError {
+    Upcoming(anyhow::Error),
+    Release { tag: String, error: anyhow::Error },
+}
+
+impl FetchError {
+    pub(crate) fn error(&self) -> &anyhow::Error {
+        match self {
+            Self::Upcoming(error) | Self::Release { error, .. } => error,
+        }
+    }
+
+    pub(crate) fn rate_limited(&self) -> bool {
+        is_rate_limited(self.error())
+    }
+}
+
+fn is_rate_limited(error: &anyhow::Error) -> bool {
+    format!("{error:#}")
+        .to_ascii_lowercase()
+        .contains("rate limit")
+}
 
 impl CommitStats {
     pub fn unavailable() -> CommitStats {
@@ -239,30 +303,46 @@ fn range_mine(
 
 /// Build the release map for the displayed merged PRs, stopping when all of
 /// them are mapped. An unmapped PR can still be unreleased, so it requires the
-/// full scan.
+/// full scan; a failed range makes unmapped PRs unknown.
 pub(crate) fn fetch_release_map(
     client: &Client,
     repo: &Repo,
     me: &str,
     include_prereleases: bool,
     prs: &[i64],
-) -> Result<ReleaseMap> {
+) -> Result<(ReleaseMap, Vec<FetchError>)> {
     let mut missing: HashSet<_> = prs.iter().copied().collect();
     let mut map = ReleaseMap::new();
     if missing.is_empty() {
-        return Ok(map);
+        return Ok((map, Vec::new()));
     }
 
     let tags = release_tags(client, repo, include_prereleases)?;
     let base_url = format!("https://github.com/{}/{}", repo.owner, repo.name);
+    let mut errors = Vec::new();
     for (i, tag) in tags.iter().enumerate().take(RELEASES) {
         let base = tags.get(i + 1).map(|t| t.name.as_str());
-        let (_, prs) = range_mine(client, repo, me, base, &tag.name)?;
+        let prs = match range_mine(client, repo, me, base, &tag.name) {
+            Ok((_, prs)) => prs,
+            Err(error) => {
+                map.complete = false;
+                let error = error.context(format!("counting release {}", tag.name));
+                let rate_limited = is_rate_limited(&error);
+                errors.push(FetchError::Release {
+                    tag: tag.name.clone(),
+                    error,
+                });
+                if rate_limited {
+                    break;
+                }
+                continue;
+            }
+        };
         let url = format!("{base_url}/releases/tag/{}", tag.name);
         for n in prs {
             let n = i64::from(n);
             if missing.remove(&n) {
-                map.insert(
+                map.releases.insert(
                     n,
                     ReleaseRef {
                         tag: tag.name.clone(),
@@ -275,39 +355,45 @@ pub(crate) fn fetch_release_map(
             break;
         }
     }
-    Ok(map)
+    Ok((map, errors))
 }
 
 /// Compute the commit stats for `repo` (my work in each of the last
 /// [`RELEASES`] releases — stable only, or including prereleases when
 /// `include_prereleases` is set — and, when `default_branch` is provided, in the
 /// next unreleased version), plus a map from PR number to the release that shipped
-/// it (for annotating the merged section). PRs merged since the latest release
-/// are absent from the map (not yet shipped).
+/// it (for annotating the merged section). An absent PR is confirmed unshipped
+/// only when the release map is complete.
 pub fn fetch(
     client: &Client,
     repo: &Repo,
     me: &str,
     default_branch: Option<&str>,
     include_prereleases: bool,
-) -> Result<(CommitStats, ReleaseMap)> {
+) -> Result<(CommitStats, ReleaseMap, Vec<FetchError>)> {
     let tags = release_tags(client, repo, include_prereleases)?;
     let base_url = format!("https://github.com/{}/{}", repo.owner, repo.name);
     let mut map = ReleaseMap::new();
+    let mut errors = Vec::new();
 
     // The next release is everything since the latest tag (or the whole default
     // branch when there are no releases yet); its label links to that log. Its
     // PRs are unreleased, so they are not added to the map.
     let upcoming = if let Some(default_branch) = default_branch {
         let latest = tags.first().map(|t| t.name.as_str());
-        let (count, _) = range_mine(client, repo, me, latest, default_branch)?;
-        Some(Bucket {
-            count,
-            url: match latest {
-                Some(latest) => format!("{base_url}/compare/{latest}...{default_branch}"),
-                None => format!("{base_url}/commits/{default_branch}"),
-            },
-        })
+        match range_mine(client, repo, me, latest, default_branch) {
+            Ok((count, _)) => Some(Bucket {
+                count,
+                url: match latest {
+                    Some(latest) => format!("{base_url}/compare/{latest}...{default_branch}"),
+                    None => format!("{base_url}/commits/{default_branch}"),
+                },
+            }),
+            Err(error) => {
+                errors.push(FetchError::Upcoming(error));
+                None
+            }
+        }
     } else {
         None
     };
@@ -315,21 +401,57 @@ pub fn fetch(
     // Each shipped release is the range between it and the release before it;
     // the oldest tag we know of has no predecessor, so count everything up to it.
     let mut releases = Vec::with_capacity(tags.len().min(RELEASES));
+    let mut stop_after_rate_limit = errors.last().is_some_and(FetchError::rate_limited);
     for (i, tag) in tags.iter().enumerate().take(RELEASES) {
-        let base = tags.get(i + 1).map(|t| t.name.as_str());
-        let (count, prs) = range_mine(client, repo, me, base, &tag.name)?;
         let url = format!("{base_url}/releases/tag/{}", tag.name);
+        if stop_after_rate_limit {
+            map.complete = false;
+            errors.push(FetchError::Release {
+                tag: tag.name.clone(),
+                error: anyhow::anyhow!("skipped after GitHub rate limit"),
+            });
+            releases.push(Release {
+                tag: tag.name.clone(),
+                count: None,
+                url,
+                published_at: tag.published_at.clone(),
+            });
+            continue;
+        }
+        let base = tags.get(i + 1).map(|t| t.name.as_str());
+        let (count, prs) = match range_mine(client, repo, me, base, &tag.name) {
+            Ok(result) => result,
+            Err(error) => {
+                map.complete = false;
+                let error = error.context(format!("counting release {}", tag.name));
+                stop_after_rate_limit = is_rate_limited(&error);
+                errors.push(FetchError::Release {
+                    tag: tag.name.clone(),
+                    error,
+                });
+                releases.push(Release {
+                    tag: tag.name.clone(),
+                    count: None,
+                    url,
+                    published_at: tag.published_at.clone(),
+                });
+                continue;
+            }
+        };
         // Newest release first, and ranges are disjoint, so a PR maps to the
         // earliest release that ships it.
         for n in prs {
-            map.entry(i64::from(n)).or_insert_with(|| ReleaseRef {
-                tag: tag.name.clone(),
-                url: url.clone(),
-            });
+            map.releases
+                .entry(i64::from(n))
+                .or_insert_with(|| ReleaseRef {
+                    tag: tag.name.clone(),
+                    url: url.clone(),
+                });
         }
         releases.push(Release {
             tag: tag.name.clone(),
-            bucket: Bucket { count, url },
+            count: Some(count),
+            url,
             published_at: tag.published_at.clone(),
         });
     }
@@ -341,6 +463,7 @@ pub fn fetch(
             releases,
         },
         map,
+        errors,
     ))
 }
 
@@ -441,7 +564,9 @@ mod tests {
             fake.set_response(path, 304, &[], "");
         }
         let second = fetch(&client, &repo, "me", Some("main"), false).unwrap();
-        assert_eq!(second, first);
+        assert_eq!(second.0, first.0);
+        assert_eq!(second.1, first.1);
+        assert!(second.2.is_empty());
         assert_eq!(fake.requests()[6..], first_requests);
         assert_eq!(
             fake.validators()[routes.len()..],
@@ -455,14 +580,16 @@ mod tests {
             r#"{"total_commits":2,"commits":[{"author":{"login":"me"},"commit":{"message":"feat (#1)"}}]}"#,
         );
         let third = fetch(&client, &repo, "me", Some("main"), false).unwrap();
-        assert_ne!(third, second);
+        assert_ne!(third.0, second.0);
         assert_eq!(fake.requests()[12..], first_requests);
 
         for (path, _) in routes {
             fake.set_response(path, 304, &[], "");
         }
         let fourth = fetch(&client, &repo, "me", Some("main"), false).unwrap();
-        assert_eq!(fourth, third);
+        assert_eq!(fourth.0, third.0);
+        assert_eq!(fourth.1, third.1);
+        assert!(fourth.2.is_empty());
         assert_eq!(fake.requests()[18..], first_requests);
         assert_eq!(
             fake.validators()[18..],
@@ -475,5 +602,218 @@ mod tests {
                 (COMMITS_PATH.to_string(), Some("v1".to_string())),
             ]
         );
+    }
+
+    fn four_release_routes() -> Vec<(String, String)> {
+        let tags = ["v4", "v3", "v2", "v1"];
+        let releases = tags
+            .iter()
+            .map(|tag| serde_json::json!({"tag_name": tag, "draft": false, "prerelease": false}))
+            .collect::<Vec<_>>();
+        let mut routes = vec![(
+            "GET /repos/owner/repo/releases?per_page=50&page=1".into(),
+            serde_json::Value::Array(releases).to_string(),
+        )];
+        routes.push((
+            "GET /repos/owner/repo/compare/v4...main".into(),
+            r#"{"total_commits":0,"commits":[]}"#.into(),
+        ));
+        for (base, head, number) in [("v3", "v4", 40), ("v2", "v3", 30), ("v1", "v2", 20)] {
+            routes.push((
+                format!("GET /repos/owner/repo/compare/{base}...{head}"),
+                serde_json::json!({
+                    "total_commits": 1,
+                    "commits": [{
+                        "author": {"login": "me"},
+                        "commit": {"message": format!("feat (#{number})")}
+                    }]
+                })
+                .to_string(),
+            ));
+        }
+        routes.push((
+            "GET /repos/owner/repo/commits?sha=v1&author=me&per_page=100&page=1".into(),
+            serde_json::json!([{
+                "author": {"login": "me"},
+                "commit": {"message": "feat (#10)"}
+            }])
+            .to_string(),
+        ));
+        routes
+    }
+
+    #[test]
+    fn release_range_failures_preserve_other_buckets() {
+        let paths = [
+            "GET /repos/owner/repo/compare/v3...v4",
+            "GET /repos/owner/repo/compare/v2...v3",
+            "GET /repos/owner/repo/compare/v1...v2",
+            "GET /repos/owner/repo/commits?sha=v1&author=me&per_page=100&page=1",
+        ];
+        let repo = Repo::parse("owner/repo").unwrap();
+
+        for (failed_index, path) in paths.into_iter().enumerate() {
+            let (client, fake) = fake::client(four_release_routes());
+            fake.set_response(path, 500, &[], r#"{"message":"injected range failure"}"#);
+
+            let (stats, map, errors) = fetch(&client, &repo, "me", Some("main"), false).unwrap();
+
+            assert!(stats.available);
+            assert_eq!(stats.upcoming.as_ref().unwrap().count.mine, 0);
+            assert_eq!(stats.releases.len(), 4);
+            for (index, release) in stats.releases.iter().enumerate() {
+                assert_eq!(
+                    release.count.is_some(),
+                    index != failed_index,
+                    "{}",
+                    release.tag
+                );
+            }
+            assert!(!map.is_complete());
+            assert_eq!(errors.len(), 1);
+            assert_eq!(fake.requests().len(), 6);
+        }
+    }
+
+    #[test]
+    fn failed_upcoming_range_does_not_discard_shipped_buckets() {
+        let repo = Repo::parse("owner/repo").unwrap();
+        let (client, fake) = fake::client(four_release_routes());
+        fake.set_response(
+            "GET /repos/owner/repo/compare/v4...main",
+            500,
+            &[],
+            r#"{"message":"injected upcoming failure"}"#,
+        );
+
+        let (stats, map, errors) = fetch(&client, &repo, "me", Some("main"), false).unwrap();
+
+        assert!(stats.available);
+        assert!(stats.upcoming.is_none());
+        assert!(stats.releases.iter().all(|release| release.count.is_some()));
+        assert!(map.is_complete());
+        assert!(matches!(errors.as_slice(), [FetchError::Upcoming(_)]));
+        assert_eq!(fake.requests().len(), 6);
+    }
+
+    #[test]
+    fn rate_limit_stops_remaining_release_ranges() {
+        let repo = Repo::parse("owner/repo").unwrap();
+        let (client, fake) = fake::client(four_release_routes());
+        fake.set_response(
+            "GET /repos/owner/repo/compare/v3...v4",
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "4102444800"),
+            ],
+            r#"{"message":"API rate limit exceeded"}"#,
+        );
+
+        let (stats, map, errors) = fetch(&client, &repo, "me", Some("main"), false).unwrap();
+
+        assert!(stats.releases.iter().all(|release| release.count.is_none()));
+        assert!(!map.is_complete());
+        assert_eq!(fake.requests().len(), 3);
+        assert_eq!(errors.len(), 4);
+        assert!(errors.iter().all(FetchError::rate_limited));
+    }
+
+    #[test]
+    fn rate_limit_stops_hidden_release_lookup() {
+        let repo = Repo::parse("owner/repo").unwrap();
+        let (client, fake) = fake::client(four_release_routes());
+        fake.set_response(
+            "GET /repos/owner/repo/compare/v3...v4",
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "4102444800"),
+            ],
+            r#"{"message":"API rate limit exceeded"}"#,
+        );
+
+        let (map, errors) =
+            fetch_release_map(&client, &repo, "me", false, &[40, 30, 20, 10]).unwrap();
+
+        assert!(!map.is_complete());
+        assert_eq!(fake.requests().len(), 2);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].rate_limited());
+    }
+
+    #[test]
+    fn release_list_pagination_failure_does_not_scan_partial_tags() {
+        let repo = Repo::parse("owner/repo").unwrap();
+        let drafts = serde_json::Value::Array(
+            (0..50)
+                .map(|n| {
+                    serde_json::json!({
+                        "tag_name": format!("draft-{n}"),
+                        "draft": true,
+                        "prerelease": false
+                    })
+                })
+                .collect(),
+        );
+        let (client, fake) = fake::client([(
+            "GET /repos/owner/repo/releases?per_page=50&page=1".into(),
+            drafts.to_string(),
+        )]);
+        fake.set_response(
+            "GET /repos/owner/repo/releases?per_page=50&page=2",
+            500,
+            &[],
+            r#"{"message":"injected release-list failure"}"#,
+        );
+
+        assert!(fetch(&client, &repo, "me", Some("main"), false).is_err());
+        assert_eq!(
+            fake.requests(),
+            [
+                "GET /repos/owner/repo/releases?per_page=50&page=1",
+                "GET /repos/owner/repo/releases?per_page=50&page=2",
+            ]
+        );
+    }
+
+    #[test]
+    fn later_reachable_commit_page_failure_marks_only_upcoming_unavailable() {
+        let repo = Repo::parse("owner/repo").unwrap();
+        let commits = serde_json::Value::Array(
+            (0..100)
+                .map(|n| {
+                    serde_json::json!({
+                        "author": {"login": "me"},
+                        "commit": {"message": format!("commit {n}")}
+                    })
+                })
+                .collect(),
+        );
+        let (client, fake) = fake::client([
+            (
+                "GET /repos/owner/repo/releases?per_page=50&page=1".into(),
+                "[]".into(),
+            ),
+            (
+                "GET /repos/owner/repo/commits?sha=main&author=me&per_page=100&page=1".into(),
+                commits.to_string(),
+            ),
+        ]);
+        fake.set_response(
+            "GET /repos/owner/repo/commits?sha=main&author=me&per_page=100&page=2",
+            500,
+            &[],
+            r#"{"message":"injected page failure"}"#,
+        );
+
+        let (stats, map, errors) = fetch(&client, &repo, "me", Some("main"), false).unwrap();
+
+        assert!(stats.available);
+        assert!(stats.upcoming.is_none());
+        assert!(stats.releases.is_empty());
+        assert!(map.is_complete());
+        assert!(matches!(errors.as_slice(), [FetchError::Upcoming(_)]));
+        assert_eq!(fake.requests().len(), 3);
     }
 }

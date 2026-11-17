@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bump when the cached data model changes; older files are then ignored.
-const VERSION: u32 = 16;
+const VERSION: u32 = 17;
 
 /// A loaded cache entry.
 #[derive(Deserialize)]

@@ -101,17 +101,22 @@ fn merged(number: i64, title: &str, release: Option<&str>, merged_mins: i64) -> 
             tag: tag.into(),
             url: release_url(tag),
         }),
+        release_unknown: false,
         merged_at: ago(merged_mins),
     }
 }
 
 fn bucket(mine: usize, url: String) -> Bucket {
     Bucket {
-        count: Count {
-            mine,
-            capped: false,
-        },
+        count: count(mine),
         url,
+    }
+}
+
+fn count(mine: usize) -> Count {
+    Count {
+        mine,
+        capped: false,
     }
 }
 
@@ -218,22 +223,26 @@ fn sections() -> prowl::Sections {
             releases: vec![
                 Release {
                     tag: "v1.4.0".into(),
-                    bucket: bucket(23, release_url("v1.4.0")),
+                    count: Some(count(23)),
+                    url: release_url("v1.4.0"),
                     published_at: ago(4 * 24 * 60),
                 },
                 Release {
                     tag: "v1.3.2".into(),
-                    bucket: bucket(4, release_url("v1.3.2")),
+                    count: Some(count(4)),
+                    url: release_url("v1.3.2"),
                     published_at: ago(12 * 24 * 60),
                 },
                 Release {
                     tag: "v1.3.1".into(),
-                    bucket: bucket(7, release_url("v1.3.1")),
+                    count: Some(count(7)),
+                    url: release_url("v1.3.1"),
                     published_at: ago(20 * 24 * 60),
                 },
                 Release {
                     tag: "v1.3.0".into(),
-                    bucket: bucket(31, release_url("v1.3.0")),
+                    count: Some(count(31)),
+                    url: release_url("v1.3.0"),
                     published_at: ago(33 * 24 * 60),
                 },
             ],
