@@ -289,6 +289,7 @@ fn sections() -> prowl::Sections {
                 updated_at: ago(1_900),
             },
         ]),
+        reviews_total: None,
         reviewed_merged: Some(vec![
             ReviewedMergedRow {
                 number: 392,

@@ -451,8 +451,8 @@ const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!,
       }
     }
   }
-  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...watchReview } }
-  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...watchReview } }
+  requested: search(type: ISSUE, first: 50, query: $requested) { issueCount nodes { ...watchReview } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount nodes { ...watchReview } }
   reviewedMerged: search(type: ISSUE, first: $mergedLimit, query: $reviewedMerged) { nodes { ...watchMerged } }
   mineMerged: search(type: ISSUE, first: $mergedLimit, query: $mineMerged) @include(if: $includeMineMerged) { nodes { ...watchMerged } }
 }
@@ -2016,10 +2016,10 @@ fn alias_errors(errors: &[GqlError], aliases: &[&str], known_roots: &[&str]) -> 
 // Reviews (open PRs awaiting / under my review)
 // ----------------------------------------------------------------------------
 
-/// Standalone Reviews and reviewed-and-merged searches when the combined watch query is not selected.
+/// Standalone Reviews and merged searches when the combined watch query is not selected.
 pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mergedLimit: Int!) {
-  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
-  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
+  requested: search(type: ISSUE, first: 50, query: $requested) { issueCount nodes { ...rev } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount nodes { ...rev } }
   reviewedMerged: search(type: ISSUE, first: $mergedLimit, query: $reviewedMerged) { nodes { ...merged } }
 }
 fragment rev on PullRequest {
@@ -2033,8 +2033,8 @@ fragment merged on PullRequest {
 }"#;
 
 const REVIEWS_ONLY_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!) {
-  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
-  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
+  requested: search(type: ISSUE, first: 50, query: $requested) { issueCount nodes { ...rev } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount nodes { ...rev } }
 }
 fragment rev on PullRequest {
   number title url headRefName isDraft updatedAt
@@ -2047,13 +2047,29 @@ fragment rev on PullRequest {
 pub struct ReviewsData {
     /// PRs requesting my review (directly or via a team, per the scope).
     pub requested: ReviewSearch,
-    /// PRs I have already reviewed.
+    /// PRs I have already reviewed that do not request my review again.
     pub reviewed: ReviewSearch,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReviewSearch {
+    #[serde(rename = "issueCount")]
+    pub issue_count: usize,
     pub nodes: Vec<ReviewPrNode>,
+}
+
+impl ReviewsData {
+    /// The searches do not overlap, so the total is exact.
+    pub fn total_count(&self) -> usize {
+        self.requested
+            .issue_count
+            .saturating_add(self.reviewed.issue_count)
+    }
+
+    pub fn is_capped(&self) -> bool {
+        self.requested.nodes.len() < self.requested.issue_count
+            || self.reviewed.nodes.len() < self.reviewed.issue_count
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2100,17 +2116,19 @@ pub struct MyReview {
     pub submitted_at: Option<String>,
 }
 
-/// The two review searches: PRs requesting my review and PRs I have reviewed,
-/// both open, in this repo, excluding my own. `requested_qualifier` is
-/// `review-requested` (me + my teams) or `user-review-requested` (only me).
+/// The two review searches, both open, in this repo, excluding my own: PRs
+/// requesting my review, and PRs I have reviewed that do not request it again.
+/// The two never overlap, so a re-request comes only from the first and the
+/// issue counts add up exactly. `requested_qualifier` is `review-requested`
+/// (me + my teams) or `user-review-requested` (only me).
 pub fn reviews_searches(repo: &Repo, me: &str, requested_qualifier: &str) -> (String, String) {
     let requested = format!(
         "repo:{}/{} is:pr is:open {}:{} -author:{} archived:false sort:updated-desc",
         repo.owner, repo.name, requested_qualifier, me, me
     );
     let reviewed = format!(
-        "repo:{}/{} is:pr is:open reviewed-by:{} -author:{} archived:false sort:updated-desc",
-        repo.owner, repo.name, me, me
+        "repo:{}/{} is:pr is:open reviewed-by:{} -{}:{} -author:{} archived:false sort:updated-desc",
+        repo.owner, repo.name, me, requested_qualifier, me, me
     );
     (requested, reviewed)
 }
@@ -2133,7 +2151,11 @@ pub(crate) fn fetch_reviews_with_errors(
     let (requested, reviewed) = reviews_searches(repo, me, requested_qualifier);
     let (data, errors) = client.graphql_with_errors(
         REVIEWS_ONLY_QUERY,
-        serde_json::json!({ "me": me, "requested": requested, "reviewed": reviewed }),
+        serde_json::json!({
+            "me": me,
+            "requested": requested,
+            "reviewed": reviewed,
+        }),
     )?;
     Ok(GraphqlData { data, errors })
 }
@@ -2376,14 +2398,55 @@ mod tests {
         assert!(!REVIEWS_QUERY.contains("mineMerged"));
         assert!(!REVIEWS_QUERY.contains("includeMineMerged"));
         assert!(REVIEWS_QUERY.contains("first: $mergedLimit"));
+        for query in [REVIEWS_QUERY, REVIEWS_ONLY_QUERY, WATCH_MINE_REVIEWS_QUERY] {
+            assert!(query.contains(
+                "requested: search(type: ISSUE, first: 50, query: $requested) { issueCount"
+            ));
+            assert!(query.contains(
+                "reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount"
+            ));
+        }
+        assert_eq!(
+            reviews_searches(&repo, "me", "review-requested"),
+            (
+                "repo:o/r is:pr is:open review-requested:me -author:me archived:false sort:updated-desc".into(),
+                "repo:o/r is:pr is:open reviewed-by:me -review-requested:me -author:me archived:false sort:updated-desc".into(),
+            )
+        );
+        assert!(
+            reviews_searches(&repo, "me", "user-review-requested")
+                .1
+                .contains(" -user-review-requested:me ")
+        );
+    }
+
+    #[test]
+    fn reviews_only_fetch_uses_one_post() {
+        let response = serde_json::json!({
+            "data": {
+                "requested": { "issueCount": 0, "nodes": [] },
+                "reviewed": { "issueCount": 0, "nodes": [] }
+            }
+        });
+        let (client, fake) =
+            crate::github::fake::client([("POST /graphql".to_string(), response.to_string())]);
+        let data = fetch_reviews_with_errors(
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            "review-requested",
+        )
+        .unwrap();
+        assert_eq!(data.data.total_count(), 0);
+        assert_eq!(fake.requests(), ["POST /graphql"]);
     }
 
     #[test]
     fn reviews_fetch_keeps_open_reviews_on_reviewed_merged_alias_error() {
         let response = serde_json::json!({
             "data": {
-                "requested": { "nodes": [] },
-                "reviewed": { "nodes": [] },
+                "requested": { "issueCount": 0, "nodes": [] },
+                "reviewed": { "issueCount": 0, "nodes": [] },
                 "reviewedMerged": null
             },
             "errors": [{
@@ -2422,6 +2485,7 @@ mod tests {
         let response = serde_json::json!({
             "data": {
                 "requested": {
+                    "issueCount": 1,
                     "nodes": [{
                         "number": 1,
                         "title": "review",
@@ -2434,7 +2498,7 @@ mod tests {
                         "reviews": { "nodes": [] }
                     }]
                 },
-                "reviewed": { "nodes": [] },
+                "reviewed": { "issueCount": 0, "nodes": [] },
                 "reviewedMerged": {
                     "nodes": [{
                         "number": 42,

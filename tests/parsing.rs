@@ -383,12 +383,12 @@ fn merged_empty_yields_no_rows() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn reviews_parse_dedupe_and_derive_states() {
+fn reviews_parse_and_derive_states() {
     let data: ReviewsData = parse(include_str!("fixtures/reviews.json"));
     let rows = reviews::build_open_rows(data);
 
-    // #102 is in both searches (a re-review) -> de-duplicated to four rows,
-    // ordered by state rank: Awaiting, ReReview, Updated, Reviewed.
+    // #102 is requested and already reviewed (a re-review). Ordered by state
+    // rank: Awaiting, ReReview, Updated, Reviewed.
     assert_eq!(
         rows.iter().map(|r| (r.number, r.state)).collect::<Vec<_>>(),
         vec![
