@@ -7471,6 +7471,131 @@ mod tests {
         );
     }
 
+    /// A client whose REST core quota is exhausted, so `GET /user` is refused
+    /// until an hour from now, while GraphQL answers the identity query and the
+    /// section queries. The counter tracks identity queries.
+    fn core_limited() -> (
+        Client,
+        github::fake::Fake,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (client, fake) = github::fake::client(tagged());
+        let reset = (chrono::Utc::now() + chrono::TimeDelta::hours(1))
+            .timestamp()
+            .to_string();
+        fake.set_response(
+            "GET /user",
+            403,
+            &[
+                ("x-ratelimit-resource", "core"),
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", &reset),
+            ],
+            r#"{"message":"API rate limit exceeded"}"#,
+        );
+        let identities = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = identities.clone();
+        let sections = graphql(&[3, 2, 1]).1;
+        fake.set_graphql_responder(move |body| {
+            if body["query"].as_str() == Some("query { viewer { login } }") {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                r#"{"data":{"viewer":{"login":"me"}}}"#.to_string()
+            } else {
+                sections.clone()
+            }
+        });
+        (client, fake, identities)
+    }
+
+    #[test]
+    fn core_limited_startup_renders_fresh_sections_through_graphql() {
+        let repo = Repo::parse("o/r").unwrap();
+        for (args, want_mine) in [
+            (&["prowl", "--only", "mine"][..], true),
+            (&["prowl", "--view", "reviews"][..], false),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let (client, fake, identities) = core_limited();
+            let me = client.me().unwrap();
+            assert_eq!(me, "me");
+            let mut branch = None;
+            let outcome = fetch(
+                &cli,
+                &client,
+                &repo,
+                &me,
+                &mut branch,
+                want_mine,
+                !want_mine,
+            );
+            assert!(outcome.issues.is_empty(), "{args:?}: {:?}", outcome.issues);
+            assert_eq!(outcome.sections.prs.is_some(), want_mine, "{args:?}");
+            assert_eq!(outcome.sections.reviews.is_some(), !want_mine, "{args:?}");
+
+            let before = fake.requests().len();
+            let refreshed = fetch(
+                &cli,
+                &client,
+                &repo,
+                &me,
+                &mut branch,
+                want_mine,
+                !want_mine,
+            );
+            assert!(refreshed.issues.is_empty(), "{args:?}");
+            let requests = fake.requests();
+            assert_eq!(requests[0], "GET /user", "{args:?}");
+            assert!(
+                requests[1..].iter().all(|request| request == GRAPHQL),
+                "{args:?}: {requests:?}"
+            );
+            assert_eq!(
+                identities.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{args:?}"
+            );
+            assert!(requests.len() > before, "{args:?}: {requests:?}");
+        }
+    }
+
+    #[test]
+    fn core_limited_shipments_stay_unavailable_without_rest() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine,shipments"]).unwrap();
+        let (client, fake, _) = core_limited();
+        let me = client.me().unwrap();
+        let outcome = fetch(
+            &cli,
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            &me,
+            &mut None,
+            true,
+            false,
+        );
+        assert_eq!(outcome.sections.prs.as_ref().map(Vec::len), Some(3));
+        assert!(
+            outcome
+                .sections
+                .commits
+                .as_ref()
+                .is_none_or(|stats| !stats.available)
+        );
+        assert!(
+            outcome
+                .issues
+                .iter()
+                .any(|issue| issue.message.contains("core rate limit")),
+            "{:?}",
+            outcome.issues
+        );
+        let requests = fake.requests();
+        assert_eq!(requests[0], "GET /user");
+        assert!(
+            requests[1..].iter().all(|request| request == GRAPHQL),
+            "{requests:?}"
+        );
+    }
+
     #[test]
     fn one_shot_reviews_request_failure_reports_both_sections() {
         let cli = Cli::try_parse_from(["prowl", "--view", "reviews"]).unwrap();
