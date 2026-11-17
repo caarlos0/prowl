@@ -300,7 +300,10 @@ watch event loop); everything else is testable modules:
   enabled, even if the initial tab is Reviews, and reuses only a successful
   resolution. A failed lookup leaves the upcoming bucket unavailable while
   shipped release counts and release-map data are still computed; the next
-  scheduled refresh retries the lookup. No compare request uses a guessed
+  scheduled refresh retries the lookup. When the whole shipment fetch also
+  failed (a REST outage or `core` limit), the lookup failure is not reported
+  separately, so the cached or previous upcoming bucket stays on the stale
+  section. No compare request uses a guessed
   branch. In watch mode, the REST shipment scan runs every second Mine refresh;
   `Ctrl-R` forces it immediately. Cached shipment counts and release annotations
   show an age while newer Mine data is displayed.

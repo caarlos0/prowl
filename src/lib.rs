@@ -739,7 +739,9 @@ fn fetch_scheduled_with_context_memo(
 
     let (commit_stats, mut release_map) =
         fetch_release_data(cli, client, repo, me, default_branch, due, &mut issues);
-    if let Some(error) = branch_error {
+    if let Some(error) = branch_error
+        && commit_stats.as_ref().is_some_and(|stats| stats.available)
+    {
         issues.push(FetchIssue::new(FetchScope::Upcoming, &error));
     }
 
@@ -7655,6 +7657,63 @@ mod tests {
             requests[1..].iter().all(|request| request == GRAPHQL),
             "{requests:?}"
         );
+    }
+
+    #[test]
+    fn failed_shipment_fetch_keeps_cached_upcoming() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (cached, _) = fetch_offline(&["prowl"], tagged());
+        assert!(cached.commits.as_ref().unwrap().upcoming.is_some());
+
+        let (client, fake, _) = core_limited();
+        let me = client.me().unwrap();
+        let due = Schedule::default().next(View::Mine, false, true);
+        let outcome = fetch_scheduled(&cli, &client, &repo, &me, &mut None, due).merge(
+            Some(cached),
+            Vec::new(),
+            due,
+        );
+
+        assert_eq!(
+            outcome
+                .issues
+                .iter()
+                .map(|issue| issue.scope)
+                .collect::<Vec<_>>(),
+            [FetchScope::Shipments, FetchScope::ReleaseMetadata]
+        );
+        let stats = outcome.sections.commits.as_ref().unwrap();
+        assert!(stats.available);
+        assert!(stats.upcoming.is_some());
+        assert!(!outcome.status().contains("upcoming unavailable"));
+        assert_eq!(fake.requests(), ["GET /user", GRAPHQL, GRAPHQL]);
+    }
+
+    #[test]
+    fn default_branch_lookup_failure_marks_upcoming_unavailable() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let (client, fake) = github::fake::client(tagged());
+        let due = Schedule::default().next(View::Mine, false, true);
+        let outcome = fetch_scheduled(
+            &cli,
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            &mut None,
+            due,
+        );
+
+        assert_eq!(
+            outcome
+                .issues
+                .iter()
+                .map(|issue| issue.scope)
+                .collect::<Vec<_>>(),
+            [FetchScope::Upcoming]
+        );
+        assert!(outcome.sections.commits.as_ref().unwrap().available);
+        assert_eq!(fake.requests()[0], "GET /repos/o/r");
     }
 
     #[test]
