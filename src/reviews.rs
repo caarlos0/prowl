@@ -70,9 +70,9 @@ fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
     }
 }
 
-/// Build the open-reviews rows from the two searches, de-duplicating PRs that
-/// appear in both (a re-review). Sorted by state (actionable first), then by
-/// last update (most recent first).
+/// Build the open-reviews rows from the two searches. The searches do not
+/// overlap; de-duplication only guards against a PR found by both. Sorted by
+/// state (actionable first), then by last update (most recent first).
 pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
     let mut nodes: HashMap<i64, (ReviewPrNode, bool)> = HashMap::new();
     for n in data.requested.nodes {
@@ -266,6 +266,7 @@ mod tests {
         let data = ReviewsData {
             // #1 awaiting (requested, never reviewed); #2 re-review (requested + reviewed).
             requested: ReviewSearch {
+                issue_count: 2,
                 nodes: vec![
                     node(1, "alice", Some("2026-06-10T00:00:00Z"), &[]),
                     node(
@@ -278,6 +279,7 @@ mod tests {
             },
             // #2 also here (re-review); #3 updated (commit after review); #4 reviewed.
             reviewed: ReviewSearch {
+                issue_count: 3,
                 nodes: vec![
                     node(
                         2,
@@ -316,11 +318,63 @@ mod tests {
     }
 
     #[test]
+    fn capped_requested_search_keeps_states_and_reports_exact_total() {
+        let mut requested: Vec<_> = (1..=50)
+            .map(|number| node(number, "alice", None, &[]))
+            .collect();
+        requested[6] = node(7, "bob", None, &["2026-06-09T00:00:00Z"]);
+        let reviewed = (101..=137)
+            .map(|number| node(number, "carol", None, &["2026-06-09T00:00:00Z"]))
+            .collect();
+        let data = ReviewsData {
+            requested: ReviewSearch {
+                issue_count: 117,
+                nodes: requested,
+            },
+            reviewed: ReviewSearch {
+                issue_count: 37,
+                nodes: reviewed,
+            },
+        };
+        assert!(data.is_capped());
+        assert_eq!(data.total_count(), 154);
+
+        let rows = build_open_rows(data);
+        assert_eq!(rows.len(), 87);
+        let state = |number| rows.iter().find(|row| row.number == number).unwrap().state;
+        assert_eq!(state(7), ReviewState::ReReview);
+        assert_eq!(state(8), ReviewState::Awaiting);
+        assert_eq!(state(101), ReviewState::Reviewed);
+    }
+
+    #[test]
+    fn capped_reviewed_search_reports_total() {
+        let data = ReviewsData {
+            requested: ReviewSearch {
+                issue_count: 0,
+                nodes: vec![],
+            },
+            reviewed: ReviewSearch {
+                issue_count: 51,
+                nodes: (1..=50)
+                    .map(|number| node(number, "carol", None, &["2026-06-09T00:00:00Z"]))
+                    .collect(),
+            },
+        };
+        assert!(data.is_capped());
+        assert_eq!(data.total_count(), 51);
+    }
+
+    #[test]
     fn reviewed_without_new_commits_is_not_updated() {
         // Commit predates my review -> Reviewed, not Updated.
         let data = ReviewsData {
-            requested: ReviewSearch { nodes: vec![] },
+            requested: ReviewSearch {
+                issue_count: 0,
+                nodes: vec![],
+            },
             reviewed: ReviewSearch {
+                issue_count: 1,
                 nodes: vec![node(
                     9,
                     "eve",
@@ -337,9 +391,13 @@ mod tests {
     fn open_table_uses_ascii_glyphs_and_author() {
         let data = ReviewsData {
             requested: ReviewSearch {
+                issue_count: 1,
                 nodes: vec![node(1, "alice", None, &[])],
             },
-            reviewed: ReviewSearch { nodes: vec![] },
+            reviewed: ReviewSearch {
+                issue_count: 0,
+                nodes: vec![],
+            },
         };
         let rows = build_open_rows(data);
         let without_branch = open_to_table(&rows, true, false);

@@ -121,18 +121,19 @@ watch event loop); everything else is testable modules:
   (`METHOD /path?query`) and the `If-None-Match` value.
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
-  the Mine query paths plus `REVIEWS_QUERY`, which combines the `requested:`
-  and `reviewed:` open-review searches with the reviewed-merged search. The Mine
-  merged search rides in the first Mine GraphQL request: the combined queue-
-  and-Mine request, the queue request when My PRs are hidden, or Mine page 1
-  when the queue is hidden. `WATCH_MINE_REVIEWS_QUERY` combines the Reviews
-  searches with the enabled Mine sections (first Mine page, queue, Mine merged)
-  when both views are due and My PRs or My merged PRs is shown; it includes the
-  Mine merged search exactly once when that section is enabled, and skips the
-  Mine page and default-branch rules when neither My PRs nor Merge Queue is
-  shown. `REVIEWS_QUERY` never carries Mine merged; a standalone search is
-  needed only when no Mine, queue, or two-view watch request can carry it.
-  Alias errors stay scoped to their sections. My PRs and
+  the Mine query paths plus `REVIEWS_QUERY`, which combines capped `requested:`
+  and `reviewed:` open-review searches (which do not overlap, and return
+  `issueCount`) with the reviewed-and-merged search. The Mine merged search
+  rides in
+  the first Mine GraphQL request: the combined queue-and-Mine request, the
+  queue request when My PRs are hidden, or Mine page 1 when the queue is hidden.
+  `WATCH_MINE_REVIEWS_QUERY` combines Reviews searches with enabled Mine
+  sections when both views are due and My PRs or My merged PRs is shown; it
+  includes the Mine merged search once when enabled, and skips Mine-page and
+  default-branch data when neither My PRs nor Merge Queue is shown.
+  `REVIEWS_QUERY` never carries Mine merged; a standalone search is needed only
+  when no Mine, queue, or two-view watch request can carry it. Alias errors stay
+  scoped to their sections. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   GraphQL partial-data errors warn in each affected section, including a
   section that consumes warned shared rule data; the cache adds no requests.
@@ -255,9 +256,9 @@ watch event loop); everything else is testable modules:
   its release, looked up from the `commits::ReleaseMap`.
 - `reviews.rs` — the Reviews view's rows/tables. `ReviewRow` (open: `glyph PR
   TITLE [BRANCH] AUTHOR UPDATED`, glyph = the `ReviewState`) via `build_open_rows`
-  (de-dupes the two searches, derives the state, sorts by state rank then
-  `updatedAt`) + `open_to_table`; `ReviewedMergedRow` (`glyph PR TITLE [BRANCH]
-  AUTHOR MERGED`) via `build_merged_rows` + `merged_to_table`.
+  (de-dupes the searches, sorts by state rank then `updatedAt`) + `open_to_table`;
+  `ReviewedMergedRow` (`glyph PR TITLE [BRANCH] AUTHOR MERGED`) via
+  `build_merged_rows` + `merged_to_table`.
 - `commits.rs` — "commits by me" counts for the next (unreleased) version and
   the last 4 stable releases (GitHub releases + compare REST APIs); best-effort,
   never fatal. `fetch` returns both the `CommitStats` (rendered as the "My
@@ -327,6 +328,8 @@ watch event loop); everything else is testable modules:
   Loading re-sorts My open PRs using the current `--sort-open` value rather
   than the order saved by a previous run. Caches from before missing required
   checks were included in the queue's `RUN` and stored separately are invalidated.
+  The cached Reviews cap total is stored with `Sections`; the cache version is
+  bumped when this field is added.
 - `timefmt.rs` — `chrono` helpers (local clock, `mergedAt` ages, since-date).
 
 `run()` loads CLI/config settings, then creates a
@@ -509,12 +512,21 @@ still performs all teardown through `finish`.
   and release annotations show their age; an unmapped PR stays `?` until the
   next scan. A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
-  reviewed by me), `ReReview` (requested again after I reviewed), `Updated` (I
+  reviewed by me), `ReReview` (requested again after I reviewed: a requested
+  PR with a review of mine), `Updated` (I
   reviewed; last commit `committedDate` > my latest review `submittedAt`), or
   `Reviewed`. `--review-scope` picks the requested search: `all` →
   `review-requested:<me>` (me + my teams, default), `direct` →
   `user-review-requested:<me>` (only me). Both review searches exclude my own
-  PRs (`-author:<me>`).
+  PRs (`-author:<me>`), and the `reviewed` search also excludes the same
+  qualifier as `requested`, so the two never overlap. A re-request outside the
+  first 50 `requested` nodes is not shown, and is never shown with a wrong
+  state. If
+  either 50-node search is capped, the Reviews header shows the fetched unique
+  row count and the total (`requested.issueCount + reviewed.issueCount`);
+  this cap is not a fetch error. The total includes drafts, also with
+  `--no-draft`, because the Reviews searches do not use `draft:false`. During a
+  `/` search, the first number counts the matching rows.
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
   not ring). The first refresh is silent. Changed rows get a `▸` marker. Bell
@@ -706,13 +718,19 @@ still performs all teardown through `finish`.
   reviewed-and-merged section; the Mine merged section ignores it). An alias
   error affects only that section; a request-level failure reports each section
   included in that request.
-- Reviews (one POST, three aliased searches; combined with the first Mine
-  request in a two-view watch): `requested: search(is:pr is:open
-  <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
-  reviewed-by:<me> -author:<me>)`, each node carrying `author`, `headRefName`,
-  last commit `committedDate`, and `reviews(author:<me>)` `submittedAt`s.
-  Re-review = a PR in both result sets. The request includes the
-  reviewed-and-merged search. A Reviews-only request never carries Mine merged.
+- Reviews uses one POST. All three query paths include `requested: search(is:pr
+  is:open <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
+  reviewed-by:<me> -<scope>:<me> -author:<me>)`, each returning `issueCount`
+  and up to 50 nodes. The two searches do not overlap. They carry `author`,
+  `headRefName`, last commit `committedDate`, and
+  `reviews(author:<me>)` `submittedAt`s. The Reviews header shows
+  `<fetched unique rows> of <requested issueCount + reviewed issueCount>` when
+  either search is capped (the total includes drafts; during a `/` search the
+  row count is the matching rows). `REVIEWS_QUERY`
+  also includes reviewed-and-merged; `WATCH_MINE_REVIEWS_QUERY` includes the
+  Mine-merged alias when enabled. The Reviews-only query has only the two
+  open-review searches. When both watch views are due, the combined Mine
+  request carries the Mine-merged alias once when enabled.
 - Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
   merged:>=<since>)`, aliased into the Reviews request with the configured
   merged limit.
