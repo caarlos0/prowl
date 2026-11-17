@@ -498,7 +498,7 @@ impl Client {
         #[cfg(test)]
         if let Some(fake) = &self.fake {
             let method = if body.is_some() { "POST" } else { "GET" };
-            return fake.respond(format!("{method} /{path}"), if_none_match);
+            return fake.respond(format!("{method} /{path}"), if_none_match, body);
         }
         let url = format!("{API}/{path}");
         if let Some(body) = body {
@@ -568,11 +568,13 @@ pub(crate) mod fake {
 
     type ValidatorLog = Vec<(String, Option<String>)>;
     type ScheduledResponses = Arc<Mutex<HashMap<(String, usize), Response<String>>>>;
+    type Responder = Arc<dyn Fn(&serde_json::Value) -> String + Send + Sync>;
 
     #[derive(Clone)]
     pub(crate) struct Fake {
         routes: Arc<Mutex<HashMap<String, Response<String>>>>,
         failures: ScheduledResponses,
+        graphql: Arc<Mutex<Option<Responder>>>,
         requests: Arc<Mutex<Vec<String>>>,
         validators: Arc<Mutex<ValidatorLog>>,
         calls: Arc<Mutex<HashMap<String, usize>>>,
@@ -615,6 +617,15 @@ pub(crate) mod fake {
             );
         }
 
+        /// Answers every GraphQL POST from its request body, for tests whose
+        /// response depends on the variables sent. Takes precedence over routes.
+        pub(crate) fn set_graphql_responder(
+            &self,
+            responder: impl Fn(&serde_json::Value) -> String + Send + Sync + 'static,
+        ) {
+            *self.graphql.lock().unwrap() = Some(Arc::new(responder));
+        }
+
         fn response(status: u16, headers: &[(&str, &str)], body: &str) -> Response<String> {
             let mut response = Response::builder().status(status);
             for (name, value) in headers {
@@ -635,6 +646,7 @@ pub(crate) mod fake {
             &self,
             request: String,
             if_none_match: Option<&str>,
+            body: Option<&serde_json::Value>,
         ) -> Result<Response<ureq::Body>> {
             self.requests.lock().unwrap().push(request.clone());
             self.validators
@@ -647,6 +659,12 @@ pub(crate) mod fake {
                 *count += 1;
                 *count
             };
+            let responder = self.graphql.lock().unwrap().clone();
+            if let (Some(responder), Some(body)) = (responder, body) {
+                return Ok(
+                    Response::new(responder(body)).map(|body| ureq::Body::builder().data(body))
+                );
+            }
             let response = self
                 .failures
                 .lock()
@@ -668,6 +686,7 @@ pub(crate) mod fake {
                     .collect(),
             )),
             failures: Arc::default(),
+            graphql: Arc::default(),
             requests: Arc::default(),
             validators: Arc::default(),
             calls: Arc::default(),
