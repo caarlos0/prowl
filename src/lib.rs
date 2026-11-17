@@ -655,6 +655,18 @@ fn fetch_scheduled(
     default_branch: &mut Option<String>,
     due: Due,
 ) -> FetchOutcome {
+    fetch_scheduled_with_context_memo(cli, client, repo, me, default_branch, due, None)
+}
+
+fn fetch_scheduled_with_context_memo(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    default_branch: &mut Option<String>,
+    due: Due,
+    required_context_memo: Option<&mut model::RequiredContextMemo>,
+) -> FetchOutcome {
     let mut issues = Vec::new();
     let mut shipment_scan = due.mine && due.shipments && cli.show_shipments();
     let branch_error = if due.mine && due.shipments && cli.show_shipments() {
@@ -675,11 +687,19 @@ fn fetch_scheduled(
     }
 
     let (fetched_reviews, mine_sections) = if due.mine && due.reviews && cli.show_mine() {
-        fetch_mine_reviews_sections(cli, client, repo, me, &mut issues)
+        fetch_mine_reviews_sections(cli, client, repo, me, &mut issues, required_context_memo)
     } else {
         let fetched_reviews =
             fetch_review_sections(cli, client, repo, me, due.mine, due.reviews, &mut issues);
-        let mine_sections = fetch_mine_queue_sections(cli, client, repo, me, due.mine, &mut issues);
+        let mine_sections = fetch_mine_queue_sections(
+            cli,
+            client,
+            repo,
+            me,
+            due.mine,
+            &mut issues,
+            required_context_memo,
+        );
         (fetched_reviews, mine_sections)
     };
     let merged_nodes = fetched_reviews.merged_nodes;
@@ -721,10 +741,11 @@ fn fetch_mine_queue_sections(
     me: &str,
     want_mine: bool,
     issues: &mut Vec<FetchIssue>,
+    mut required_context_memo: Option<&mut model::RequiredContextMemo>,
 ) -> FetchedMineSections {
     let mut context_cache = model::RequiredContextCache::default();
     if want_mine && cli.show_queue() && cli.show_mine() {
-        return match model::fetch_mine_and_queue_with_context_cache(
+        return match model::fetch_mine_and_queue_with_context_memo(
             client,
             repo,
             me,
@@ -732,6 +753,7 @@ fn fetch_mine_queue_sections(
             cli.no_draft,
             cli.required,
             &mut context_cache,
+            required_context_memo,
         ) {
             Ok(fetched) => map_mine_queue_results(cli, me, fetched, issues),
             Err(error) => {
@@ -745,7 +767,13 @@ fn fetch_mine_queue_sections(
     let queue = if want_mine && cli.show_queue() {
         graphql_section(
             FetchScope::Queue,
-            model::fetch_queue_with_context_cache(client, repo, cli.required, &mut context_cache),
+            model::fetch_queue_with_context_memo(
+                client,
+                repo,
+                cli.required,
+                &mut context_cache,
+                required_context_memo.as_deref_mut(),
+            ),
             |(nodes, eta)| (queue::build_rows(nodes, me), eta),
             issues,
         )
@@ -755,7 +783,7 @@ fn fetch_mine_queue_sections(
     let prs = if want_mine && cli.show_mine() {
         graphql_section(
             FetchScope::Mine,
-            model::fetch_my_prs_with_context_cache(
+            model::fetch_my_prs_with_context_memo(
                 client,
                 repo,
                 me,
@@ -763,6 +791,7 @@ fn fetch_mine_queue_sections(
                 cli.no_draft,
                 cli.required,
                 &mut context_cache,
+                required_context_memo,
             ),
             |nodes| {
                 let rows = prs::build_rows(nodes, cli.sort_open);
@@ -1021,10 +1050,11 @@ fn fetch_mine_reviews_sections(
     repo: &Repo,
     me: &str,
     issues: &mut Vec<FetchIssue>,
+    memo: Option<&mut model::RequiredContextMemo>,
 ) -> (FetchedReviewSections, FetchedMineSections) {
     let since = timefmt::since_date(&cli.merged_window);
     let mut context_cache = model::RequiredContextCache::default();
-    match model::fetch_mine_queue_reviews_with_context_cache(
+    match model::fetch_mine_queue_reviews_with_context_memo(
         client,
         repo,
         me,
@@ -1039,6 +1069,7 @@ fn fetch_mine_reviews_sections(
             include_queue: cli.show_queue(),
             include_mine_merged: cli.show_merged(),
         },
+        memo,
     ) {
         Ok(fetched) => {
             let review_sections = map_reviews_and_merged(cli, fetched.reviews, issues);
@@ -2578,6 +2609,7 @@ struct App<'a> {
     repo: &'a Repo,
     me: String,
     default_branch: Option<String>,
+    required_context_memo: model::RequiredContextMemo,
     /// The constant next-refresh ETA shown in the key-hint footer.
     eta: String,
     /// Change-detection baseline and the latest combined section data.
@@ -2630,6 +2662,7 @@ impl<'a> App<'a> {
             repo,
             me: String::new(),
             default_branch: None,
+            required_context_memo: model::RequiredContextMemo::default(),
             prev: None,
             last_good: None,
             unread: Changes::default(),
@@ -2792,6 +2825,7 @@ impl<'a> App<'a> {
         let (cli, client, repo) = (self.cli.clone(), self.client.clone(), self.repo.clone());
         let mut me = self.me.clone();
         let mut default_branch = self.default_branch.clone();
+        let mut required_context_memo = self.required_context_memo.clone();
         let resolve = me.is_empty();
         let shipments_enabled = cli.show_shipments() || cli.show_merged();
         let due = self.schedule.next(self.ui.view, manual, shipments_enabled);
@@ -2802,8 +2836,16 @@ impl<'a> App<'a> {
                 if resolve {
                     me = client.me()?;
                 }
-                let outcome = fetch_scheduled(&cli, &client, &repo, &me, &mut default_branch, due);
-                Ok((me, default_branch, outcome))
+                let outcome = fetch_scheduled_with_context_memo(
+                    &cli,
+                    &client,
+                    &repo,
+                    &me,
+                    &mut default_branch,
+                    due,
+                    Some(&mut required_context_memo),
+                );
+                Ok((me, default_branch, required_context_memo, outcome))
             })();
             let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
         });
@@ -2813,9 +2855,10 @@ impl<'a> App<'a> {
                 return Ok(Flow::Quit);
             }
             match rx.try_recv() {
-                Ok(Ok((me, default_branch, outcome))) => {
+                Ok(Ok((me, default_branch, required_context_memo, outcome))) => {
                     self.me = me;
                     self.default_branch = default_branch;
+                    self.required_context_memo = required_context_memo;
                     // Cleared before painting, so the result frame already shows
                     // the plain `^R refresh` hint again.
                     self.refreshing = false;
@@ -6262,6 +6305,74 @@ mod tests {
         (GRAPHQL.to_string(), response.to_string())
     }
 
+    fn required_context_memo_graphql(
+        mine_ref: &str,
+        required: &[&str],
+        reported: &[&str],
+        pr_head: &str,
+        queue_head: &str,
+        integration_id: i64,
+    ) -> String {
+        let (_, body) = required_rules_graphql(mine_ref, required);
+        let mut response: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let check_runs: Vec<_> = reported
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "__typename": "CheckRun",
+                    "required": true,
+                    "name": name,
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-08-28T10:00:00Z"
+                })
+            })
+            .collect();
+        response["data"]["c0"]["statusCheckRollup"]["contexts"]["nodes"] =
+            serde_json::json!(check_runs);
+        response["data"]["search"]["nodes"][0]["commits"]["nodes"][0]["commit"]["id"] =
+            serde_json::json!(pr_head);
+        response["data"]["repository"]["mergeQueue"]["entries"]["nodes"][0]["headCommit"]["id"] =
+            serde_json::json!(queue_head);
+
+        let required_status_checks: Vec<_> = required
+            .iter()
+            .map(|context| {
+                serde_json::json!({
+                    "context": context,
+                    "integrationId": integration_id
+                })
+            })
+            .collect();
+        let rules = serde_json::json!([{
+            "parameters": {
+                "__typename": "RequiredStatusChecksParameters",
+                "requiredStatusChecks": required_status_checks
+            }
+        }]);
+        response["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"] = rules.clone();
+        response["data"]["r0"]["rules"]["nodes"] = rules;
+        serde_json::to_string(&response).unwrap()
+    }
+
+    fn assert_context_memo_matches_uncached(
+        cli: &Cli,
+        body: &str,
+        cached: &FetchOutcome,
+        want_reviews: bool,
+    ) -> usize {
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client([]);
+        fake.set_response(GRAPHQL, 200, &[], body);
+        let outcome = fetch(cli, &client, &repo, "me", &mut None, true, want_reviews);
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        assert_eq!(
+            serde_json::to_value(&cached.sections).unwrap(),
+            serde_json::to_value(&outcome.sections).unwrap()
+        );
+        fake.requests().len()
+    }
+
     #[test]
     fn required_rules_follow_the_production_refresh_lifetime() {
         let repo = Repo::parse("o/r").unwrap();
@@ -6317,6 +6428,209 @@ mod tests {
                     assert!(branch.is_none());
                 }
             }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn watch_context_memo_skips_only_complete_unchanged_targets() {
+        let repo = Repo::parse("o/r").unwrap();
+        for (case, initial_ref, cold_posts, warm_posts, want_reviews) in [
+            ("shared", "ref-1", 3, 1, false),
+            ("disjoint", "ref-2", 4, 2, false),
+            ("shared combined views", "ref-1", 3, 1, true),
+            ("disjoint combined views", "ref-2", 4, 2, true),
+        ] {
+            let cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
+            let (client, fake) = github::fake::client([]);
+            let mut memo = model::RequiredContextMemo::default();
+            let mut previous_posts = 0;
+            let mut refresh =
+                |cli: &Cli, body: &str, expected_posts: usize, cold_posts: usize, label: &str| {
+                    if expected_posts != 0 {
+                        let body = body.to_owned();
+                        fake.set_graphql_responder(move |request| {
+                            let mut response: serde_json::Value =
+                                serde_json::from_str(&body).unwrap();
+                            if !request["query"].as_str().unwrap().contains("integrationId") {
+                                for check in response["data"]["repository"]["defaultBranchRef"]
+                                    ["rules"]["nodes"][0]["parameters"]["requiredStatusChecks"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                {
+                                    check.as_object_mut().unwrap().remove("integrationId");
+                                }
+                            }
+                            response.to_string()
+                        });
+                    }
+                    let outcome = fetch_scheduled_with_context_memo(
+                        cli,
+                        &client,
+                        &repo,
+                        "me",
+                        &mut None,
+                        Due {
+                            mine: expected_posts != 0,
+                            reviews: want_reviews && expected_posts != 0,
+                            shipments: false,
+                        },
+                        Some(&mut memo),
+                    );
+                    assert!(outcome.issues.is_empty(), "{label}: {:?}", outcome.issues);
+                    let requests = fake.requests();
+                    let request_count = requests.len() - previous_posts;
+                    previous_posts = requests.len();
+                    println!("MEMO_REFRESH {case} {label} POST={request_count}");
+                    assert_eq!(request_count, expected_posts, "{label}");
+                    let cold_count = if expected_posts == 0 {
+                        0
+                    } else {
+                        assert_context_memo_matches_uncached(cli, body, &outcome, want_reviews)
+                    };
+                    assert_eq!(cold_count, cold_posts, "{label}: uncached request count");
+                    outcome
+                };
+
+            for index in 0..3 {
+                let body = required_context_memo_graphql(
+                    initial_ref,
+                    &["test"],
+                    &["test"],
+                    "PR_HEAD",
+                    "QUEUE_HEAD",
+                    1,
+                );
+                let expected_posts = if index == 0 { cold_posts } else { warm_posts };
+                let outcome = refresh(
+                    &cli,
+                    &body,
+                    expected_posts,
+                    cold_posts,
+                    &format!("steady-{}", index + 1),
+                );
+                assert_eq!(outcome.sections.prs.as_ref().unwrap()[0].checks.running, 0);
+                assert_eq!(
+                    outcome.sections.queue.as_ref().unwrap()[0].missing_required_checks,
+                    0
+                );
+                if index == 1 {
+                    refresh(&cli, &body, 0, 0, "inactive-view skip");
+                }
+            }
+
+            let body = required_context_memo_graphql(
+                initial_ref,
+                &["test"],
+                &["test"],
+                "PR_HEAD_NEW",
+                "QUEUE_HEAD",
+                1,
+            );
+            refresh(&cli, &body, warm_posts + 1, cold_posts, "new PR head");
+
+            let body = required_context_memo_graphql(
+                initial_ref,
+                &["test"],
+                &["test"],
+                "PR_HEAD_NEW",
+                "QUEUE_HEAD",
+                1,
+            );
+            let mut response: serde_json::Value = serde_json::from_str(&body).unwrap();
+            response["data"]["search"]["nodes"][0]["number"] = serde_json::json!(99);
+            refresh(
+                &cli,
+                &serde_json::to_string(&response).unwrap(),
+                warm_posts + 1,
+                cold_posts,
+                "new PR number",
+            );
+
+            let body = required_context_memo_graphql(
+                initial_ref,
+                &["test"],
+                &["test"],
+                "PR_HEAD",
+                "QUEUE_HEAD",
+                1,
+            );
+            refresh(
+                &cli,
+                &body,
+                warm_posts + 1,
+                cold_posts,
+                "reappeared PR head",
+            );
+
+            let body = required_context_memo_graphql(
+                initial_ref,
+                &["test"],
+                &["test"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                1,
+            );
+            refresh(&cli, &body, warm_posts + 1, cold_posts, "queue rebuild");
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test"],
+                &["test"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                1,
+            );
+            refresh(&cli, &body, 3, 4, "base retarget");
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test", "lint"],
+                &["test", "lint"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                1,
+            );
+            refresh(&cli, &body, 4, 4, "added required context");
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test", "lint"],
+                &["test", "lint"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                2,
+            );
+            refresh(&cli, &body, 4, 4, "changed integration");
+
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test", "lint"],
+                &["test"],
+                "PR_HEAD_MISSING",
+                "QUEUE_MISSING",
+                2,
+            );
+            let missing = refresh(&cli, &body, 4, 4, "missing required context");
+            assert_eq!(missing.sections.prs.as_ref().unwrap()[0].checks.running, 1);
+            let missing = refresh(&cli, &body, 4, 4, "missing context still queried");
+            assert_eq!(missing.sections.prs.as_ref().unwrap()[0].checks.running, 1);
+            assert_eq!(
+                missing.sections.queue.as_ref().unwrap()[0].missing_required_checks,
+                1
+            );
+
+            let mut required_cli = cli.clone();
+            required_cli.required = true;
+            let body = required_context_memo_graphql(
+                "retargeted-ref",
+                &["test"],
+                &["test"],
+                "PR_HEAD",
+                "QUEUE_REBUILD",
+                2,
+            );
+            refresh(&required_cli, &body, 4, 4, "--required");
         }
     }
 
