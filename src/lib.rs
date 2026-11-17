@@ -536,6 +536,11 @@ fn fetch_release_data(
     }
 }
 
+type MergedFetch = (
+    Option<Vec<model::MergedNode>>,
+    Option<Result<model::GraphqlData<Vec<model::MergedNode>>>>,
+);
+
 fn fetch_merged_nodes(
     cli: &Cli,
     client: &Client,
@@ -543,10 +548,7 @@ fn fetch_merged_nodes(
     me: &str,
     want_reviews: bool,
     issues: &mut Vec<FetchIssue>,
-) -> (
-    Option<Vec<model::MergedNode>>,
-    Option<Result<model::GraphqlData<Vec<model::MergedNode>>>>,
-) {
+) -> MergedFetch {
     let since = timefmt::since_date(&cli.merged_window);
     if !want_reviews {
         return (
@@ -1014,6 +1016,12 @@ fn paint_bottom(
     (y, caret)
 }
 
+#[derive(Clone, Copy)]
+struct RenderMessages<'a> {
+    warnings: &'a [FetchScope],
+    status: &'a str,
+}
+
 /// Paint the body and then the bottom block right under it, as one unpinned
 /// run of rows. Used for one-shot and piped output, and for the inline
 /// interactive frame — anywhere the dashboard is as tall as its content rather
@@ -1023,8 +1031,7 @@ fn paint_dashboard(
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
-    warnings: &[FetchScope],
-    status: &str,
+    messages: RenderMessages<'_>,
     footer: Option<(&str, bool)>,
     ascii: bool,
 ) -> (u16, Option<Position>) {
@@ -1034,7 +1041,7 @@ fn paint_dashboard(
         sections,
         ui,
         changes,
-        warnings,
+        messages.warnings,
         ascii,
         footer.is_some(),
         visible,
@@ -1045,7 +1052,7 @@ fn paint_dashboard(
         s,
         sections,
         ui,
-        status,
+        messages.status,
         footer,
         ascii,
         ui.show_help,
@@ -1247,7 +1254,13 @@ fn render_dashboard(
         ));
         screen.clear();
         let (used, caret) = paint_dashboard(
-            screen, sections, ui, changes, warnings, status, footer, ascii,
+            screen,
+            sections,
+            ui,
+            changes,
+            RenderMessages { warnings, status },
+            footer,
+            ascii,
         );
         screen.resize((w, used.max(1)));
         caret
@@ -1287,32 +1300,36 @@ fn render_to_string_with_status(
     ascii: bool,
     profile: Profile,
 ) -> String {
-    render_to_string_with_warnings(sections, ui, changes, &[], status, footer, ascii, profile)
+    render_to_string_with_warnings(
+        sections,
+        ui,
+        changes,
+        RenderMessages {
+            warnings: &[],
+            status,
+        },
+        footer,
+        ascii,
+        profile,
+    )
 }
 
 fn render_to_string_with_warnings(
     sections: &Sections,
     ui: &Ui,
     changes: &Changes,
-    warnings: &[FetchScope],
-    status: &str,
+    messages: RenderMessages<'_>,
     footer: Option<(&str, bool)>,
     ascii: bool,
     profile: Profile,
 ) -> String {
     let w = render::OUTPUT_WIDTH as u16;
-    let mut canvas = TextBuffer::new(w, height_bound(sections, ui) + bottom_bound(ui, status));
-    // One-shot output never searches, so there is no caret to place.
-    let (used, _) = paint_dashboard(
-        &mut canvas,
-        sections,
-        ui,
-        changes,
-        warnings,
-        status,
-        footer,
-        ascii,
+    let mut canvas = TextBuffer::new(
+        w,
+        height_bound(sections, ui) + bottom_bound(ui, messages.status),
     );
+    // One-shot output never searches, so there is no caret to place.
+    let (used, _) = paint_dashboard(&mut canvas, sections, ui, changes, messages, footer, ascii);
     canvas.resize(w, used.max(1));
 
     let mut out = Vec::new();
@@ -1340,7 +1357,13 @@ fn render_once(
     // help legend follows `--no-help` instead of the `?` toggle.
     let ui = Ui::once(cli);
     let painted = render_to_string_with_warnings(
-        sections, &ui, changes, warnings, status, footer, ascii, profile,
+        sections,
+        &ui,
+        changes,
+        RenderMessages { warnings, status },
+        footer,
+        ascii,
+        profile,
     );
 
     // A closed downstream pipe (`prowl --once | head`) is a clean exit, not an
@@ -2720,8 +2743,10 @@ mod tests {
             sections,
             ui,
             &Changes::default(),
-            &[],
-            "",
+            RenderMessages {
+                warnings: &[],
+                status: "",
+            },
             None,
             true,
         );
@@ -4155,8 +4180,10 @@ mod tests {
                 &sections,
                 &ui,
                 &Changes::default(),
-                &[],
-                "",
+                RenderMessages {
+                    warnings: &[],
+                    status: "",
+                },
                 None,
                 true,
             );
@@ -4396,8 +4423,10 @@ mod tests {
                 &sections,
                 ui,
                 &Changes::default(),
-                &[],
-                "",
+                RenderMessages {
+                    warnings: &[],
+                    status: "",
+                },
                 None,
                 true,
             );
@@ -4588,8 +4617,10 @@ mod tests {
             &outcome.sections,
             &Ui::once(&cli),
             &Changes::default(),
-            &warnings,
-            &outcome.status(),
+            RenderMessages {
+                warnings: &warnings,
+                status: &outcome.status(),
+            },
             None,
             true,
             Profile::Disabled,
@@ -4638,8 +4669,10 @@ mod tests {
             &outcome.sections,
             &Ui::once(&cli),
             &Changes::default(),
-            &outcome.warnings(),
-            &outcome.status(),
+            RenderMessages {
+                warnings: &outcome.warnings(),
+                status: &outcome.status(),
+            },
             None,
             true,
             Profile::Disabled,
