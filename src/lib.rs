@@ -345,16 +345,18 @@ impl Schedule {
         }
     }
 
-    /// Record a completed refresh of the `due` views.
-    fn record(&mut self, due: Due, at: chrono::DateTime<chrono::Utc>) {
+    /// Record a completed refresh of the `due` views. A view with a failed
+    /// section keeps its previous time, so the next refresh retries it.
+    fn record(&mut self, due: Due, issues: &[FetchIssue], at: chrono::DateTime<chrono::Utc>) {
         let fetched = Some(Fetched {
             refresh: self.refresh,
             at,
         });
-        if due.mine {
+        let succeeded = |view| due.includes(view) && !issues.iter().any(|i| i.scope.view() == view);
+        if succeeded(View::Mine) {
             self.mine = fetched;
         }
-        if due.reviews {
+        if succeeded(View::Reviews) {
             self.reviews = fetched;
         }
     }
@@ -2342,7 +2344,8 @@ impl<'a> App<'a> {
                     // Cleared before painting, so the result frame already shows
                     // the plain `^R refresh` hint again.
                     self.refreshing = false;
-                    self.schedule.record(due, chrono::Utc::now());
+                    self.schedule
+                        .record(due, &outcome.issues, chrono::Utc::now());
                     self.apply(outcome, due)?;
                     return Ok(Flow::Continue);
                 }
@@ -4834,7 +4837,7 @@ mod tests {
                 let outcome = fetch_views(&client, due.mine, due.reviews);
                 let after = counts(&fake.requests()[sent..]);
                 let now = start + chrono::TimeDelta::minutes(5 * tick);
-                schedule.record(due, now);
+                schedule.record(due, &outcome.issues, now);
                 let outcome = outcome.merge(last_good.take(), std::mem::take(&mut issues), due);
                 println!(
                     "TICK_COUNTS {label}: before GET={} POST={} after GET={} POST={}",
@@ -4905,6 +4908,32 @@ mod tests {
             outcome.status(),
             "error: Merge Queue stale: boom\nerror: Reviews unavailable: boom"
         );
+    }
+
+    #[test]
+    fn failed_view_keeps_its_age_and_is_retried() {
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let at = |tick: i64| start + chrono::TimeDelta::minutes(5 * tick);
+        let failed = [FetchIssue::new(
+            FetchScope::ReviewedMerged,
+            &anyhow::anyhow!("boom"),
+        )];
+        let mut schedule = Schedule::default();
+        for tick in 1..=2 {
+            let due = schedule.next(View::Mine, false);
+            schedule.record(due, &[], at(tick));
+        }
+
+        let due = schedule.next(View::Mine, false);
+        assert!(due.reviews, "{due:?}");
+        schedule.record(due, &failed, at(3));
+
+        assert_eq!(
+            schedule.age_note(View::Reviews, at(3)).as_deref(),
+            Some("updated 10m ago")
+        );
+        let due = schedule.next(View::Mine, false);
+        assert!(due.reviews, "retry after the failure: {due:?}");
     }
 
     #[test]

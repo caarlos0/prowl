@@ -433,16 +433,18 @@ still performs all teardown through `finish`.
 - **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
   one-shot output with `--view` and toggled live with `Tab`. While watching,
   `lib.rs::Schedule` fetches the active view on every refresh and the inactive
-  view on every second refresh (`Schedule::INACTIVE_EVERY`), so its data is at
-  most two intervals old. The first refresh, including after a cached start,
-  and every `Ctrl-R` refresh fetch both views. A refresh that skips a view keeps
-  that view's sections and section errors (`FetchOutcome::merge`), so Tab
-  switches instantly from `last_good` with no request; the next refresh fetches
-  the newly active view. When the shown view was fetched before the other, a dim
-  `updated 6m ago` status line (`Schedule::age_note`) shows its age. When both
-  views are due, the two merged searches share one aliased POST; a refresh that
-  skips one view sends only its own merged search, so a view never mixes data
-  of different ages. `--once`/piped fetches only the selected view. A top tab
+  view on every second refresh (`Schedule::INACTIVE_EVERY`), so after a
+  successful fetch its data is at most two intervals old. A view with a failed
+  section is not marked fetched, so the next refresh retries it and its age
+  stays that of its last full success. The first refresh, including after a
+  cached start, and every `Ctrl-R` refresh fetch both views. A refresh that
+  skips a view keeps that view's sections and section errors
+  (`FetchOutcome::merge`), so Tab switches instantly from `last_good` with no
+  request; the next refresh fetches the newly active view. When the shown view
+  was fetched before the other, a dim `updated 6m ago` status line
+  (`Schedule::age_note`) shows its age. When both views are due, the two merged
+  searches share one aliased POST; a refresh that skips one view sends only its
+  own merged search. `--once`/piped fetches only the selected view. A top tab
   strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
   reviewed by me), `ReReview` (requested again after I reviewed), `Updated` (I
