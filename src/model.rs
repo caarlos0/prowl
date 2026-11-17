@@ -177,13 +177,12 @@ impl QueueEntryNode {
                 .head_commit
                 .as_ref()
                 .and_then(|commit| commit.status_check_rollup.as_ref())
-                .map(|rollup| {
+                .map_or_else(Vec::new, |rollup| {
                     count_fingerprint(
                         &rollup.contexts.check_runs,
                         &rollup.contexts.status_contexts,
                     )
-                })
-                .unwrap_or_default(),
+                }),
         }
     }
 
@@ -1167,13 +1166,12 @@ fn fetch_mine_pages(
                 .nodes
                 .first()
                 .and_then(|commit| commit.commit.status_check_rollup.as_ref())
-                .map(|rollup| {
+                .map_or_else(Vec::new, |rollup| {
                     count_fingerprint(
                         &rollup.contexts.check_runs,
                         &rollup.contexts.status_contexts,
                     )
-                })
-                .unwrap_or_default(),
+                }),
         })
         .collect();
     let rule_data_trusted = errors.is_empty();
