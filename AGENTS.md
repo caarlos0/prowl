@@ -127,7 +127,7 @@ watch event loop); everything else is testable modules:
   and-Mine request, the queue request when My PRs are hidden, or Mine page 1
   when the queue is hidden. `WATCH_MINE_REVIEWS_QUERY` combines the Reviews
   searches with the enabled Mine sections (first Mine page, queue, Mine merged)
-  when both views are due and My PRs or My merged PRs is shown; it includes the
+  when both views are due and My PRs, Merge Queue, or My merged PRs is shown; it includes the
   Mine merged search exactly once when that section is enabled, and skips the
   Mine page and default-branch rules when neither My PRs nor Merge Queue is
   shown. `REVIEWS_QUERY` never carries Mine merged; a standalone search is
@@ -486,8 +486,8 @@ still performs all teardown through `finish`.
   (`FetchOutcome::merge`), so Tab switches instantly from `last_good` with no
   request; the next refresh fetches the newly active view. When the shown view
   was fetched before the other, a dim `updated 6m ago` status line
-  (`Schedule::age_note`) shows its age. When both views are due and My PRs or
-  My merged PRs is enabled, the Reviews searches and the enabled Mine sections
+  (`Schedule::age_note`) shows its age. When both views are due and My PRs,
+  Merge Queue, or My merged PRs is enabled, the Reviews searches and the enabled Mine sections
   (first Mine page, queue, Mine merged) share one request; the Mine merged
   search appears once when enabled. Otherwise Mine
   merged is fetched with the first Mine request when that view is due, and

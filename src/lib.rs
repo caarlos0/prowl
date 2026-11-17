@@ -694,7 +694,7 @@ fn fetch_scheduled_with_context_memo(
     }
 
     let (fetched_reviews, mine_sections) =
-        if due.mine && due.reviews && (cli.show_mine() || cli.show_merged()) {
+        if due.mine && due.reviews && (cli.show_mine() || cli.show_queue() || cli.show_merged()) {
             fetch_mine_reviews_sections(cli, client, repo, me, &mut issues, required_context_memo)
         } else {
             let fetched_reviews =
@@ -5634,6 +5634,119 @@ mod tests {
         assert!(outcome.sections.prs.is_some());
         assert!(outcome.sections.queue.is_none());
         assert!(outcome.sections.merged.is_none());
+        assert_eq!(
+            fake.requests()
+                .iter()
+                .filter(|request| request.as_str() == GRAPHQL)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn combined_watch_with_only_queue_sends_one_request_without_mine() {
+        for only in ["queue", "queue,shipments"] {
+            let routes = tagged_watch();
+            let graphql = routes
+                .iter()
+                .find(|(route, _)| route == GRAPHQL)
+                .unwrap()
+                .1
+                .clone();
+            let (client, fake) = github::fake::client(routes);
+            let variables = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = std::sync::Arc::clone(&variables);
+            fake.set_graphql_responder(move |body| {
+                seen.lock().unwrap().push(body["variables"].clone());
+                graphql.clone()
+            });
+
+            let outcome = fetch(
+                &Cli::try_parse_from(["prowl", "--only", only]).unwrap(),
+                &client,
+                &Repo::parse("o/r").unwrap(),
+                "me",
+                &mut Some("main".to_string()),
+                true,
+                true,
+            );
+
+            assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+            assert!(outcome.sections.queue.is_some());
+            assert!(outcome.sections.reviews.is_some());
+            assert!(outcome.sections.reviewed_merged.is_some());
+            assert!(outcome.sections.prs.is_none());
+            assert!(outcome.sections.merged.is_none());
+            let variables = variables.lock().unwrap();
+            assert_eq!(variables.len(), 1, "{only}");
+            assert_eq!(variables[0]["includeMine"], false);
+            assert_eq!(variables[0]["includeMineMerged"], false);
+            assert_eq!(variables[0]["includeQueue"], true);
+            assert_eq!(variables[0]["includeDefaultBranchRef"], true);
+            assert!(variables[0].get("requested").is_some());
+        }
+    }
+
+    #[test]
+    fn combined_watch_with_only_queue_scopes_errors_to_their_sections() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "queue"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let routes = tagged_watch();
+        let (_, body) = routes.iter().find(|(route, _)| route == GRAPHQL).unwrap();
+        let mut response: serde_json::Value = serde_json::from_str(body).unwrap();
+        response["errors"] = serde_json::json!([{
+            "message": "Queue field failed",
+            "path": ["repository", "mergeQueue"]
+        }]);
+        response["data"]["repository"]["mergeQueue"] = serde_json::Value::Null;
+        let (client, fake) = github::fake::client(routes);
+        fake.set_response_on_call(GRAPHQL, 1, 200, &[], &response.to_string());
+
+        let outcome = fetch(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            true,
+        );
+
+        assert_eq!(outcome.issues.len(), 1);
+        assert_eq!(outcome.issues[0].scope, FetchScope::Queue);
+        assert!(outcome.sections.queue.is_none());
+        assert!(outcome.sections.reviews.is_some());
+        assert!(outcome.sections.reviewed_merged.is_some());
+        assert_eq!(
+            fake.requests()
+                .iter()
+                .filter(|request| request.as_str() == GRAPHQL)
+                .count(),
+            1
+        );
+
+        let (client, fake) = github::fake::client(tagged_watch());
+        fake.set_response_on_call(GRAPHQL, 1, 502, &[], "bad gateway");
+        let outcome = fetch(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            true,
+        );
+
+        let mut scopes: Vec<_> = outcome.issues.iter().map(|issue| issue.scope).collect();
+        scopes.sort_by_key(|scope| format!("{scope:?}"));
+        assert_eq!(
+            scopes,
+            [
+                FetchScope::Queue,
+                FetchScope::ReviewedMerged,
+                FetchScope::Reviews
+            ]
+        );
         assert_eq!(
             fake.requests()
                 .iter()
