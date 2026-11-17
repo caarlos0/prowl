@@ -465,7 +465,9 @@ still performs all teardown through `finish`.
 - **Queue dedup:** a PR of mine that's in the merge queue is shown only in the
   Merge Queue section, not the open-PRs list (`prs::without_queued`, applied at
   layout time only while the queue section is enabled, so `--only mine` still
-  lists it).
+  lists it). It drops only PR numbers present in the displayed queue rows, so
+  rendering and `nav` agree; a PR with a `mergeQueueEntry` that a stale or
+  missing queue lacks stays in My PRs and selectable.
 - **Drafts:** `--no-draft` hides draft PRs from both the Mine open-PRs list and
   the Reviews list (`prs::without_drafts` / `reviews::without_drafts`). It also
   adds `draft:false` to the Mine open search (`model::mine_search`), so drafts

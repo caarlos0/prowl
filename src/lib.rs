@@ -1224,18 +1224,17 @@ fn paint_mine(
     top: u16,
     row_positions: &mut Vec<u16>,
 ) -> (u16, Option<u16>, bool) {
+    let queue_rows = sections.queue.as_deref().filter(|_| visible.queue);
     let prs_rows = sections.prs.as_deref().filter(|_| visible.prs).map(|rows| {
-        if visible.queue {
-            Cow::Owned(prs::without_queued(rows.to_vec()))
-        } else {
-            Cow::Borrowed(rows)
+        match queue_rows.filter(|queue| !queue.is_empty()) {
+            Some(queue) => Cow::Owned(prs::without_queued(rows.to_vec(), queue)),
+            None => Cow::Borrowed(rows),
         }
     });
     let prs_table = prs_rows
         .as_deref()
         .filter(|r| !r.is_empty())
         .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, show_branch));
-    let queue_rows = sections.queue.as_deref().filter(|_| visible.queue);
     let queue_table = queue_rows
         .filter(|r| !r.is_empty())
         .map(|rows| queue::to_table(rows, ascii, show_branch));
@@ -4408,7 +4407,7 @@ mod tests {
     fn short_terminals_keep_every_section_available_for_scrolling() {
         let sections = Sections {
             prs: Some(
-                (1..=30)
+                (101..=130)
                     .map(|n| {
                         let mut row = queued_open_row(n);
                         row.queue = None;
@@ -7627,5 +7626,48 @@ mod tests {
             issues = merged.issues;
             last = Some(merged.sections);
         }
+    }
+
+    #[test]
+    fn enqueued_pr_stays_visible_while_the_queue_is_stale() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        let due = Due {
+            mine: true,
+            reviews: false,
+            shipments: false,
+        };
+        let first = fetch_scheduled(&cli, &client, &repo, "me", &mut None, due);
+        assert!(first.issues.is_empty(), "{:?}", first.issues);
+        let first = first.merge(None, Vec::new(), due);
+
+        let mut body: serde_json::Value =
+            serde_json::from_str(&with_errors(&[3], queue_error())).unwrap();
+        body["data"]["search"]["nodes"][0]["mergeQueueEntry"] =
+            serde_json::json!({ "position": 1, "state": "QUEUED" });
+        fake.set_response(GRAPHQL, 200, &[], &body.to_string());
+        let second = fetch_scheduled(&cli, &client, &repo, "me", &mut None, due).merge(
+            Some(first.sections),
+            first.issues,
+            due,
+        );
+        assert_eq!(
+            second.status(),
+            "error: Merge Queue stale: GraphQL error: queue boom"
+        );
+
+        let shown = render_to_string(
+            &second.sections,
+            &ui(View::Mine),
+            &Changes::default(),
+            None,
+            true,
+            Profile::Disabled,
+        );
+        assert!(shown.contains("My open PRs (1)"), "{shown}");
+        let visible = Visibility::all(&second.sections);
+        let targets = nav::targets_visible(View::Mine, &second.sections, "", visible);
+        assert!(targets.iter().any(|target| target.number == Some(3)));
     }
 }
