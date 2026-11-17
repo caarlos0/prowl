@@ -122,13 +122,6 @@ fn is_rate_limited(error: &anyhow::Error) -> bool {
         .contains("rate limit")
 }
 
-fn capped_release(tag: &Tag) -> FetchError {
-    FetchError::Release {
-        tag: tag.name.clone(),
-        error: anyhow::anyhow!("commit range was capped; release mapping may be incomplete"),
-    }
-}
-
 impl CommitStats {
     pub fn unavailable() -> CommitStats {
         CommitStats {
@@ -310,7 +303,7 @@ fn range_mine(
 
 /// Build the release map for the displayed merged PRs, stopping when all of
 /// them are mapped. An unmapped PR can still be unreleased, so it requires the
-/// full scan; a failed or capped range makes unmapped PRs unknown.
+/// full scan; an incomplete range makes unmapped PRs unknown.
 pub(crate) fn fetch_release_map(
     client: &Client,
     repo: &Repo,
@@ -347,7 +340,6 @@ pub(crate) fn fetch_release_map(
         };
         if count.capped {
             map.complete = false;
-            errors.push(capped_release(tag));
         }
         let url = format!("{base_url}/releases/tag/{}", tag.name);
         for n in prs {
@@ -451,7 +443,6 @@ pub fn fetch(
         };
         if count.capped {
             map.complete = false;
-            errors.push(capped_release(tag));
         }
         // Newest release first, and ranges are disjoint, so a PR maps to the
         // earliest release that ships it.
@@ -705,11 +696,7 @@ mod tests {
 
         assert!(stats.releases[0].count.unwrap().capped);
         assert!(!map.is_complete());
-        assert_eq!(errors.len(), 1);
-        assert!(matches!(
-            &errors[0],
-            FetchError::Release { tag, .. } if tag == "v4"
-        ));
+        assert!(errors.is_empty());
         assert_eq!(fake.requests().len(), 6);
     }
 
@@ -728,11 +715,7 @@ mod tests {
 
         assert!(!map.is_complete());
         assert!(map.get(&99).is_none());
-        assert_eq!(errors.len(), 1);
-        assert!(matches!(
-            &errors[0],
-            FetchError::Release { tag, .. } if tag == "v4"
-        ));
+        assert!(errors.is_empty());
         assert_eq!(fake.requests().len(), 5);
     }
 
