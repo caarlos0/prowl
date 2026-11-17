@@ -1035,6 +1035,7 @@ fn fetch_mine_reviews_sections(
             requested_qualifier: cli.review_scope.qualifier(),
             since: &since,
             merged_limit: cli.merged_limit,
+            no_draft: cli.no_draft,
             include_queue: cli.show_queue(),
             include_mine_merged: cli.show_merged(),
         },
@@ -5192,6 +5193,67 @@ mod tests {
         assert_eq!(filtered_client_side, ready);
         assert_eq!(requests, 2);
         assert_eq!(ignored_requests, 3);
+        assert!(
+            searches.iter().all(|q| q.contains(" draft:false ")),
+            "{searches:?}"
+        );
+
+        let (combined, combined_requests, combined_searches) =
+            run(&["prowl", "--only", "mine,queue", "--no-draft"], true);
+        assert_eq!(combined, ready);
+        assert_eq!(combined_requests, requests);
+        assert_eq!(combined_searches.len(), searches.len());
+        assert!(
+            combined_searches
+                .iter()
+                .all(|q| q.contains(" draft:false ")),
+            "{combined_searches:?}"
+        );
+    }
+
+    #[test]
+    fn no_draft_keeps_draft_filter_in_combined_watch_pages() {
+        const DRAFTS: &[i64] = &[2, 5, 8, 11];
+        let cli = Cli::try_parse_from(["prowl", "--no-draft"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let searches = std::sync::Arc::default();
+        let (client, fake) = github::fake::client([]);
+        let mine = mine_server(DRAFTS, true, std::sync::Arc::clone(&searches));
+        fake.set_graphql_responder(move |body| {
+            let mut response: serde_json::Value = serde_json::from_str(&mine(body)).unwrap();
+            if body["variables"].get("requested").is_some() {
+                response["data"]["requested"] = serde_json::json!({ "nodes": [] });
+                response["data"]["reviewed"] = serde_json::json!({ "nodes": [] });
+                response["data"]["reviewedMerged"] = serde_json::json!({ "nodes": [] });
+                response["data"]["mineMerged"] = serde_json::json!({ "nodes": [] });
+            }
+            response.to_string()
+        });
+
+        let outcome = fetch_scheduled(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut None,
+            Due {
+                mine: true,
+                reviews: true,
+                shipments: false,
+            },
+        );
+
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        let numbers: Vec<_> = outcome
+            .sections
+            .prs
+            .unwrap()
+            .iter()
+            .map(|row| row.number)
+            .collect();
+        assert_eq!(numbers, [12, 10, 9, 7, 6, 4, 3, 1]);
+        let searches = searches.lock().unwrap();
+        assert_eq!(searches.len(), 2);
         assert!(
             searches.iter().all(|q| q.contains(" draft:false ")),
             "{searches:?}"
