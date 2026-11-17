@@ -7670,4 +7670,45 @@ mod tests {
         let targets = nav::targets_visible(View::Mine, &second.sections, "", visible);
         assert!(targets.iter().any(|target| target.number == Some(3)));
     }
+
+    #[test]
+    fn queue_only_request_fails_like_the_combined_one_on_a_missing_queue() {
+        let repo = Repo::parse("o/r").unwrap();
+        let bodies = [
+            serde_json::json!({
+                "data": { "repository": null },
+                "errors": [{ "type": "NOT_FOUND", "path": ["repository"],
+                    "message": "Could not resolve to a Repository with the name 'o/r'." }]
+            }),
+            serde_json::json!({
+                "data": { "repository": { "mergeQueue": null } },
+                "errors": [{ "type": "FORBIDDEN", "path": ["repository", "mergeQueue"],
+                    "message": "queue boom" }]
+            }),
+        ];
+        for body in bodies {
+            let mut observed = Vec::new();
+            for args in [
+                &["prowl", "--only", "queue"][..],
+                &["prowl", "--only", "mine,queue"][..],
+            ] {
+                let cli = Cli::try_parse_from(args).unwrap();
+                let (client, fake) = github::fake::client([]);
+                fake.set_response(GRAPHQL, 200, &[], &body.to_string());
+                let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+                let queue_issue = outcome
+                    .issues
+                    .iter()
+                    .find(|issue| issue.scope == FetchScope::Queue)
+                    .map(|issue| issue.warning);
+                observed.push((
+                    outcome.has_errors(),
+                    queue_issue,
+                    outcome.sections.queue.is_some(),
+                ));
+            }
+            assert_eq!(observed[0], (true, Some(false), false), "{body}");
+            assert_eq!(observed[0], observed[1], "{body}");
+        }
+    }
 }

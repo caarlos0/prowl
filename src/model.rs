@@ -290,6 +290,13 @@ pub(crate) fn fetch_queue_with_context_memo(
             .or_default()
             .extend(errors.iter().cloned());
     }
+    let queue_missing = data
+        .repository
+        .as_ref()
+        .is_none_or(|repository| repository.merge_queue.is_none());
+    if queue_missing && let Some(error) = mine_queue_graphql_error(&errors, true) {
+        return Err(error);
+    }
     let eta = queue_next_eta(&data);
     let mut nodes = queue_nodes(data);
     let rule_data_trusted = errors.is_empty();

@@ -542,6 +542,10 @@ still performs all teardown through `finish`.
   GraphQL responses with usable data and errors keep their rows and show a
   `partial data` warning in the affected section and status line. Warnings do
   not replace the section with stale data or change bell and unread tracking.
+  A null `repository` or `mergeQueue` with an error at `[repository]`,
+  `[repository, mergeQueue]` or no path is a failed Merge Queue section, in the
+  queue-only request and the combined one alike, so `--once --only queue` exits
+  non-zero and watch keeps the retained rows.
   One-shot output succeeds with warnings and exits with an error only when a
   section failed. If a section first becomes available after a cold failure, it
   seeds change detection without reporting historical merges as new.
