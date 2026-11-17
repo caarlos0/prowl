@@ -5374,12 +5374,11 @@ mod tests {
     #[test]
     fn capped_release_range_is_successful_across_watch_refreshes_and_once() {
         const CAPPED: &str = r#"{"total_commits":300,"commits":[{"author":{"login":"me"},"commit":{"message":"feat: two (#2)"}}]}"#;
-        const REQUESTS: [&str; 7] = [
+        const REQUESTS: [&str; 6] = [
             RELEASES,
             "GET /repos/o/r/compare/v2...main",
             "GET /repos/o/r/compare/v1...v2",
             "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
-            GRAPHQL,
             GRAPHQL,
             GRAPHQL,
         ];
