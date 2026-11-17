@@ -327,11 +327,6 @@ pub fn table_required_width(
 
 /// Whether a wider surface would reveal a hidden column or more text in TITLE
 /// or BRANCH.
-pub fn table_is_compact(s: &impl TextSurface, table: &Table) -> bool {
-    let alignment = table_alignment(s, &[table]);
-    table_is_compact_aligned(s, table, &alignment)
-}
-
 pub fn table_is_compact_aligned(
     s: &impl TextSurface,
     table: &Table,
