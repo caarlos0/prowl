@@ -127,10 +127,16 @@ fn when_visible<T>(rows: Option<&[T]>, visible: bool) -> Option<&[T]> {
     rows.filter(|_| visible)
 }
 
-fn prs_group<'a>(rows: Option<&'a [PrRow]>, query: &str, queue_visible: bool) -> Vec<Target<'a>> {
+fn prs_group<'a>(
+    rows: Option<&'a [PrRow]>,
+    query: &str,
+    queue: Option<&[QueueRow]>,
+) -> Vec<Target<'a>> {
     rows.map_or_else(Vec::new, |rows| {
         rows.iter()
-            .filter(|row| !queue_visible || row.queue.is_none())
+            .filter(|row| {
+                !queue.is_some_and(|queue| queue.iter().any(|entry| entry.number == row.number))
+            })
             .filter(|row| hit(&row.haystack(), query))
             .map(Searchable::target)
             .collect()
@@ -185,7 +191,7 @@ fn groups<'a>(
             prs_group(
                 when_visible(s.prs.as_deref(), visible.prs),
                 &q,
-                visible.queue,
+                when_visible(s.queue.as_deref(), visible.queue),
             ),
             group(when_visible(s.queue.as_deref(), visible.queue), &q),
             group(when_visible(s.merged.as_deref(), visible.merged), &q),
@@ -637,6 +643,20 @@ mod tests {
             target_index(View::Mine, &s, "", visible, &selected),
             Some(0),
             "the same PR should move with its URL, not retain its old index"
+        );
+    }
+
+    #[test]
+    fn enqueued_pr_missing_from_the_queue_stays_navigable() {
+        let mut enqueued = pr(3);
+        enqueued.queue = Some((1, "QUEUED".into()));
+        let mut s = empty();
+        s.prs = Some(vec![enqueued, pr(1)]);
+        s.queue = Some(vec![queued(1)]);
+
+        assert_eq!(
+            urls(targets_visible(View::Mine, &s, "", Visibility::all(&s))),
+            vec!["https://pr/3", "https://q/1"]
         );
     }
 

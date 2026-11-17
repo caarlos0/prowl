@@ -480,7 +480,9 @@ impl Schedule {
 
     /// Record a completed refresh of the `due` views. A view with a failed
     /// section keeps its previous time, so the next refresh retries it. A
-    /// partial-data warning still delivered data, so it counts as fetched.
+    /// partial-data warning still delivered data, so it counts as fetched. The
+    /// shipment scan is REST and tracked separately, so its failure does not
+    /// age the Mine view.
     fn record(
         &mut self,
         due: Due,
@@ -494,14 +496,19 @@ impl Schedule {
             at,
         });
         let succeeded = |view| {
-            due.includes(view) && !issues.iter().any(|i| !i.warning && i.scope.view() == view)
+            due.includes(view)
+                && !issues
+                    .iter()
+                    .any(|i| !i.warning && i.scope.view() == view && !i.scope.is_shipment_scan())
         };
         if due.mine && mine_data_updated {
             self.mine_data = fetched;
         }
+        if due.mine {
+            self.mine_refreshes += 1;
+        }
         if succeeded(View::Mine) {
             self.mine = fetched;
-            self.mine_refreshes += 1;
         }
         if succeeded(View::Reviews) {
             self.reviews = fetched;
@@ -535,6 +542,36 @@ impl Schedule {
         }
         Some(updated_note(shipments.at, now))
     }
+}
+
+/// Which tracker baselines (open PRs, merged PRs) a refresh has replaced with
+/// trusted live data. Each baseline arms its own part of the bell.
+#[derive(Debug, Default, Clone, Copy)]
+struct Armed {
+    open: bool,
+    merged: bool,
+}
+
+/// Diff a refresh against the tracker baseline. The bool says whether the
+/// bell should ring: a change rings only once its baseline is armed, and a
+/// baseline is armed only by a refresh that replaced it with trusted live
+/// data, so changes made while prowl was closed never ring.
+fn track_changes(
+    prev: &mut Option<Tracker>,
+    armed: &mut Armed,
+    sections: &Sections,
+    issues: &[FetchIssue],
+) -> (Changes, bool) {
+    let open_issue = issues.iter().any(|issue| issue.scope == FetchScope::Mine);
+    let merged_issue = issues.iter().any(|issue| issue.scope == FetchScope::Merged);
+    let mut tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
+    tracker.preserve_untrusted(prev.as_ref(), open_issue, merged_issue);
+    let changes = Tracker::advance(prev, tracker);
+    let ring = (armed.open && !changes.status_changed.is_empty())
+        || (armed.merged && !changes.newly_merged.is_empty());
+    armed.open |= !open_issue;
+    armed.merged |= !merged_issue;
+    (changes, ring)
 }
 
 fn retain<T>(fresh: &mut Option<T>, previous: &mut Option<T>, issue: &mut FetchIssue) {
@@ -671,15 +708,19 @@ fn fetch_scheduled(
     default_branch: &mut Option<String>,
     due: Due,
 ) -> FetchOutcome {
-    fetch_scheduled_with_context_memo(cli, client, repo, me, default_branch, due, None)
+    fetch_scheduled_with_context_memo(cli, client, repo, me, default_branch, &mut None, due, None)
 }
 
+/// `unapplied_releases` holds the release map of a shipment scan whose merged
+/// search failed, so the next merged rows use it instead of waiting a scan.
+#[allow(clippy::too_many_arguments)]
 fn fetch_scheduled_with_context_memo(
     cli: &Cli,
     client: &Client,
     repo: &Repo,
     me: &str,
     default_branch: &mut Option<String>,
+    unapplied_releases: &mut Option<commits::ReleaseMap>,
     due: Due,
     required_context_memo: Option<&mut model::RequiredContextMemo>,
 ) -> FetchOutcome {
@@ -728,8 +769,18 @@ fn fetch_scheduled_with_context_memo(
         shipment_scan = true;
         release_map = fetch_merged_release_map(cli, client, repo, me, nodes, &mut issues);
     }
-    let merged =
-        merged_nodes.map(|nodes| merged::build_rows(nodes, cli.merged_limit, &release_map));
+    let merged = if let Some(nodes) = merged_nodes {
+        let unapplied = unapplied_releases.take();
+        if !shipment_scan && let Some(map) = unapplied {
+            release_map = map;
+        }
+        Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
+    } else {
+        if shipment_scan && cli.show_merged() {
+            *unapplied_releases = Some(release_map);
+        }
+        None
+    };
     let commits = if due.mine && due.shipments && cli.show_shipments() {
         commit_stats
     } else {
@@ -1233,18 +1284,17 @@ fn paint_mine(
     top: u16,
     row_positions: &mut Vec<u16>,
 ) -> (u16, Option<u16>, bool) {
+    let queue_rows = sections.queue.as_deref().filter(|_| visible.queue);
     let prs_rows = sections.prs.as_deref().filter(|_| visible.prs).map(|rows| {
-        if visible.queue {
-            Cow::Owned(prs::without_queued(rows.to_vec()))
-        } else {
-            Cow::Borrowed(rows)
+        match queue_rows.filter(|queue| !queue.is_empty()) {
+            Some(queue) => Cow::Owned(prs::without_queued(rows.to_vec(), queue)),
+            None => Cow::Borrowed(rows),
         }
     });
     let prs_table = prs_rows
         .as_deref()
         .filter(|r| !r.is_empty())
         .map(|rows| prs::to_table(rows, ascii, &changes.status_changed, show_branch));
-    let queue_rows = sections.queue.as_deref().filter(|_| visible.queue);
     let queue_table = queue_rows
         .filter(|r| !r.is_empty())
         .map(|rows| queue::to_table(rows, ascii, show_branch));
@@ -2666,6 +2716,7 @@ struct App<'a> {
     repo: &'a Repo,
     me: String,
     default_branch: Option<String>,
+    unapplied_releases: Option<commits::ReleaseMap>,
     required_context_memo: model::RequiredContextMemo,
     /// The constant next-refresh ETA shown in the key-hint footer.
     eta: String,
@@ -2684,9 +2735,9 @@ struct App<'a> {
     schedule: Schedule,
     /// Whether a fetch is in flight, so the footer can say `^R refreshing`.
     refreshing: bool,
-    /// Whether the bell is armed. The first refresh after a cached start is
-    /// silent (it still highlights changes).
-    armed: bool,
+    /// Which baselines arm the bell. Changes in a baseline that no refresh
+    /// has yet replaced with trusted data are silent (they still highlight).
+    armed: Armed,
     /// Whether we've switched from the inline loading frame to the alternate
     /// screen. The watch starts inline and enters the alt screen once the first
     /// fetch lands (or immediately when there's a cache to paint).
@@ -2719,6 +2770,7 @@ impl<'a> App<'a> {
             repo,
             me: String::new(),
             default_branch: None,
+            unapplied_releases: None,
             required_context_memo: model::RequiredContextMemo::default(),
             prev: None,
             last_good: None,
@@ -2736,7 +2788,7 @@ impl<'a> App<'a> {
             fetch_issues: Vec::new(),
             schedule: Schedule::default(),
             refreshing: false,
-            armed: false,
+            armed: Armed::default(),
             in_alt: false,
             cursor_shown: false,
         };
@@ -2882,6 +2934,7 @@ impl<'a> App<'a> {
         let (cli, client, repo) = (self.cli.clone(), self.client.clone(), self.repo.clone());
         let mut me = self.me.clone();
         let mut default_branch = self.default_branch.clone();
+        let mut unapplied_releases = self.unapplied_releases.clone();
         let mut required_context_memo = self.required_context_memo.clone();
         let resolve = me.is_empty();
         let shipments_enabled = cli.show_shipments() || cli.show_merged();
@@ -2899,10 +2952,17 @@ impl<'a> App<'a> {
                     &repo,
                     &me,
                     &mut default_branch,
+                    &mut unapplied_releases,
                     due,
                     Some(&mut required_context_memo),
                 );
-                Ok((me, default_branch, required_context_memo, outcome))
+                Ok((
+                    me,
+                    default_branch,
+                    unapplied_releases,
+                    required_context_memo,
+                    outcome,
+                ))
             })();
             let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
         });
@@ -2912,9 +2972,16 @@ impl<'a> App<'a> {
                 return Ok(Flow::Quit);
             }
             match rx.try_recv() {
-                Ok(Ok((me, default_branch, required_context_memo, outcome))) => {
+                Ok(Ok((
+                    me,
+                    default_branch,
+                    unapplied_releases,
+                    required_context_memo,
+                    outcome,
+                ))) => {
                     self.me = me;
                     self.default_branch = default_branch;
+                    self.unapplied_releases = unapplied_releases;
                     self.required_context_memo = required_context_memo;
                     // Cleared before painting, so the result frame already shows
                     // the plain `^R refresh` hint again.
@@ -3241,14 +3308,7 @@ impl<'a> App<'a> {
         let FetchOutcome {
             sections, issues, ..
         } = outcome;
-        let mut tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
-        tracker.preserve_untrusted(
-            self.prev.as_ref(),
-            issues.iter().any(|issue| issue.scope == FetchScope::Mine),
-            issues.iter().any(|issue| issue.scope == FetchScope::Merged),
-        );
-        let changes = Tracker::advance(&mut self.prev, tracker);
-        let bell = changes.any();
+        let (changes, bell) = track_changes(&mut self.prev, &mut self.armed, &sections, &issues);
         self.unread.extend(changes);
 
         self.last_status.clear();
@@ -3260,10 +3320,9 @@ impl<'a> App<'a> {
         self.enter_alt()?;
         self.redraw()?;
 
-        if self.armed && bell && self.cli.bell && !self.cli.no_bell {
+        if bell && self.cli.bell && !self.cli.no_bell {
             let _ = self.program.beep();
         }
-        self.armed = true;
         if self.fetch_issues.is_empty()
             && !self.cli.no_cache
             && let Some(good) = &self.last_good
@@ -4004,8 +4063,8 @@ mod tests {
             Some("updated 5m ago")
         );
         assert!(
-            !schedule.next(View::Mine, false, true).shipments,
-            "a partial Mine refresh must not advance the successful-refresh cadence"
+            schedule.next(View::Mine, false, true).shipments,
+            "a failed Mine section must not stop the every-second-refresh cadence"
         );
     }
 
@@ -4420,7 +4479,7 @@ mod tests {
     fn short_terminals_keep_every_section_available_for_scrolling() {
         let sections = Sections {
             prs: Some(
-                (1..=30)
+                (101..=130)
                     .map(|n| {
                         let mut row = queued_open_row(n);
                         row.queue = None;
@@ -6915,6 +6974,7 @@ mod tests {
                         &repo,
                         "me",
                         &mut None,
+                        &mut None,
                         Due {
                             mine: true,
                             reviews: want_reviews,
@@ -6980,6 +7040,7 @@ mod tests {
                         &client,
                         &repo,
                         "me",
+                        &mut None,
                         &mut None,
                         Due {
                             mine: expected_posts != 0,
@@ -8218,5 +8279,333 @@ mod tests {
             })
         );
         assert_eq!(stats.releases, []);
+    }
+
+    fn with_errors(numbers: &[i64], errors: serde_json::Value) -> String {
+        let (_, body) = graphql(numbers);
+        let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        value["errors"] = errors;
+        value.to_string()
+    }
+
+    fn queue_error() -> serde_json::Value {
+        serde_json::json!([{ "type": "FORBIDDEN", "message": "queue boom",
+            "path": ["repository", "mergeQueue"] }])
+    }
+
+    fn gets(requests: &[String]) -> usize {
+        requests
+            .iter()
+            .filter(|request| request.starts_with("GET "))
+            .count()
+    }
+
+    #[test]
+    fn failing_queue_does_not_starve_shipment_scan() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let mut per_refresh = Vec::new();
+        for queue_fails in [false, true] {
+            let (client, fake) = github::fake::client(tagged_watch());
+            let mut schedule = Schedule::default();
+            let mut branch = Some("main".to_string());
+            let mut counts = Vec::new();
+            for tick in 1..=7 {
+                if tick >= 2 && queue_fails {
+                    fake.set_response(GRAPHQL, 200, &[], &with_errors(&[3, 2, 1], queue_error()));
+                }
+                let sent = fake.requests().len();
+                let due = schedule.next(View::Mine, false, true);
+                let outcome = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+                assert_eq!(
+                    outcome
+                        .issues
+                        .iter()
+                        .any(|issue| issue.scope == FetchScope::Queue && !issue.warning),
+                    tick >= 2 && queue_fails
+                );
+                schedule.record(
+                    due,
+                    &outcome.issues,
+                    start + chrono::TimeDelta::minutes(5 * tick),
+                    outcome.shipment_scan,
+                    outcome.has_fresh_mine_data(),
+                );
+                counts.push(gets(&fake.requests()[sent..]));
+            }
+            per_refresh.push(counts);
+        }
+        assert_eq!(per_refresh[0], [4, 0, 4, 0, 4, 0, 4]);
+        assert_eq!(per_refresh[1], per_refresh[0]);
+    }
+
+    #[test]
+    fn shipment_only_failure_keeps_fresh_mine_view_current() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        let mut schedule = Schedule::default();
+        let mut branch = Some("main".to_string());
+        let mut last = None;
+        let mut issues = Vec::new();
+        for tick in 1..=3 {
+            if tick == 3 {
+                fake.set_response(RELEASES, 500, &[], r#"{"message":"rest down"}"#);
+                fake.set_response(GRAPHQL, 200, &[], &graphql(&[1]).1);
+            }
+            let due = schedule.next(View::Mine, false, true);
+            let outcome = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+            let now = start + chrono::TimeDelta::minutes(5 * tick);
+            schedule.record(
+                due,
+                &outcome.issues,
+                now,
+                outcome.shipment_scan,
+                outcome.has_fresh_mine_data(),
+            );
+            let merged = outcome.merge(last.take(), std::mem::take(&mut issues), due);
+            if tick == 3 {
+                assert!(due.mine && due.reviews && due.shipments, "{due:?}");
+                let prs: Vec<_> = merged
+                    .sections
+                    .prs
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row.number)
+                    .collect();
+                assert_eq!(prs, [1]);
+                assert!(merged.issues.iter().all(|i| i.scope.is_shipment_scan()));
+                assert!(!merged.issues.is_empty());
+                assert_eq!(schedule.mine.map(|fetched| fetched.refresh), Some(3));
+                assert_eq!(schedule.age_note(View::Mine, now), None);
+                assert_eq!(
+                    schedule.shipments_age_note(now).as_deref(),
+                    Some("updated 10m ago")
+                );
+            }
+            issues = merged.issues;
+            last = Some(merged.sections);
+        }
+    }
+
+    #[test]
+    fn enqueued_pr_stays_visible_while_the_queue_is_stale() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine,queue"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        let due = Due {
+            mine: true,
+            reviews: false,
+            shipments: false,
+        };
+        let first = fetch_scheduled(&cli, &client, &repo, "me", &mut None, due);
+        assert!(first.issues.is_empty(), "{:?}", first.issues);
+        let first = first.merge(None, Vec::new(), due);
+
+        let mut body: serde_json::Value =
+            serde_json::from_str(&with_errors(&[3], queue_error())).unwrap();
+        body["data"]["search"]["nodes"][0]["mergeQueueEntry"] =
+            serde_json::json!({ "position": 1, "state": "QUEUED" });
+        fake.set_response(GRAPHQL, 200, &[], &body.to_string());
+        let second = fetch_scheduled(&cli, &client, &repo, "me", &mut None, due).merge(
+            Some(first.sections),
+            first.issues,
+            due,
+        );
+        assert_eq!(
+            second.status(),
+            "error: Merge Queue stale: GraphQL error: queue boom"
+        );
+
+        let shown = render_to_string(
+            &second.sections,
+            &ui(View::Mine),
+            &Changes::default(),
+            None,
+            true,
+            Profile::Disabled,
+        );
+        assert!(shown.contains("My open PRs (1)"), "{shown}");
+        let visible = Visibility::all(&second.sections);
+        let targets = nav::targets_visible(View::Mine, &second.sections, "", visible);
+        assert!(targets.iter().any(|target| target.number == Some(3)));
+    }
+
+    #[test]
+    fn queue_only_request_fails_like_the_combined_one_on_a_missing_queue() {
+        let repo = Repo::parse("o/r").unwrap();
+        let bodies = [
+            serde_json::json!({
+                "data": { "repository": null },
+                "errors": [{ "type": "NOT_FOUND", "path": ["repository"],
+                    "message": "Could not resolve to a Repository with the name 'o/r'." }]
+            }),
+            serde_json::json!({
+                "data": { "repository": { "mergeQueue": null } },
+                "errors": [{ "type": "FORBIDDEN", "path": ["repository", "mergeQueue"],
+                    "message": "queue boom" }]
+            }),
+        ];
+        for body in bodies {
+            let mut observed = Vec::new();
+            for args in [
+                &["prowl", "--only", "queue"][..],
+                &["prowl", "--only", "mine,queue"][..],
+            ] {
+                let cli = Cli::try_parse_from(args).unwrap();
+                let (client, fake) = github::fake::client([]);
+                fake.set_response(GRAPHQL, 200, &[], &body.to_string());
+                let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+                let queue_issue = outcome
+                    .issues
+                    .iter()
+                    .find(|issue| issue.scope == FetchScope::Queue)
+                    .map(|issue| issue.warning);
+                observed.push((
+                    outcome.has_errors(),
+                    queue_issue,
+                    outcome.sections.queue.is_some(),
+                ));
+            }
+            assert_eq!(observed[0], (true, Some(false), false), "{body}");
+            assert_eq!(observed[0], observed[1], "{body}");
+        }
+    }
+
+    #[test]
+    fn cached_start_stays_silent_for_offline_changes_after_a_partial_refresh() {
+        let sections = |status| {
+            let mut row = queued_open_row(1);
+            row.queue = None;
+            row.status = Some(status);
+            Sections {
+                prs: Some(vec![row]),
+                merged: Some(Vec::new()),
+                ..Sections::EMPTY
+            }
+        };
+        let cached = sections(status::Status::Pending);
+        let mut prev = Some(Tracker::build(
+            cached.prs.as_deref(),
+            cached.merged.as_deref(),
+        ));
+        let mut armed = Armed::default();
+        let warning = FetchIssue::partial(
+            FetchScope::Mine,
+            &[
+                serde_json::from_value::<github::GqlError>(serde_json::json!({
+                    "message": "reviewThreads timeout",
+                    "path": ["search", "nodes", 0, "reviewThreads"],
+                }))
+                .unwrap(),
+            ],
+        );
+
+        let passing = sections(status::Status::Pass);
+        let (_, first) = track_changes(&mut prev, &mut armed, &passing, &[warning]);
+        let (changes, second) = track_changes(&mut prev, &mut armed, &passing, &[]);
+        assert!(!first && !second);
+        assert!(changes.any(), "the offline change is still flagged unread");
+        assert!(armed.open && armed.merged, "{armed:?}");
+
+        let failing = sections(status::Status::Fail);
+        let (_, ring) = track_changes(&mut prev, &mut armed, &failing, &[]);
+        assert!(ring, "a later real change still rings");
+    }
+
+    #[test]
+    fn repeated_merged_warning_does_not_silence_open_pr_bell() {
+        let sections = |status| {
+            let mut row = queued_open_row(1);
+            row.queue = None;
+            row.status = Some(status);
+            Sections {
+                prs: Some(vec![row]),
+                merged: Some(Vec::new()),
+                ..Sections::EMPTY
+            }
+        };
+        let warning = || {
+            FetchIssue::partial(
+                FetchScope::Merged,
+                &[
+                    serde_json::from_value::<github::GqlError>(serde_json::json!({
+                        "message": "search timeout",
+                        "path": ["mineMerged"],
+                    }))
+                    .unwrap(),
+                ],
+            )
+        };
+        let mut prev = None;
+        let mut armed = Armed::default();
+
+        let pending = sections(status::Status::Pending);
+        let (_, first) = track_changes(&mut prev, &mut armed, &pending, &[warning()]);
+        let passing = sections(status::Status::Pass);
+        let (changes, second) = track_changes(&mut prev, &mut armed, &passing, &[warning()]);
+        assert!(!first, "the first refresh is silent");
+        assert_eq!(changes.status_changed, HashSet::from([1]));
+        assert!(second, "open PR change rings: {armed:?}");
+        assert!(!armed.merged, "merged baseline stays unarmed");
+    }
+
+    #[test]
+    fn failed_merged_search_keeps_the_scan_release_map_for_the_next_rows() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        let mut failed: serde_json::Value = serde_json::from_str(&graphql(&[3, 2, 1]).1).unwrap();
+        failed["data"]["mineMerged"] = serde_json::Value::Null;
+        failed["errors"] =
+            serde_json::json!([{ "message": "merged boom", "path": ["mineMerged"] }]);
+        fake.set_response(GRAPHQL, 200, &[], &failed.to_string());
+        let mut schedule = Schedule::default();
+        let mut branch = Some("main".to_string());
+        let mut releases = None;
+        let mut last = None;
+        let mut issues = Vec::new();
+        for (tick, scan) in [(1, true), (2, false)] {
+            if tick == 2 {
+                fake.set_response(GRAPHQL, 200, &[], &graphql(&[3, 2, 1]).1);
+            }
+            let sent = fake.requests().len();
+            let due = schedule.next(View::Mine, false, true);
+            assert_eq!(due.shipments, scan, "refresh {tick}");
+            let out = fetch_scheduled_with_context_memo(
+                &cli,
+                &client,
+                &repo,
+                "me",
+                &mut branch,
+                &mut releases,
+                due,
+                None,
+            );
+            assert_eq!(gets(&fake.requests()[sent..]) > 0, scan, "refresh {tick}");
+            schedule.record(
+                due,
+                &out.issues,
+                chrono::Utc::now(),
+                out.shipment_scan,
+                out.has_fresh_mine_data(),
+            );
+            let out = out.merge(last.take(), std::mem::take(&mut issues), due);
+            issues = out.issues;
+            last = Some(out.sections);
+        }
+        let rows = last.unwrap().merged.unwrap();
+        let cells: Vec<_> = merged::to_table(&rows, true, &HashSet::new(), false)
+            .rows
+            .iter()
+            .map(|r| (r[2].text.clone(), r[4].text.clone()))
+            .collect();
+        let expected = [("#3", "\u{2014}"), ("#2", "v2"), ("#1", "v1")]
+            .map(|(pr, release)| (pr.to_string(), release.to_string()));
+        assert_eq!(cells, expected);
+        assert!(releases.is_none());
     }
 }

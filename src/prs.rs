@@ -8,6 +8,7 @@
 
 use crate::cli::OpenSort;
 use crate::model::PrNode;
+use crate::queue::QueueRow;
 use crate::render::{self, Cell, Table};
 use crate::status::{self, Approval, BLUE, Checks, Lamp, PEACH, RED, Status};
 use std::collections::HashSet;
@@ -80,12 +81,13 @@ pub(crate) fn sort_rows(rows: &mut [PrRow], sort: OpenSort) {
     });
 }
 
-/// Drop PRs that are in the merge queue: they're shown in the Merge Queue
-/// section, so listing them here too would be redundant. Kept separate from
+/// Drop PRs shown in the Merge Queue section: listing them here too would be
+/// redundant. Matching the displayed queue rows, not `PrRow::queue`, keeps a PR
+/// that is enqueued but missing from a stale queue visible. Kept separate from
 /// `build_rows` so the caller can skip it when the queue section is hidden (and
 /// the PR would otherwise vanish entirely).
-pub fn without_queued(mut rows: Vec<PrRow>) -> Vec<PrRow> {
-    rows.retain(|r| r.queue.is_none());
+pub fn without_queued(mut rows: Vec<PrRow>, queue: &[QueueRow]) -> Vec<PrRow> {
+    rows.retain(|r| !queue.iter().any(|entry| entry.number == r.number));
     rows
 }
 
@@ -430,16 +432,36 @@ mod tests {
     }
 
     #[test]
-    fn without_queued_drops_prs_in_the_merge_queue() {
-        let mut queued = pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
-        queued.merge_queue_entry = Some(QueueEntry {
+    fn without_queued_drops_only_prs_in_the_displayed_queue() {
+        let entry = |number| QueueRow {
             position: 1,
+            number,
+            author: "me".into(),
+            title: String::new(),
+            branch: String::new(),
+            url: String::new(),
+            mine: true,
+            enqueued_at: None,
+            build_started_at: None,
+            checks: Checks::default(),
+            missing_required_checks: 0,
+        };
+        let mut enqueued = pr(3, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
+        enqueued.merge_queue_entry = Some(QueueEntry {
+            position: 2,
             state: "QUEUED".to_string(),
         });
-        let open = pr(2, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]);
-        // #1 is queued, #2 isn't — only #2 remains in the open-PRs list.
-        let rows = without_queued(build_rows(vec![queued, open], OpenSort::Updated));
-        assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [2]);
+        let rows = build_rows(
+            vec![
+                enqueued,
+                pr(2, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]),
+                pr(1, "MERGEABLE", "CLEAN", &[("SUCCESS", 1)]),
+            ],
+            OpenSort::Updated,
+        );
+        // #1 is in the displayed queue; #3 has a queue entry the stale queue lacks.
+        let rows = without_queued(rows, &[entry(1)]);
+        assert_eq!(rows.iter().map(|r| r.number).collect::<Vec<_>>(), [3, 2]);
     }
 
     #[test]
