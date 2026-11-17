@@ -5128,6 +5128,71 @@ mod tests {
     }
 
     #[test]
+    fn capped_release_range_is_successful_across_watch_refreshes_and_once() {
+        const CAPPED: &str = r#"{"total_commits":300,"commits":[{"author":{"login":"me"},"commit":{"message":"feat: two (#2)"}}]}"#;
+        const REQUESTS: [&str; 7] = [
+            RELEASES,
+            "GET /repos/o/r/compare/v2...main",
+            "GET /repos/o/r/compare/v1...v2",
+            "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+            GRAPHQL,
+            GRAPHQL,
+            GRAPHQL,
+        ];
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        fake.set_response("GET /repos/o/r/compare/v1...v2", 200, &[], CAPPED);
+        let mut branch = Some("main".to_string());
+
+        for _ in 0..2 {
+            let outcome = fetch(&cli, &client, &repo, "me", &mut branch, true, true);
+
+            assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+            assert!(!outcome.has_errors());
+            let stats = outcome.sections.commits.as_ref().unwrap();
+            assert_eq!(
+                stats.releases[0].count,
+                Some(commits::Count {
+                    mine: 1,
+                    capped: true,
+                })
+            );
+            assert_eq!(
+                shipped(&outcome.sections),
+                [(3, None), (2, Some("v2".into())), (1, Some("v1".into()))]
+            );
+            let rows = outcome.sections.merged.as_ref().unwrap();
+            assert!(rows[0].release_unknown);
+            let table = merged::to_table(rows, true, &HashSet::new(), false);
+            assert_eq!(table.rows[0][4].text, "?");
+        }
+
+        assert_eq!(
+            fake.requests(),
+            REQUESTS
+                .into_iter()
+                .chain(REQUESTS)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+
+        let (client, fake) = github::fake::client(tagged_watch());
+        fake.set_response("GET /repos/o/r/compare/v1...v2", 200, &[], CAPPED);
+        let outcome = fetch(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut Some("main".to_string()),
+            true,
+            false,
+        );
+        assert!(outcome.issues.is_empty(), "{:?}", outcome.issues);
+        assert!(!outcome.has_errors());
+    }
+
+    #[test]
     fn hidden_release_range_failure_keeps_known_annotations_and_marks_unknown_rows() {
         let cli = Cli::try_parse_from(["prowl", "--only", "merged"]).unwrap();
         let repo = Repo::parse("o/r").unwrap();
