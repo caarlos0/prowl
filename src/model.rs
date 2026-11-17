@@ -335,7 +335,7 @@ fn apply_queue_required(
 // My open PRs
 // ----------------------------------------------------------------------------
 
-pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeDefaultBranchRef: Boolean!, $includeQueue: Boolean!) {
+pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeDefaultBranchRef: Boolean!, $includeQueue: Boolean!, $includeMine: Boolean!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef @include(if: $includeDefaultBranchRef) {
       id
@@ -373,7 +373,7 @@ pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: Strin
       }
     }
   }
-  search(type: ISSUE, first: 5, after: $after, query: $q) {
+  search(type: ISSUE, first: 5, after: $after, query: $q) @include(if: $includeMine) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
@@ -390,11 +390,15 @@ pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: Strin
       }
     }
   }
+  mineMerged: search(type: ISSUE, first: $mergedLimit, query: $mineMerged) @include(if: $includeMineMerged) { nodes { ...merged } }
+}
+fragment merged on PullRequest {
+  number title url headRefName mergedAt author { login }
 }"#;
 
-const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeQueue: Boolean!, $me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
+const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeDefaultBranchRef: Boolean!, $includeQueue: Boolean!, $includeMine: Boolean!, $me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
   repository(owner: $owner, name: $name) {
-    defaultBranchRef {
+    defaultBranchRef @include(if: $includeDefaultBranchRef) {
       id
       refUpdateRule { requiredStatusCheckContexts }
       rules(first: 100) {
@@ -430,7 +434,7 @@ const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!,
       }
     }
   }
-  search(type: ISSUE, first: 5, after: $after, query: $q) {
+  search(type: ISSUE, first: 5, after: $after, query: $q) @include(if: $includeMine) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
@@ -740,6 +744,10 @@ pub(crate) fn fetch_my_prs_with_context_memo(
             "after": null,
             "includeDefaultBranchRef": include_default_branch_ref,
             "includeQueue": false,
+            "includeMine": true,
+            "mineMerged": "",
+            "mergedLimit": 1,
+            "includeMineMerged": false,
         }),
     )?;
     if include_default_branch_ref {
@@ -775,28 +783,47 @@ pub(crate) fn fetch_my_prs_with_context_memo(
     )
 }
 
-pub(crate) struct MineQueueResults {
-    pub mine: Result<GraphqlData<Vec<PrNode>>>,
-    pub queue: Result<GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>>,
+pub(crate) struct MineSectionResults {
+    pub mine: Option<Result<GraphqlData<Vec<PrNode>>>>,
+    pub queue: Option<Result<QueueSectionData>>,
+    pub merged: Option<Result<GraphqlData<Vec<MergedNode>>>>,
+}
+
+pub(crate) type QueueSectionData = GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>;
+
+pub(crate) struct MineSectionRequest<'a> {
+    pub sort: OpenSort,
+    pub no_draft: bool,
+    pub required_only: bool,
+    pub include_mine: bool,
+    pub include_queue: bool,
+    pub merged: Option<(&'a str, usize)>,
 }
 
 struct MineQueueOptions<'a> {
     q: &'a str,
     required_only: bool,
+    include_mine: bool,
     include_queue: bool,
+    include_merged: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn fetch_mine_and_queue_with_context_memo(
+pub(crate) fn fetch_mine_sections_with_context_memo(
     client: &Client,
     repo: &Repo,
     me: &str,
-    sort: OpenSort,
-    no_draft: bool,
-    required_only: bool,
     context_cache: &mut RequiredContextCache,
+    request: MineSectionRequest<'_>,
     memo: Option<&mut RequiredContextMemo>,
-) -> Result<MineQueueResults> {
+) -> Result<MineSectionResults> {
+    let MineSectionRequest {
+        sort,
+        no_draft,
+        required_only,
+        include_mine,
+        include_queue,
+        merged: merged_search,
+    } = request;
     let q = mine_search(repo, me, sort, no_draft);
     let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
         MINE_QUERY,
@@ -805,23 +832,29 @@ pub(crate) fn fetch_mine_and_queue_with_context_memo(
             "name": repo.name,
             "q": q,
             "after": null,
-            "includeDefaultBranchRef": true,
-            "includeQueue": true,
+            "includeDefaultBranchRef": include_queue || context_cache.default_branch_ref_id.is_none(),
+            "includeQueue": include_queue,
+            "includeMine": include_mine,
+            "mineMerged": merged_search.map_or("", |(query, _)| query),
+            "mergedLimit": merged_search.map_or(1, |(_, limit)| limit.clamp(1, 100)),
+            "includeMineMerged": merged_search.is_some(),
         }),
     )?;
-    parse_mine_queue_response(
+    Ok(parse_mine_queue_response(
         client,
         repo,
         context_cache,
         &data,
-        errors,
+        &errors,
         MineQueueOptions {
             q: &q,
             required_only,
-            include_queue: true,
+            include_mine,
+            include_queue,
+            include_merged: merged_search.is_some(),
         },
         memo,
-    )
+    ))
 }
 
 pub(crate) struct WatchQueryOptions<'a> {
@@ -829,12 +862,13 @@ pub(crate) struct WatchQueryOptions<'a> {
     pub(crate) since: &'a str,
     pub(crate) merged_limit: usize,
     pub(crate) no_draft: bool,
+    pub(crate) include_mine: bool,
     pub(crate) include_queue: bool,
     pub(crate) include_mine_merged: bool,
 }
 
 pub(crate) struct MineReviewsQueueResults {
-    pub(crate) mine_queue: Result<MineQueueResults>,
+    pub(crate) mine: MineSectionResults,
     pub(crate) reviews: ReviewsAndMerged,
 }
 
@@ -858,7 +892,9 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
             "name": repo.name,
             "q": q,
             "after": null,
+            "includeDefaultBranchRef": options.include_mine || options.include_queue,
             "includeQueue": options.include_queue,
+            "includeMine": options.include_mine,
             "me": me,
             "requested": requested,
             "reviewed": reviewed,
@@ -868,52 +904,24 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
             "includeMineMerged": options.include_mine_merged,
         }),
     )?;
-    let mine_errors = errors
-        .iter()
-        .filter(|error| {
-            !matches!(
-                error
-                    .path
-                    .as_ref()
-                    .and_then(|path| path.first())
-                    .and_then(serde_json::Value::as_str),
-                Some("requested" | "reviewed" | "mineMerged" | "reviewedMerged")
-            )
-        })
-        .cloned()
-        .collect();
-    let review_errors = errors
-        .iter()
-        .filter(|error| {
-            !matches!(
-                error
-                    .path
-                    .as_ref()
-                    .and_then(|path| path.first())
-                    .and_then(serde_json::Value::as_str),
-                Some("search" | "repository")
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let mine_queue = parse_mine_queue_response(
+    let mine_errors = alias_errors(&errors, MINE_QUERY_ROOTS, WATCH_QUERY_ROOTS);
+    let mine = parse_mine_queue_response(
         client,
         repo,
         context_cache,
         &data,
-        mine_errors,
+        &mine_errors,
         MineQueueOptions {
             q: &q,
             required_only,
+            include_mine: options.include_mine,
             include_queue: options.include_queue,
+            include_merged: options.include_mine_merged,
         },
         memo,
     );
-    let reviews = parse_reviews_and_merged(&data, &review_errors, options.include_mine_merged);
-    Ok(MineReviewsQueueResults {
-        mine_queue,
-        reviews,
-    })
+    let reviews = parse_reviews_and_merged(&data, &errors, WATCH_QUERY_ROOTS);
+    Ok(MineReviewsQueueResults { mine, reviews })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -922,27 +930,32 @@ fn parse_mine_queue_response(
     repo: &Repo,
     context_cache: &mut RequiredContextCache,
     data: &serde_json::Value,
-    errors: Vec<GqlError>,
+    errors: &[GqlError],
     options: MineQueueOptions<'_>,
     mut memo: Option<&mut RequiredContextMemo>,
-) -> Result<MineQueueResults> {
+) -> MineSectionResults {
     let MineQueueOptions {
         q,
         required_only,
+        include_mine,
         include_queue,
+        include_merged,
     } = options;
-    let mine_error = mine_queue_graphql_error(&errors, false);
-    let queue_error = mine_queue_graphql_error(&errors, true);
+    let mine_error = mine_queue_graphql_error(errors, false);
+    let queue_error = mine_queue_graphql_error(errors, true);
 
+    let merged = include_merged.then(|| merged_alias(data, errors, "mineMerged", MINE_QUERY_ROOTS));
     let repository = data.get("repository").filter(|value| !value.is_null());
     let default_branch_ref = repository
         .and_then(|repository| repository.get("defaultBranchRef"))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let default_branch_ref: Option<DefaultBranchRef> =
-        serde_json::from_value(default_branch_ref).context("parsing default branch rules")?;
-    seed_default_branch_ref(default_branch_ref, context_cache)?;
-    if could_affect_default_branch_rules(&errors)
+    let context_error = serde_json::from_value::<Option<DefaultBranchRef>>(default_branch_ref)
+        .context("parsing default branch rules")
+        .and_then(|branch| seed_default_branch_ref(branch, context_cache))
+        .err()
+        .map(|error| format!("{error:#}"));
+    if could_affect_default_branch_rules(errors)
         && let Some(id) = &context_cache.default_branch_ref_id
     {
         let rule_errors = errors
@@ -957,89 +970,98 @@ fn parse_mine_queue_response(
             .extend(rule_errors);
     }
 
-    let queue = if include_queue {
-        let merge_queue = repository
-            .and_then(|repository| repository.get("mergeQueue"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        match serde_json::from_value::<Option<MergeQueue>>(merge_queue)
-            .context("parsing merge queue")
-        {
-            Ok(Some(merge_queue)) => {
-                let eta = merge_queue.next_entry_estimated_time_to_merge;
-                let mut nodes = merge_queue.entries.nodes;
-                let mut warnings = mine_queue_graphql_warnings(&errors, true);
-                let rule_data_trusted = warnings.is_empty();
-                apply_queue_required(
-                    client,
-                    &mut nodes,
-                    required_only,
-                    context_cache,
-                    memo.as_deref_mut(),
-                    rule_data_trusted,
-                )
-                .map(|required_warnings| {
-                    warnings.extend(required_warnings);
-                    GraphqlData {
-                        data: (nodes, eta),
-                        errors: warnings,
-                    }
-                })
-            }
-            Ok(None) => {
-                if let Some(error) = queue_error {
-                    Err(error)
-                } else {
-                    let mut warnings = mine_queue_graphql_warnings(&errors, true);
-                    let rule_data_trusted = warnings.is_empty();
-                    apply_queue_required(
-                        client,
-                        &mut [],
-                        required_only,
-                        context_cache,
-                        memo.as_deref_mut(),
-                        rule_data_trusted,
-                    )
-                    .map(|required_warnings| {
-                        warnings.extend(required_warnings);
-                        GraphqlData {
-                            data: (Vec::new(), None),
-                            errors: warnings,
-                        }
-                    })
-                }
-            }
-            Err(parse_error) => Err(queue_error.unwrap_or(parse_error)),
-        }
-    } else {
-        Ok(GraphqlData {
-            data: (Vec::new(), None),
-            errors: Vec::new(),
-        })
-    };
-    let first_page = data
-        .get("search")
+    let merge_queue = repository
+        .and_then(|repository| repository.get("mergeQueue"))
         .cloned()
-        .context("GraphQL response omitted My PRs search")
-        .and_then(|search| {
-            serde_json::from_value::<MineNodes>(search).context("parsing My PRs search")
-        });
-    let mine = match first_page {
-        Ok(first_page) => fetch_mine_pages(
+        .unwrap_or(serde_json::Value::Null);
+    let queue = include_queue.then(|| {
+        fetch_queue_result(
             client,
-            repo,
-            q,
+            merge_queue,
+            queue_error,
+            errors,
+            context_error.as_deref(),
             required_only,
             context_cache,
-            memo,
-            GraphqlData {
-                data: first_page,
-                errors: mine_queue_graphql_warnings(&errors, false),
-            },
+            memo.as_deref_mut(),
+        )
+    });
+    let mine = include_mine.then(|| {
+        if let Some(error) = &context_error {
+            return Err(anyhow!("{error}"));
+        }
+        let first_page = data
+            .get("search")
+            .cloned()
+            .context("GraphQL response omitted My PRs search")
+            .and_then(|search| {
+                serde_json::from_value::<MineNodes>(search).context("parsing My PRs search")
+            });
+        match first_page {
+            Ok(first_page) => fetch_mine_pages(
+                client,
+                repo,
+                q,
+                required_only,
+                context_cache,
+                memo,
+                GraphqlData {
+                    data: first_page,
+                    errors: mine_queue_graphql_warnings(errors, false),
+                },
+            ),
+            Err(parse_error) => Err(mine_error.unwrap_or(parse_error)),
+        }
+    });
+    MineSectionResults {
+        mine,
+        queue,
+        merged,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_queue_result(
+    client: &Client,
+    merge_queue: serde_json::Value,
+    queue_error: Option<anyhow::Error>,
+    errors: &[GqlError],
+    context_error: Option<&str>,
+    required_only: bool,
+    context_cache: &mut RequiredContextCache,
+    memo: Option<&mut RequiredContextMemo>,
+) -> Result<QueueSectionData> {
+    if let Some(error) = context_error {
+        return Err(anyhow!("{error}"));
+    }
+    let (mut nodes, eta) = match serde_json::from_value::<Option<MergeQueue>>(merge_queue)
+        .context("parsing merge queue")
+    {
+        Ok(Some(merge_queue)) => (
+            merge_queue.entries.nodes,
+            merge_queue.next_entry_estimated_time_to_merge,
         ),
-        Err(parse_error) => Err(mine_error.unwrap_or(parse_error)),
+        Ok(None) => match queue_error {
+            Some(error) => return Err(error),
+            None => (Vec::new(), None),
+        },
+        Err(parse_error) => return Err(queue_error.unwrap_or(parse_error)),
     };
-    Ok(MineQueueResults { mine, queue })
+    let mut warnings = mine_queue_graphql_warnings(errors, true);
+    let rule_data_trusted = warnings.is_empty();
+    let required_warnings = apply_queue_required(
+        client,
+        &mut nodes,
+        required_only,
+        context_cache,
+        memo,
+        rule_data_trusted,
+    )?;
+    warnings.extend(required_warnings);
+    Ok(GraphqlData {
+        data: (nodes, eta),
+        errors: warnings,
+    })
 }
 
 fn mine_queue_graphql_warnings(errors: &[GqlError], queue: bool) -> Vec<GqlError> {
@@ -1049,9 +1071,10 @@ fn mine_queue_graphql_warnings(errors: &[GqlError], queue: bool) -> Vec<GqlError
             let path = error.path.as_deref().unwrap_or_default();
             let root = path.first().and_then(serde_json::Value::as_str);
             let search_error = root == Some("search");
+            let merged_error = root == Some("mineMerged");
             let queue_error = root == Some("repository")
                 && path.get(1).and_then(serde_json::Value::as_str) == Some("mergeQueue");
-            !(if queue { search_error } else { queue_error })
+            !(merged_error || if queue { search_error } else { queue_error })
         })
         .cloned()
         .collect()
@@ -1075,6 +1098,7 @@ fn mine_queue_graphql_error(errors: &[GqlError], queue: bool) -> Option<anyhow::
                 {
                     false
                 }
+                Some("mineMerged") => false,
                 _ => true,
             }
         })
@@ -1108,6 +1132,10 @@ fn fetch_mine_pages(
                 "after": cursor,
                 "includeDefaultBranchRef": false,
                 "includeQueue": false,
+                "includeMine": true,
+                "mineMerged": "",
+                "mergedLimit": 1,
+                "includeMineMerged": false,
             }),
         )?;
         errors.extend(page_errors);
@@ -1599,7 +1627,9 @@ fn could_affect_default_branch_rules(errors: &[GqlError]) -> bool {
             {
                 true
             }
-            [root, ..] if matches!(root.as_str(), Some("repository" | "search")) => false,
+            [root, ..] if matches!(root.as_str(), Some("repository" | "search" | "mineMerged")) => {
+                false
+            }
             _ => true,
         }
     })
@@ -1928,8 +1958,9 @@ fn merged_alias(
     data: &serde_json::Value,
     errors: &[GqlError],
     alias: &str,
+    known_roots: &[&str],
 ) -> Result<GraphqlData<Vec<MergedNode>>> {
-    let errors = alias_errors(errors, &[alias]);
+    let errors = alias_errors(errors, &[alias], known_roots);
     let search = data
         .get(alias)
         .filter(|search| !search.is_null())
@@ -1955,8 +1986,18 @@ fn merged_alias(
     })
 }
 
-fn alias_errors(errors: &[GqlError], aliases: &[&str]) -> Vec<GqlError> {
-    const KNOWN_ALIASES: &[&str] = &["requested", "reviewed", "mineMerged", "reviewedMerged"];
+const MINE_QUERY_ROOTS: &[&str] = &["search", "repository", "mineMerged"];
+const REVIEWS_QUERY_ROOTS: &[&str] = &["requested", "reviewed", "reviewedMerged"];
+const WATCH_QUERY_ROOTS: &[&str] = &[
+    "search",
+    "repository",
+    "mineMerged",
+    "requested",
+    "reviewed",
+    "reviewedMerged",
+];
+
+fn alias_errors(errors: &[GqlError], aliases: &[&str], known_roots: &[&str]) -> Vec<GqlError> {
     errors
         .iter()
         .filter(|error| {
@@ -1965,7 +2006,7 @@ fn alias_errors(errors: &[GqlError], aliases: &[&str]) -> Vec<GqlError> {
                 .as_ref()
                 .and_then(|path| path.first())
                 .and_then(serde_json::Value::as_str)
-                .is_none_or(|root| aliases.contains(&root) || !KNOWN_ALIASES.contains(&root))
+                .is_none_or(|root| aliases.contains(&root) || !known_roots.contains(&root))
         })
         .cloned()
         .collect()
@@ -1975,12 +2016,11 @@ fn alias_errors(errors: &[GqlError], aliases: &[&str]) -> Vec<GqlError> {
 // Reviews (open PRs awaiting / under my review)
 // ----------------------------------------------------------------------------
 
-/// Standalone Reviews and merged searches when the combined watch query is not selected.
-pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
+/// Standalone Reviews and reviewed-and-merged searches when the combined watch query is not selected.
+pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mergedLimit: Int!) {
   requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
   reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
   reviewedMerged: search(type: ISSUE, first: $mergedLimit, query: $reviewedMerged) { nodes { ...merged } }
-  mineMerged: search(type: ISSUE, first: $mergedLimit, query: $mineMerged) @include(if: $includeMineMerged) { nodes { ...merged } }
 }
 fragment rev on PullRequest {
   number title url headRefName isDraft updatedAt
@@ -2100,7 +2140,6 @@ pub(crate) fn fetch_reviews_with_errors(
 
 pub(crate) struct ReviewsAndMerged {
     pub(crate) reviews: Result<GraphqlData<ReviewsData>>,
-    pub(crate) mine_merged: Option<Result<GraphqlData<Vec<MergedNode>>>>,
     pub(crate) reviewed_merged: Result<GraphqlData<Vec<MergedNode>>>,
 }
 
@@ -2111,7 +2150,6 @@ pub(crate) fn fetch_reviews_and_merged(
     requested_qualifier: &str,
     since: &str,
     limit: usize,
-    include_mine: bool,
 ) -> Result<ReviewsAndMerged> {
     let (requested, reviewed) = reviews_searches(repo, me, requested_qualifier);
     let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
@@ -2121,20 +2159,22 @@ pub(crate) fn fetch_reviews_and_merged(
             "requested": requested,
             "reviewed": reviewed,
             "reviewedMerged": reviewed_merged_search(repo, me, since),
-            "mineMerged": merged_search(repo, me, since),
             "mergedLimit": limit.clamp(1, 100),
-            "includeMineMerged": include_mine,
         }),
     )?;
-    Ok(parse_reviews_and_merged(&data, &errors, include_mine))
+    Ok(parse_reviews_and_merged(
+        &data,
+        &errors,
+        REVIEWS_QUERY_ROOTS,
+    ))
 }
 
 fn parse_reviews_and_merged(
     data: &serde_json::Value,
     errors: &[GqlError],
-    include_mine: bool,
+    known_roots: &[&str],
 ) -> ReviewsAndMerged {
-    let review_errors = alias_errors(errors, &["requested", "reviewed"]);
+    let review_errors = alias_errors(errors, &["requested", "reviewed"], known_roots);
     let reviews = match serde_json::from_value(data.clone()) {
         Ok(data) => Ok(GraphqlData {
             data,
@@ -2152,8 +2192,7 @@ fn parse_reviews_and_merged(
     };
     ReviewsAndMerged {
         reviews,
-        mine_merged: include_mine.then(|| merged_alias(data, errors, "mineMerged")),
-        reviewed_merged: merged_alias(data, errors, "reviewedMerged"),
+        reviewed_merged: merged_alias(data, errors, "reviewedMerged", known_roots),
     }
 }
 
@@ -2308,6 +2347,8 @@ mod tests {
             MINE_QUERY.contains("      }\n    }\n    mergeQueue @include(if: $includeQueue)"),
             "{MINE_QUERY}"
         );
+        assert!(MINE_QUERY.contains("\n  mineMerged: search"));
+        assert!(MINE_QUERY.contains("@include(if: $includeMineMerged)"));
     }
 
     #[test]
@@ -2332,32 +2373,25 @@ mod tests {
             "repo:o/r is:pr is:merged reviewed-by:me -author:me merged:>=2026-01-01 sort:updated-desc"
         );
         assert!(REVIEWS_QUERY.contains("reviewedMerged: search"));
-        assert!(REVIEWS_QUERY.contains("mineMerged: search"));
-        assert!(REVIEWS_QUERY.contains("@include(if: $includeMineMerged)"));
+        assert!(!REVIEWS_QUERY.contains("mineMerged"));
+        assert!(!REVIEWS_QUERY.contains("includeMineMerged"));
         assert!(REVIEWS_QUERY.contains("first: $mergedLimit"));
     }
 
     #[test]
-    fn reviews_merged_fetch_keeps_successful_aliases_on_partial_error() {
+    fn reviews_fetch_keeps_open_reviews_on_reviewed_merged_alias_error() {
         let response = serde_json::json!({
             "data": {
                 "requested": { "nodes": [] },
                 "reviewed": { "nodes": [] },
-                "mineMerged": null,
-                "reviewedMerged": {
-                    "nodes": [{
-                        "number": 42,
-                        "title": "reviewed",
-                        "url": "https://github.com/o/r/pull/42",
-                        "headRefName": "branch",
-                        "mergedAt": "2026-01-01T00:00:00Z",
-                        "author": { "login": "author" }
-                    }]
-                }
+                "reviewedMerged": null
             },
             "errors": [{
-                "message": "Mine search unavailable",
-                "path": ["mineMerged"]
+                "message": "Reviewed-merged search unavailable",
+                "path": ["reviewedMerged"]
+            }, {
+                "message": "Unscoped search failure",
+                "path": ["search"]
             }]
         });
         let (client, fake) =
@@ -2369,16 +2403,17 @@ mod tests {
             "review-requested",
             "2026-01-01",
             20,
-            true,
         )
         .unwrap();
 
-        assert!(fetched.reviews.is_ok());
         assert_eq!(
-            fetched.mine_merged.unwrap().unwrap_err().to_string(),
-            "GraphQL error: Mine search unavailable"
+            fetched.reviews.unwrap().errors[0].message,
+            "Unscoped search failure"
         );
-        assert_eq!(fetched.reviewed_merged.unwrap().data[0].number, 42);
+        assert_eq!(
+            fetched.reviewed_merged.unwrap_err().to_string(),
+            "GraphQL error: Reviewed-merged search unavailable; Unscoped search failure"
+        );
         assert_eq!(fake.requests(), ["POST /graphql"]);
     }
 
@@ -2400,16 +2435,6 @@ mod tests {
                     }]
                 },
                 "reviewed": { "nodes": [] },
-                "mineMerged": {
-                    "nodes": [{
-                        "number": 41,
-                        "title": "mine",
-                        "url": "https://github.com/o/r/pull/41",
-                        "headRefName": "branch",
-                        "mergedAt": "2026-01-01T00:00:00Z",
-                        "author": { "login": "me" }
-                    }]
-                },
                 "reviewedMerged": {
                     "nodes": [{
                         "number": 42,
@@ -2425,10 +2450,6 @@ mod tests {
                 {
                     "message": "Review author unavailable",
                     "path": ["requested", "nodes", 0, "author"]
-                },
-                {
-                    "message": "Mine author unavailable",
-                    "path": ["mineMerged", "nodes", 0, "author"]
                 }
             ]
         });
@@ -2441,16 +2462,12 @@ mod tests {
             "review-requested",
             "2026-01-01",
             20,
-            true,
         )
         .unwrap();
 
         let reviews = fetched.reviews.unwrap();
         assert_eq!(reviews.data.requested.nodes[0].number, 1);
         assert_eq!(reviews.errors[0].message, "Review author unavailable");
-        let mine = fetched.mine_merged.unwrap().unwrap();
-        assert_eq!(mine.data[0].number, 41);
-        assert_eq!(mine.errors[0].message, "Mine author unavailable");
         let reviewed = fetched.reviewed_merged.unwrap();
         assert_eq!(reviewed.data[0].number, 42);
         assert!(reviewed.errors.is_empty(), "{:?}", reviewed.errors);
