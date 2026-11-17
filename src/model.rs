@@ -576,12 +576,14 @@ impl PrNode {
     }
 }
 
-pub fn mine_search(repo: &Repo, me: &str, sort: OpenSort) -> String {
+pub fn mine_search(repo: &Repo, me: &str, sort: OpenSort, no_draft: bool) -> String {
+    let draft = if no_draft { " draft:false" } else { "" };
     format!(
-        "repo:{}/{} is:pr is:open author:{} archived:false {}",
+        "repo:{}/{} is:pr is:open author:{}{} archived:false {}",
         repo.owner,
         repo.name,
         me,
+        draft,
         sort.qualifier()
     )
 }
@@ -591,6 +593,7 @@ pub fn fetch_my_prs(
     repo: &Repo,
     me: &str,
     sort: OpenSort,
+    no_draft: bool,
     required_only: bool,
 ) -> Result<Vec<PrNode>> {
     Ok(fetch_my_prs_with_context_cache(
@@ -598,6 +601,7 @@ pub fn fetch_my_prs(
         repo,
         me,
         sort,
+        no_draft,
         required_only,
         &mut RequiredContextCache::default(),
     )?
@@ -609,10 +613,11 @@ pub(crate) fn fetch_my_prs_with_context_cache(
     repo: &Repo,
     me: &str,
     sort: OpenSort,
+    no_draft: bool,
     required_only: bool,
     context_cache: &mut RequiredContextCache,
 ) -> Result<GraphqlData<Vec<PrNode>>> {
-    let q = mine_search(repo, me, sort);
+    let q = mine_search(repo, me, sort, no_draft);
     let include_default_branch_ref = context_cache.default_branch_ref_id.is_none();
     let (data, errors): (MineData, _) = client.graphql_with_errors(
         MINE_QUERY,
@@ -651,8 +656,7 @@ pub(crate) fn fetch_my_prs_with_context_cache(
     fetch_mine_pages(
         client,
         repo,
-        me,
-        sort,
+        &q,
         required_only,
         context_cache,
         GraphqlData {
@@ -671,6 +675,9 @@ pub(crate) struct MineSectionResults {
 pub(crate) type QueueSectionData = GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>;
 
 pub(crate) struct MineSectionRequest<'a> {
+    pub sort: OpenSort,
+    pub no_draft: bool,
+    pub required_only: bool,
     pub include_mine: bool,
     pub include_queue: bool,
     pub merged: Option<(&'a str, usize)>,
@@ -680,22 +687,24 @@ pub(crate) fn fetch_mine_sections_with_context_cache(
     client: &Client,
     repo: &Repo,
     me: &str,
-    sort: OpenSort,
-    required_only: bool,
     context_cache: &mut RequiredContextCache,
     request: MineSectionRequest<'_>,
 ) -> Result<MineSectionResults> {
     let MineSectionRequest {
+        sort,
+        no_draft,
+        required_only,
         include_mine,
         include_queue,
         merged: merged_search,
     } = request;
+    let q = mine_search(repo, me, sort, no_draft);
     let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
         MINE_QUERY,
         serde_json::json!({
             "owner": repo.owner,
             "name": repo.name,
-            "q": mine_search(repo, me, sort),
+            "q": q,
             "after": null,
             "includeDefaultBranchRef": include_queue || context_cache.default_branch_ref_id.is_none(),
             "includeQueue": include_queue,
@@ -765,8 +774,7 @@ pub(crate) fn fetch_mine_sections_with_context_cache(
             Ok(first_page) => fetch_mine_pages(
                 client,
                 repo,
-                me,
-                sort,
+                &q,
                 required_only,
                 context_cache,
                 GraphqlData {
@@ -870,8 +878,7 @@ fn mine_queue_graphql_error(errors: &[GqlError], queue: bool) -> Option<anyhow::
 fn fetch_mine_pages(
     client: &Client,
     repo: &Repo,
-    me: &str,
-    sort: OpenSort,
+    q: &str,
     required_only: bool,
     context_cache: &mut RequiredContextCache,
     first_page: GraphqlData<MineNodes>,
@@ -880,7 +887,6 @@ fn fetch_mine_pages(
         data: first_page,
         mut errors,
     } = first_page;
-    let q = mine_search(repo, me, sort);
     let mut nodes = Vec::new();
     let mut after = first_page.add_to(&mut nodes)?;
     while let Some(cursor) = after {
@@ -1888,8 +1894,14 @@ mod tests {
             (OpenSort::Created, "sort:created-desc"),
         ] {
             assert_eq!(
-                mine_search(&repo, "me", sort),
+                mine_search(&repo, "me", sort, false),
                 format!("repo:owner/repo is:pr is:open author:me archived:false {qualifier}")
+            );
+            assert_eq!(
+                mine_search(&repo, "me", sort, true),
+                format!(
+                    "repo:owner/repo is:pr is:open author:me draft:false archived:false {qualifier}"
+                )
             );
         }
         assert!(MINE_QUERY.contains("createdAt"), "{MINE_QUERY}");

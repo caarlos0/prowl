@@ -762,6 +762,7 @@ fn fetch_mine_sections(
                 repo,
                 me,
                 cli.sort_open,
+                cli.no_draft,
                 cli.required,
                 &mut context_cache,
             ),
@@ -815,10 +816,11 @@ fn fetch_combined_mine_sections(
         client,
         repo,
         me,
-        cli.sort_open,
-        cli.required,
         context_cache,
         model::MineSectionRequest {
+            sort: cli.sort_open,
+            no_draft: cli.no_draft,
+            required_only: cli.required,
             include_mine: sections.mine,
             include_queue: sections.queue,
             merged: merged_search
@@ -5074,6 +5076,86 @@ mod tests {
         );
         assert!(outcome.issues.is_empty());
         (outcome.sections, fake.requests())
+    }
+
+    /// A server holding twelve PRs of mine, `drafts` of them drafts, that pages
+    /// five at a time and skips drafts only when `honors_draft` and the search
+    /// asks for `draft:false`.
+    fn mine_server(
+        drafts: &'static [i64],
+        honors_draft: bool,
+        searches: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> impl Fn(&serde_json::Value) -> String + Send + Sync + 'static {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/mine_no_rollup.json")).unwrap();
+        move |body| {
+            let variables = &body["variables"];
+            let q = variables["q"].as_str().unwrap();
+            searches.lock().unwrap().push(q.to_string());
+            let skip_drafts = honors_draft && q.contains("draft:false");
+            let all: Vec<_> = (1..=12_i64)
+                .filter(|number| !(skip_drafts && drafts.contains(number)))
+                .map(|number| {
+                    let mut node = fixture["data"]["search"]["nodes"][0].clone();
+                    node["number"] = number.into();
+                    node["isDraft"] = drafts.contains(&number).into();
+                    node
+                })
+                .collect();
+            let start = variables["after"]
+                .as_str()
+                .map_or(0, |cursor| cursor.parse().unwrap());
+            let end = (start + 5).min(all.len());
+            serde_json::json!({ "data": { "search": {
+                "pageInfo": { "hasNextPage": end < all.len(), "endCursor": end.to_string() },
+                "nodes": &all[start..end],
+            }}})
+            .to_string()
+        }
+    }
+
+    #[test]
+    fn no_draft_asks_the_search_to_skip_drafts_and_saves_pages() {
+        const DRAFTS: &[i64] = &[2, 5, 8, 11];
+        let repo = Repo::parse("o/r").unwrap();
+        let run = |args: &[&str], honors_draft: bool| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let searches = std::sync::Arc::default();
+            let (client, fake) = github::fake::client([]);
+            fake.set_graphql_responder(mine_server(
+                DRAFTS,
+                honors_draft,
+                std::sync::Arc::clone(&searches),
+            ));
+            let outcome = fetch(&cli, &client, &repo, "me", &mut None, true, false);
+            assert!(outcome.issues.is_empty());
+            let numbers: Vec<_> = outcome
+                .sections
+                .prs
+                .unwrap()
+                .iter()
+                .map(|row| row.number)
+                .collect();
+            let searches = searches.lock().unwrap().clone();
+            (numbers, fake.requests().len(), searches)
+        };
+
+        let (all, all_requests, all_searches) = run(&["prowl", "--only", "mine"], true);
+        assert_eq!(all.len(), 12);
+        assert_eq!(all_requests, 3);
+        assert!(all_searches.iter().all(|q| !q.contains("draft")));
+
+        let args = ["prowl", "--only", "mine", "--no-draft"];
+        let (ready, requests, searches) = run(&args, true);
+        let (filtered_client_side, ignored_requests, _) = run(&args, false);
+        assert_eq!(ready, [12, 10, 9, 7, 6, 4, 3, 1]);
+        assert_eq!(filtered_client_side, ready);
+        assert_eq!(requests, 2);
+        assert_eq!(ignored_requests, 3);
+        assert!(
+            searches.iter().all(|q| q.contains(" draft:false ")),
+            "{searches:?}"
+        );
     }
 
     #[test]
