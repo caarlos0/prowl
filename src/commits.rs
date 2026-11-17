@@ -83,6 +83,7 @@ impl ReleaseMap {
         self.releases.get(number)
     }
 
+    #[cfg(test)]
     pub fn insert(&mut self, number: i64, release: ReleaseRef) {
         self.releases.insert(number, release);
     }

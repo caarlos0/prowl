@@ -252,29 +252,6 @@ pub fn queue_next_eta(data: &QueueData) -> Option<i64> {
 
 /// Fetch the merge-queue entries and the queue-level ETA. A null or empty queue
 /// yields `([], None)`.
-pub fn fetch_queue(
-    client: &Client,
-    repo: &Repo,
-    required_only: bool,
-) -> Result<(Vec<QueueEntryNode>, Option<i64>)> {
-    Ok(fetch_queue_with_context_cache(
-        client,
-        repo,
-        required_only,
-        &mut RequiredContextCache::default(),
-    )?
-    .data)
-}
-
-pub(crate) fn fetch_queue_with_context_cache(
-    client: &Client,
-    repo: &Repo,
-    required_only: bool,
-    context_cache: &mut RequiredContextCache,
-) -> Result<GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>> {
-    fetch_queue_with_context_memo(client, repo, required_only, context_cache, None)
-}
-
 pub(crate) fn fetch_queue_with_context_memo(
     client: &Client,
     repo: &Repo,
@@ -698,47 +675,6 @@ pub fn mine_search(repo: &Repo, me: &str, sort: OpenSort, no_draft: bool) -> Str
     )
 }
 
-pub fn fetch_my_prs(
-    client: &Client,
-    repo: &Repo,
-    me: &str,
-    sort: OpenSort,
-    no_draft: bool,
-    required_only: bool,
-) -> Result<Vec<PrNode>> {
-    Ok(fetch_my_prs_with_context_cache(
-        client,
-        repo,
-        me,
-        sort,
-        no_draft,
-        required_only,
-        &mut RequiredContextCache::default(),
-    )?
-    .data)
-}
-
-pub(crate) fn fetch_my_prs_with_context_cache(
-    client: &Client,
-    repo: &Repo,
-    me: &str,
-    sort: OpenSort,
-    no_draft: bool,
-    required_only: bool,
-    context_cache: &mut RequiredContextCache,
-) -> Result<GraphqlData<Vec<PrNode>>> {
-    fetch_my_prs_with_context_memo(
-        client,
-        repo,
-        me,
-        sort,
-        no_draft,
-        required_only,
-        context_cache,
-        None,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_my_prs_with_context_memo(
     client: &Client,
@@ -941,7 +877,6 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
     Ok(MineReviewsQueueResults { mine, reviews })
 }
 
-#[allow(clippy::too_many_lines)]
 fn parse_mine_queue_response(
     client: &Client,
     repo: &Repo,
@@ -1953,16 +1888,6 @@ pub fn merged_search(repo: &Repo, me: &str, since: &str) -> String {
     )
 }
 
-pub fn fetch_merged(
-    client: &Client,
-    repo: &Repo,
-    me: &str,
-    since: &str,
-    limit: usize,
-) -> Result<Vec<MergedNode>> {
-    Ok(fetch_merged_with_errors(client, repo, me, since, limit)?.data)
-}
-
 pub(crate) fn fetch_merged_with_errors(
     client: &Client,
     repo: &Repo,
@@ -1986,32 +1911,6 @@ pub fn reviewed_merged_search(repo: &Repo, me: &str, since: &str) -> String {
         "repo:{}/{} is:pr is:merged reviewed-by:{} -author:{} merged:>={} sort:updated-desc",
         repo.owner, repo.name, me, me, since
     )
-}
-
-pub fn fetch_reviewed_merged(
-    client: &Client,
-    repo: &Repo,
-    me: &str,
-    since: &str,
-    limit: usize,
-) -> Result<Vec<MergedNode>> {
-    Ok(fetch_reviewed_merged_with_errors(client, repo, me, since, limit)?.data)
-}
-
-pub(crate) fn fetch_reviewed_merged_with_errors(
-    client: &Client,
-    repo: &Repo,
-    me: &str,
-    since: &str,
-    limit: usize,
-) -> Result<GraphqlData<Vec<MergedNode>>> {
-    let q = reviewed_merged_search(repo, me, since);
-    let (data, errors): (MergedData, _) =
-        client.graphql_with_errors(&merged_query(limit), serde_json::json!({ "q": q }))?;
-    Ok(GraphqlData {
-        data: data.search.nodes,
-        errors,
-    })
 }
 
 fn merged_alias(
@@ -2092,6 +1991,7 @@ fragment merged on PullRequest {
   number title url headRefName mergedAt author { login }
 }"#;
 
+#[cfg(test)]
 const REVIEWS_ONLY_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!) {
   requested: search(type: ISSUE, first: 50, query: $requested) { issueCount nodes { ...rev } }
   reviewed: search(type: ISSUE, first: 50, query: $reviewed) { issueCount nodes { ...rev } }
@@ -2194,15 +2094,7 @@ pub fn reviews_searches(repo: &Repo, me: &str, requested_qualifier: &str) -> (St
     (requested, reviewed)
 }
 
-pub fn fetch_reviews(
-    client: &Client,
-    repo: &Repo,
-    me: &str,
-    requested_qualifier: &str,
-) -> Result<ReviewsData> {
-    Ok(fetch_reviews_with_errors(client, repo, me, requested_qualifier)?.data)
-}
-
+#[cfg(test)]
 pub(crate) fn fetch_reviews_with_errors(
     client: &Client,
     repo: &Repo,
