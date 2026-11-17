@@ -308,8 +308,11 @@ impl FetchOutcome {
                         .as_ref()
                         .is_some_and(|stats| stats.available)
                     {
-                        issue.stale = true;
                         self.sections.commits = previous.commits.take();
+                        issue.stale = self.sections.commits.as_ref().is_some_and(|stats| {
+                            stats.upcoming.is_some()
+                                || stats.releases.iter().any(|release| release.count.is_some())
+                        });
                     }
                 }
                 FetchScope::Upcoming => {
@@ -6688,7 +6691,24 @@ mod tests {
     fn failed_release_range_keeps_only_its_previous_count() {
         let (client, fake) = github::fake::client(tagged_watch());
         let baseline = refresh_shipments(&client, None);
+        fake.set_response(
+            UPCOMING,
+            200,
+            &[],
+            &serde_json::json!({ "total_commits": 2, "commits": [
+                commit("me", "feat: three (#3)"),
+                commit("me", "feat: four (#4)"),
+            ]})
+            .to_string(),
+        );
         fake.set_response(V2, 502, &[], r#"{"message":"bad gateway"}"#);
+        fake.set_response(
+            V1,
+            200,
+            &[],
+            &serde_json::json!([commit("me", "feat: one (#1)"), commit("me", "chore: init")])
+                .to_string(),
+        );
 
         let sent = fake.requests().len();
         let outcome = refresh_shipments(&client, Some(baseline.sections));
@@ -6696,7 +6716,7 @@ mod tests {
         assert_eq!(new_requests(&fake, sent), [RELEASES, UPCOMING, V2, V1]);
         assert_eq!(
             bucket_counts(&outcome.sections),
-            (Some(1), vec![Some(1); 2])
+            (Some(2), vec![Some(1), Some(2)])
         );
         assert_eq!(outcome.issues.len(), 1);
         assert!(outcome.issues[0].stale);
@@ -6714,6 +6734,16 @@ mod tests {
         assert!(outcome.has_errors());
         assert!(outcome.status().contains("My Shipments unavailable"));
         assert!(!outcome.status().contains("stale"), "{}", outcome.status());
+
+        let cooldown = refresh_shipments(&client, Some(outcome.sections));
+        assert_eq!(fake.requests(), [RELEASES, UPCOMING]);
+        assert_eq!(bucket_counts(&cooldown.sections), (None, vec![None; 2]));
+        assert!(cooldown.status().contains("My Shipments unavailable"));
+        assert!(
+            !cooldown.status().contains("stale"),
+            "{}",
+            cooldown.status()
+        );
     }
 
     #[test]
@@ -6744,7 +6774,7 @@ mod tests {
     fn changed_tag_list_does_not_reuse_previous_counts() {
         let (client, fake) = github::fake::client(tagged_watch());
         let baseline = refresh_shipments(&client, None);
-        let releases = serde_json::json!([release("v2"), release("v1.5"), release("v1")]);
+        let releases = serde_json::json!([release("v2"), release("v1.5")]);
         fake.set_response(RELEASES, 200, &[], &releases.to_string());
         fake.set_response(
             "GET /repos/o/r/compare/v1.5...v2",
@@ -6753,21 +6783,60 @@ mod tests {
             r#"{"message":"bad gateway"}"#,
         );
         fake.set_response(
-            "GET /repos/o/r/compare/v1...v1.5",
+            "GET /repos/o/r/commits?sha=v1.5&author=me&per_page=100&page=1",
             200,
             &[],
-            &serde_json::json!({ "total_commits": 0, "commits": [] }).to_string(),
+            &serde_json::json!([commit("me", "feat: one (#1)")]).to_string(),
         );
 
         let outcome = refresh_shipments(&client, Some(baseline.sections));
 
         assert_eq!(
             bucket_counts(&outcome.sections),
-            (Some(1), vec![None, Some(0), Some(1)])
+            (Some(1), vec![None, Some(1)])
         );
         assert_eq!(outcome.issues.len(), 1);
         assert!(!outcome.issues[0].stale);
         assert!(outcome.status().contains("My Shipments unavailable: v2"));
+    }
+
+    #[test]
+    fn failed_default_branch_lookup_does_not_keep_the_upcoming_bucket() {
+        let (client, fake) = github::fake::client(tagged_watch());
+        let cached = refresh_shipments(&client, None).sections;
+        assert_eq!(bucket_counts(&cached), (Some(1), vec![Some(1); 2]));
+        fake.set_response(
+            "GET /repos/o/r",
+            500,
+            &[],
+            r#"{"message":"temporary failure"}"#,
+        );
+
+        let cli = Cli::try_parse_from(["prowl", "--only", "shipments"]).unwrap();
+        let due = Due {
+            mine: true,
+            reviews: false,
+            shipments: true,
+        };
+        let outcome = fetch_scheduled(
+            &cli,
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            &mut None,
+            due,
+        )
+        .merge(Some(cached), Vec::new(), due);
+
+        assert_eq!(bucket_counts(&outcome.sections), (None, vec![Some(1); 2]));
+        assert!(
+            outcome
+                .status()
+                .contains("My Shipments upcoming unavailable"),
+            "{}",
+            outcome.status()
+        );
+        assert!(!outcome.status().contains("stale"), "{}", outcome.status());
     }
 
     fn shipment_request_counts(requests: &[String]) -> (usize, usize) {

@@ -295,7 +295,9 @@ watch event loop); everything else is testable modules:
   The upcoming bucket is kept only when the previous bucket links to the same
   compare URL as the current scan would (`compare/{latest tag}...{branch}`, or
   `commits/{branch}` with no tags); a failed default-branch lookup has no URL
-  to match, so it is never kept. The reuse happens in `FetchOutcome::reconcile`
+  to match, so it is never kept. When the whole scan fails, the previous
+  available stats are shown again, but marked `stale` only when they hold at
+  least one count. The reuse happens in `FetchOutcome::reconcile`
   after the scan: it adds no requests, and `commits::fetch`, its order and its
   rate-limit stop are unchanged. Known limit: the predecessor of the oldest
   shown tag is not stored, so a changed predecessor (a release inserted below
