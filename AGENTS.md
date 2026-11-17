@@ -512,7 +512,11 @@ still performs all teardown through `finish`.
   PRs (`-author:<me>`).
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
-  not ring). The first refresh is silent. Changed rows get a `▸` marker. Bell
+  not ring). The bell is armed only after a refresh that replaced the change
+  baseline with trusted live data (no Mine or Merged issue, warnings included,
+  `lib.rs::track_changes`); until then refreshes are silent, so a cached start
+  with a partial first refresh never rings for changes made while prowl was
+  closed. Changed rows get a `▸` marker. Bell
   and change markers track the **Mine** view only (the Reviews view conveys
   state through its per-row glyph instead). While Reviews is active, Mine
   changes are detected when the Mine view is next fetched (at most two
@@ -610,7 +614,8 @@ still performs all teardown through `finish`.
 - **Cache:** on a watch start, prowl paints the cached `Sections` immediately
   (entering the alt screen straight away), seeds change-detection from it
   so the first live refresh highlights what changed while prowl wasn't running,
-  but stays silent (no startup bell). A refresh writes the cache only when all
+  but stays silent (no startup bell, even when the first refresh is partial).
+  A refresh writes the cache only when all
   enabled section fetches succeeded; partial data remains in memory only. With
   no cache it shows an inline
   `Loading...` frame and enters the alt screen only once the first fetch lands.

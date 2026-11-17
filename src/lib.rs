@@ -535,6 +535,26 @@ impl Schedule {
     }
 }
 
+/// Diff a refresh against the tracker baseline. The bool says whether the
+/// bell should ring: only once `armed`, and `armed` is set only by a refresh
+/// that replaced the baseline with trusted live data, so changes made while
+/// prowl was closed never ring.
+fn track_changes(
+    prev: &mut Option<Tracker>,
+    armed: &mut bool,
+    sections: &Sections,
+    issues: &[FetchIssue],
+) -> (Changes, bool) {
+    let open_issue = issues.iter().any(|issue| issue.scope == FetchScope::Mine);
+    let merged_issue = issues.iter().any(|issue| issue.scope == FetchScope::Merged);
+    let mut tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
+    tracker.preserve_untrusted(prev.as_ref(), open_issue, merged_issue);
+    let changes = Tracker::advance(prev, tracker);
+    let ring = *armed && changes.any();
+    *armed |= !open_issue && !merged_issue;
+    (changes, ring)
+}
+
 fn retain<T>(fresh: &mut Option<T>, previous: &mut Option<T>, issue: &mut FetchIssue) {
     if let Some(data) = previous.take() {
         *fresh = Some(data);
@@ -2671,8 +2691,8 @@ struct App<'a> {
     schedule: Schedule,
     /// Whether a fetch is in flight, so the footer can say `^R refreshing`.
     refreshing: bool,
-    /// Whether the bell is armed. The first refresh after a cached start is
-    /// silent (it still highlights changes).
+    /// Whether the bell is armed. Refreshes before one that replaces the
+    /// baseline with trusted data are silent (they still highlight changes).
     armed: bool,
     /// Whether we've switched from the inline loading frame to the alternate
     /// screen. The watch starts inline and enters the alt screen once the first
@@ -3228,14 +3248,7 @@ impl<'a> App<'a> {
         let FetchOutcome {
             sections, issues, ..
         } = outcome;
-        let mut tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
-        tracker.preserve_untrusted(
-            self.prev.as_ref(),
-            issues.iter().any(|issue| issue.scope == FetchScope::Mine),
-            issues.iter().any(|issue| issue.scope == FetchScope::Merged),
-        );
-        let changes = Tracker::advance(&mut self.prev, tracker);
-        let bell = changes.any();
+        let (changes, bell) = track_changes(&mut self.prev, &mut self.armed, &sections, &issues);
         self.unread.extend(changes);
 
         self.last_status.clear();
@@ -3247,10 +3260,9 @@ impl<'a> App<'a> {
         self.enter_alt()?;
         self.redraw()?;
 
-        if self.armed && bell && self.cli.bell && !self.cli.no_bell {
+        if bell && self.cli.bell && !self.cli.no_bell {
             let _ = self.program.beep();
         }
-        self.armed = true;
         if self.fetch_issues.is_empty()
             && !self.cli.no_cache
             && let Some(good) = &self.last_good
@@ -7710,5 +7722,46 @@ mod tests {
             assert_eq!(observed[0], (true, Some(false), false), "{body}");
             assert_eq!(observed[0], observed[1], "{body}");
         }
+    }
+
+    #[test]
+    fn cached_start_stays_silent_for_offline_changes_after_a_partial_refresh() {
+        let sections = |status| {
+            let mut row = queued_open_row(1);
+            row.queue = None;
+            row.status = Some(status);
+            Sections {
+                prs: Some(vec![row]),
+                merged: Some(Vec::new()),
+                ..Sections::EMPTY
+            }
+        };
+        let cached = sections(status::Status::Pending);
+        let mut prev = Some(Tracker::build(
+            cached.prs.as_deref(),
+            cached.merged.as_deref(),
+        ));
+        let mut armed = false;
+        let warning = FetchIssue::partial(
+            FetchScope::Mine,
+            &[
+                serde_json::from_value::<github::GqlError>(serde_json::json!({
+                    "message": "reviewThreads timeout",
+                    "path": ["search", "nodes", 0, "reviewThreads"],
+                }))
+                .unwrap(),
+            ],
+        );
+
+        let passing = sections(status::Status::Pass);
+        let (_, first) = track_changes(&mut prev, &mut armed, &passing, &[warning]);
+        let (changes, second) = track_changes(&mut prev, &mut armed, &passing, &[]);
+        assert!(!first && !second);
+        assert!(changes.any(), "the offline change is still flagged unread");
+        assert!(armed);
+
+        let failing = sections(status::Status::Fail);
+        let (_, ring) = track_changes(&mut prev, &mut armed, &failing, &[]);
+        assert!(ring, "a later real change still rings");
     }
 }
