@@ -459,7 +459,12 @@ still performs all teardown through `finish`.
   layout time only while the queue section is enabled, so `--only mine` still
   lists it).
 - **Drafts:** `--no-draft` hides draft PRs from both the Mine open-PRs list and
-  the Reviews list (`prs::without_drafts` / `reviews::without_drafts`).
+  the Reviews list (`prs::without_drafts` / `reviews::without_drafts`). It also
+  adds `draft:false` to the Mine open search (`model::mine_search`), so drafts
+  do not use search pages or required-context lookups. The row filter stays, so
+  cached rows and a search that ignores the qualifier give the same output.
+  Without `--no-draft` the search string is unchanged. The Reviews searches do
+  not use the qualifier.
 - **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
   one-shot output with `--view` and toggled live with `Tab`. While watching,
   `lib.rs::Schedule` fetches the active view on every refresh and the inactive
@@ -650,7 +655,8 @@ still performs all teardown through `finish`.
   the queue is off, the first Mine search page requests the same default-branch
   rules fields.
 - Open PRs: the first Mine request also selects the merge queue when its section
-  is enabled; later Mine pages do not. `search(is:pr is:open author:<me>)`, five
+  is enabled; later Mine pages do not. `search(is:pr is:open author:<me>)`
+  (plus `draft:false` with `--no-draft`), five
   per cursor page, with `mergeable`,
   `mergeStateStatus`, `reviewDecision`,
   `latestOpinionatedReviews(first: 100) { nodes { state } }`,
