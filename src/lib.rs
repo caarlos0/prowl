@@ -5523,10 +5523,10 @@ mod tests {
         };
         for active in [View::Mine, View::Reviews] {
             let inactive = active.toggle();
-            // (GET, POST) of a refresh that skips the inactive view. With Mine
-            // active, Mine merged leaves the Reviews request as its own search.
+            // (GET, POST) of a refresh that skips the inactive view. Mine's
+            // open PRs and queue share one request; its merged search is another.
             let skipped_counts = match active {
-                View::Mine => (4, 3),
+                View::Mine => (4, 2),
                 View::Reviews => (0, 1),
             };
             let (client, fake) = github::fake::client(tagged_watch());
@@ -5564,7 +5564,7 @@ mod tests {
 
                 assert!(due.includes(active), "{label}: {due:?}");
                 assert_eq!(due.includes(inactive), inactive_due, "{label}: {due:?}");
-                assert_eq!(before, (4, 3), "{label}");
+                assert_eq!(before, (4, 2), "{label}");
                 assert_eq!(
                     after,
                     if inactive_due { before } else { skipped_counts },
