@@ -116,11 +116,11 @@ watch event loop); everything else is testable modules:
   (`METHOD /path?query`) and the `If-None-Match` value.
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
-  the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
-  two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
-  (reuses `merged_query`, now carrying `author`). Watch mode combines its two
-  merged searches in one aliased POST and reports errors per merged section;
-  one-shot keeps its selected view's single merged-search request. My PRs and
+  the three Mine queries plus `REVIEWS_QUERY`, which combines the `requested:`
+  and `reviewed:` open-review searches with the reviewed-merged search. Watch
+  mode also aliases the Mine merged search into that request when fetching both
+  views; when Reviews is not fetched, Mine merged keeps its single-search path.
+  Alias errors stay scoped to their sections. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   It reads required context names from each distinct base ref's `refUpdateRule`
   and all pages of active `rules`, in groups of up to five refs per GraphQL
@@ -608,16 +608,20 @@ still performs all teardown through `finish`.
   (fetched `sort:updated-desc`, since search can't sort by merge time, then
   re-sorted by `mergedAt` for display). Now also fetches `author` (used by the
   reviewed-and-merged section; the Mine merged section ignores it). In watch
-  mode the Mine and reviewed-by-me searches are aliases in one POST; an error
-  on one alias leaves the other section usable and names the failed section.
-- Reviews (one POST, two aliased searches): `requested: search(is:pr is:open
+  mode, when Reviews is fetched, Mine and reviewed-by-me merged searches are
+  aliases in the Reviews request; otherwise Mine uses its single search. An
+  error on one alias leaves the other sections usable and names the failed one.
+  A request-level failure reports each section included in that request.
+- Reviews (one POST, three aliased searches; four in watch): `requested: search(is:pr is:open
   <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
   reviewed-by:<me> -author:<me>)`, each node carrying `author`, `headRefName`,
   last commit `committedDate`, and `reviews(author:<me>)` `submittedAt`s.
-  Re-review = a PR
-  in both result sets.
+  Re-review = a PR in both result sets. The same request includes the
+  reviewed-and-merged search and, in watch mode when Mine is fetched, the Mine
+  merged search.
 - Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
-  merged:>=<since>)` (reuses the merged query/limit).
+  merged:>=<since>)`, aliased into the Reviews request with the configured
+  merged limit.
 - Commits section: REST `GET /repos/.../releases`, `/compare/a...b`, `/commits`.
   The upcoming range (latest tag → default branch, or all of the default
   branch without a tag) is fetched only while My Shipments is shown. When
