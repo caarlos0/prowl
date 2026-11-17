@@ -794,8 +794,11 @@ findings fail CI.
 CI (`.github/workflows/build.yml`) runs fmt/clippy/build/test (the `build` job)
 and `cargo audit` for dependency advisories (the `audit` job) on push and PRs.
 The build follows the latest stable Rust, including new Clippy lints. The audit
-job has `checks: write` to publish its check run and `issues: write` to report
-advisories; those permissions are scoped to that job.
+job installs `cargo-audit` with `cargo install --locked` and runs it directly
+with read-only `contents` permission. It fails on vulnerabilities, while
+informational warnings such as unmaintained crates stay visible in the log
+without failing the job. It does not use the Checks API, which returned
+intermittent 404s through `rustsec/audit-check`.
 The `windows-opener` job runs the standalone opener module tests on Windows.
 
 ## The README screenshot
