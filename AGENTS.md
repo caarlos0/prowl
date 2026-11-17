@@ -109,7 +109,7 @@ watch event loop); everything else is testable modules:
   `parse_graphql()`. Client clones share rate-limit deadlines: primary REST
   core and GraphQL budgets stay separate, while secondary limits block both.
   A cooldown refusal is a typed `RateLimited` error (same message) that
-  callers can downcast. `me()` uses REST `GET /user`; only when that is refused
+  `me()` downcasts. `me()` uses REST `GET /user`; only when that is refused
   by a core cooldown or limit does it send one `viewer { login }` query through
   the normal GraphQL gate, so a core-exhausted start still renders GraphQL
   sections. A secondary limit, GraphQL limit, 401, or other 403 does not fall

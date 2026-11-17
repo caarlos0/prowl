@@ -186,8 +186,8 @@ impl Resource {
     }
 }
 
-/// A local refusal because `resource` is cooling down. Callers can downcast it
-/// to tell which limit applies.
+/// A local refusal because `resource` is cooling down. `Client::me` downcasts
+/// it to tell a core limit from the others.
 #[derive(Debug)]
 struct RateLimited {
     resource: Resource,

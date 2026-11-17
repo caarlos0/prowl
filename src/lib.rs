@@ -7454,7 +7454,6 @@ mod tests {
                 "{args:?}"
             );
             assert!(requests.len() > before, "{args:?}: {requests:?}");
-            println!("CORE_LIMITED {args:?}: {requests:?}");
         }
     }
 
