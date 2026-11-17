@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, TimeDelta, Utc};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -17,7 +17,7 @@ const MAX_CACHED_GETS: usize = 32;
 #[derive(Clone)]
 struct CachedGet {
     etag: String,
-    body: serde_json::Value,
+    body: Arc<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -30,6 +30,8 @@ impl GetCache {
     fn insert(&mut self, path: String, entry: CachedGet) {
         if let Some(cached) = self.entries.get_mut(&path) {
             *cached = entry;
+            self.insertion_order.retain(|cached| cached != &path);
+            self.insertion_order.push_back(path);
             return;
         }
         while self.entries.len() >= MAX_CACHED_GETS {
@@ -278,7 +280,7 @@ impl Client {
     }
 
     /// GET a REST path (relative to api.github.com), returning typed JSON.
-    pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub fn get<T: DeserializeOwned + Serialize>(&self, path: &str) -> Result<T> {
         let cached = self.cached_get(path)?;
         let mut resp =
             self.request(path, None, cached.as_ref().map(|entry| entry.etag.as_str()))?;
@@ -299,7 +301,7 @@ impl Client {
                     }),
                 )?;
             }
-            return serde_json::from_value(cached.body)
+            return serde_json::from_value((*cached.body).clone())
                 .with_context(|| format!("parsing cached response from /{path}"));
         }
 
@@ -307,9 +309,7 @@ impl Client {
             .body_mut()
             .read_to_vec()
             .with_context(|| format!("reading response from /{path}"))?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing response from /{path}"))?;
-        let parsed = serde_json::from_value(value.clone())
+        let parsed = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing response from /{path}"))?;
         if resp.status().is_success() {
             let etag = resp
@@ -317,18 +317,34 @@ impl Client {
                 .get("etag")
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
-            if etag.is_some() || cached.is_some() {
-                self.cache_get(path, etag.map(|etag| CachedGet { etag, body: value }))?;
+            if let Some(etag) = etag {
+                let body = serde_json::to_value(&parsed)
+                    .with_context(|| format!("caching response from /{path}"))?;
+                self.cache_get(
+                    path,
+                    Some(CachedGet {
+                        etag,
+                        body: Arc::new(body),
+                    }),
+                )?;
+            } else if cached.is_some() {
+                self.cache_get(path, None)?;
             }
         }
         Ok(parsed)
     }
 
     fn cached_get(&self, path: &str) -> Result<Option<CachedGet>> {
-        self.get_cache
+        let mut cache = self
+            .get_cache
             .lock()
-            .map_err(|err| anyhow!("GitHub GET cache unavailable: {err}"))
-            .map(|cache| cache.entries.get(path).cloned())
+            .map_err(|err| anyhow!("GitHub GET cache unavailable: {err}"))?;
+        let Some(entry) = cache.entries.get(path).cloned() else {
+            return Ok(None);
+        };
+        cache.insertion_order.retain(|cached| cached != path);
+        cache.insertion_order.push_back(path.to_string());
+        Ok(Some(entry))
     }
 
     fn cache_get(&self, path: &str, entry: Option<CachedGet>) -> Result<()> {
@@ -510,7 +526,7 @@ impl Client {
 
     /// The authenticated user's login.
     pub fn me(&self) -> Result<String> {
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct User {
             login: String,
         }
@@ -520,7 +536,7 @@ impl Client {
 
     /// The repository's default branch (e.g. `main`).
     pub fn default_branch(&self, repo: &Repo) -> Result<String> {
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct R {
             default_branch: String,
         }
@@ -883,7 +899,7 @@ mod tests {
             .map(|index| (format!("GET /resource/{index}"), USER.to_string()))
             .collect();
         let (client, fake) = fake::client(routes.clone());
-        for (request, _) in &routes {
+        for (request, _) in routes.iter().take(MAX_CACHED_GETS) {
             fake.set_response(request, 200, &[("etag", "v1")], USER);
             client
                 .get::<serde_json::Value>(request.trim_start_matches("GET /"))
@@ -891,14 +907,95 @@ mod tests {
         }
 
         fake.set_response(&routes[0].0, 304, &[], "");
+        assert_eq!(
+            client.get::<serde_json::Value>("resource/0").unwrap()["login"],
+            "me"
+        );
+        fake.set_response(&routes[MAX_CACHED_GETS].0, 200, &[("etag", "v1")], USER);
+        let newest_path = format!("resource/{MAX_CACHED_GETS}");
+        client.get::<serde_json::Value>(&newest_path).unwrap();
+
+        assert_eq!(
+            client.get::<serde_json::Value>("resource/0").unwrap()["login"],
+            "me"
+        );
+        fake.set_response(&routes[1].0, 304, &[], "");
         assert!(
             client
-                .get::<serde_json::Value>("resource/0")
+                .get::<serde_json::Value>("resource/1")
                 .unwrap_err()
                 .to_string()
                 .contains("without a cached response")
         );
-        assert_eq!(fake.validators().last(), Some(&(routes[0].0.clone(), None)));
+        assert_eq!(fake.validators().last(), Some(&(routes[1].0.clone(), None)));
+    }
+
+    #[test]
+    fn rest_cache_only_retains_parsed_release_fields() {
+        #[derive(Debug, Deserialize, PartialEq, Serialize)]
+        struct ReleaseFields {
+            tag_name: String,
+            draft: bool,
+            prerelease: bool,
+            published_at: Option<String>,
+        }
+
+        const PATH: &str = "GET /repos/goreleaser/goreleaser/releases?per_page=50&page=1";
+        const BODY_PATH: &str = "repos/goreleaser/goreleaser/releases?per_page=50&page=1";
+        let metadata = "x".repeat(1400);
+        let releases: Vec<_> = (0..44)
+            .map(|release| {
+                let count = 59 + usize::from(release < 18);
+                let assets: Vec<_> = (0..count)
+                    .map(|asset| {
+                        serde_json::json!({
+                            "name": format!("asset-{release}-{asset}"),
+                            "metadata": metadata,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "tag_name": format!("v{release}"),
+                    "draft": false,
+                    "prerelease": false,
+                    "published_at": null,
+                    "assets": assets,
+                })
+            })
+            .collect();
+        let response = serde_json::to_string(&releases).unwrap();
+        let response_bytes = response.len();
+        assert!(response_bytes > 3_000_000);
+        let (client, fake) = fake::client([(PATH.to_string(), response.clone())]);
+        fake.set_response(PATH, 200, &[("etag", "v1")], &response);
+
+        let parsed: Vec<ReleaseFields> = client.get(BODY_PATH).unwrap();
+        assert_eq!(parsed.len(), 44);
+        assert_eq!(parsed[0].tag_name, "v0");
+        assert!(!parsed[0].draft);
+        assert!(!parsed[0].prerelease);
+        assert_eq!(parsed[0].published_at, None);
+
+        let cache = client.get_cache.lock().unwrap();
+        let retained = &cache.entries.get(BODY_PATH).unwrap().body;
+        let retained_bytes = serde_json::to_vec(&**retained).unwrap().len();
+        assert_eq!(retained.as_array().unwrap().len(), 44);
+        assert!(
+            retained
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|release| { release.as_object().unwrap().len() == 4 })
+        );
+        assert!(retained_bytes < 10_000);
+        drop(cache);
+
+        fake.set_response(PATH, 304, &[], "");
+        assert_eq!(client.get::<Vec<ReleaseFields>>(BODY_PATH).unwrap(), parsed);
+        assert_eq!(
+            fake.validators().last(),
+            Some(&(PATH.to_string(), Some("v1".to_string())))
+        );
     }
 
     #[test]
