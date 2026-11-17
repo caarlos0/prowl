@@ -704,62 +704,64 @@ pub(crate) fn fetch_mine_and_queue_with_context_cache(
             .extend(rule_errors);
     }
 
-    let queue = if let Some(error) = queue_error {
-        Err(error)
-    } else {
-        let merge_queue = repository
-            .and_then(|repository| repository.get("mergeQueue"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        serde_json::from_value::<Option<MergeQueue>>(merge_queue)
-            .context("parsing merge queue")
-            .and_then(|merge_queue| {
-                let eta = merge_queue
-                    .as_ref()
-                    .and_then(|queue| queue.next_entry_estimated_time_to_merge);
-                let mut nodes = merge_queue.map_or_else(Vec::new, |queue| queue.entries.nodes);
-                let mut warnings = mine_queue_graphql_warnings(&errors);
-                warnings.extend(apply_queue_required(
-                    client,
-                    &mut nodes,
-                    required_only,
-                    context_cache,
-                )?);
-                Ok(GraphqlData {
-                    data: (nodes, eta),
-                    errors: warnings,
-                })
-            })
-    };
-    let mine = if let Some(error) = mine_error {
-        Err(error)
-    } else {
-        let first_page = data
-            .get("search")
-            .cloned()
-            .context("GraphQL response omitted My PRs search")
-            .and_then(|search| {
-                serde_json::from_value::<MineNodes>(search).context("parsing My PRs search")
-            });
-        first_page.and_then(|first_page| {
-            fetch_mine_pages(
-                client,
-                repo,
-                me,
-                sort,
-                required_only,
-                context_cache,
-                GraphqlData {
-                    data: first_page,
-                    errors: mine_queue_graphql_warnings(&errors),
+    let merge_queue = repository
+        .and_then(|repository| repository.get("mergeQueue"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let queue = match serde_json::from_value::<Option<MergeQueue>>(merge_queue)
+        .context("parsing merge queue")
+    {
+        Ok(Some(merge_queue)) => {
+            let eta = merge_queue.next_entry_estimated_time_to_merge;
+            let mut nodes = merge_queue.entries.nodes;
+            let mut warnings = mine_queue_graphql_warnings(&errors, true);
+            apply_queue_required(client, &mut nodes, required_only, context_cache).map(
+                |required_warnings| {
+                    warnings.extend(required_warnings);
+                    GraphqlData {
+                        data: (nodes, eta),
+                        errors: warnings,
+                    }
                 },
             )
-        })
+        }
+        Ok(None) => queue_error.map_or_else(
+            || {
+                Ok(GraphqlData {
+                    data: (Vec::new(), None),
+                    errors: mine_queue_graphql_warnings(&errors, true),
+                })
+            },
+            Err,
+        ),
+        Err(parse_error) => Err(queue_error.unwrap_or(parse_error)),
+    };
+    let first_page = data
+        .get("search")
+        .cloned()
+        .context("GraphQL response omitted My PRs search")
+        .and_then(|search| {
+            serde_json::from_value::<MineNodes>(search).context("parsing My PRs search")
+        });
+    let mine = match first_page {
+        Ok(first_page) => fetch_mine_pages(
+            client,
+            repo,
+            me,
+            sort,
+            required_only,
+            context_cache,
+            GraphqlData {
+                data: first_page,
+                errors: mine_queue_graphql_warnings(&errors, false),
+            },
+        ),
+        Err(parse_error) => Err(mine_error.unwrap_or(parse_error)),
     };
     Ok(MineQueueResults { mine, queue })
 }
 
-fn mine_queue_graphql_warnings(errors: &[GqlError]) -> Vec<GqlError> {
+fn mine_queue_graphql_warnings(errors: &[GqlError], queue: bool) -> Vec<GqlError> {
     errors
         .iter()
         .filter(|error| {
@@ -768,7 +770,7 @@ fn mine_queue_graphql_warnings(errors: &[GqlError]) -> Vec<GqlError> {
             let search_error = root == Some("search");
             let queue_error = root == Some("repository")
                 && path.get(1).and_then(serde_json::Value::as_str) == Some("mergeQueue");
-            !search_error && !queue_error
+            !(if queue { search_error } else { queue_error })
         })
         .cloned()
         .collect()

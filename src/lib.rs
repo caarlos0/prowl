@@ -4905,6 +4905,13 @@ mod tests {
                 "message": "injected field error",
                 "path": path
             }]);
+            match expected_scope {
+                FetchScope::Queue => {
+                    response["data"]["repository"]["mergeQueue"] = serde_json::Value::Null;
+                }
+                FetchScope::Mine => response["data"]["search"] = serde_json::Value::Null,
+                _ => unreachable!(),
+            }
             let (client, fake) = github::fake::client(routes);
             fake.set_response_on_call(GRAPHQL, 2, 200, &[], &response.to_string());
 
@@ -4954,6 +4961,8 @@ mod tests {
                 "path": ["repository", "mergeQueue"]
             }
         ]);
+        response["data"]["search"] = serde_json::Value::Null;
+        response["data"]["repository"]["mergeQueue"] = serde_json::Value::Null;
         let (client, fake) = github::fake::client(routes);
         fake.set_response_on_call(GRAPHQL, 2, 200, &[], &response.to_string());
 
@@ -4994,6 +5003,81 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn combined_mine_and_queue_keep_data_with_partial_field_errors() {
+        for scope in [FetchScope::Mine, FetchScope::Queue] {
+            let routes = tagged_watch();
+            let (_, body) = routes.iter().find(|(route, _)| route == GRAPHQL).unwrap();
+            let mut response: serde_json::Value = serde_json::from_str(body).unwrap();
+            let path = match scope {
+                FetchScope::Mine => {
+                    response["data"]["search"]["nodes"][0]["reviewDecision"] =
+                        serde_json::Value::Null;
+                    serde_json::json!(["search", "nodes", 0, "reviewDecision"])
+                }
+                FetchScope::Queue => {
+                    response["data"]["repository"]["mergeQueue"] = serde_json::json!({
+                        "nextEntryEstimatedTimeToMerge": null,
+                        "entries": { "nodes": [{
+                            "position": 1,
+                            "enqueuedAt": "2026-01-01T00:00:00Z",
+                            "headCommit": null,
+                            "pullRequest": {
+                                "number": 42,
+                                "title": "Queued PR",
+                                "url": "https://github.com/o/r/pull/42"
+                            }
+                        }]}
+                    });
+                    serde_json::json!(["repository", "mergeQueue", "nextEntryEstimatedTimeToMerge"])
+                }
+                _ => unreachable!(),
+            };
+            response["errors"] = serde_json::json!([{
+                "message": "injected partial field error",
+                "path": path
+            }]);
+            let (client, fake) = github::fake::client(routes);
+            fake.set_response_on_call(GRAPHQL, 2, 200, &[], &response.to_string());
+
+            let outcome = fetch(
+                &Cli::try_parse_from(["prowl"]).unwrap(),
+                &client,
+                &Repo::parse("o/r").unwrap(),
+                "me",
+                &mut Some("main".to_string()),
+                true,
+                true,
+            );
+
+            assert_eq!(outcome.issues.len(), 1);
+            assert_eq!(outcome.issues[0].scope, scope);
+            assert!(outcome.issues[0].warning);
+            assert!(!outcome.issues[0].stale);
+            assert!(
+                outcome.issues[0]
+                    .message
+                    .contains("injected partial field error"),
+                "{}",
+                outcome.issues[0].message
+            );
+            match scope {
+                FetchScope::Mine => assert_eq!(outcome.sections.prs.as_ref().unwrap().len(), 3),
+                FetchScope::Queue => {
+                    assert_eq!(outcome.sections.queue.as_ref().unwrap().len(), 1);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                fake.requests()
+                    .iter()
+                    .filter(|request| request.as_str() == GRAPHQL)
+                    .count(),
+                2
+            );
+        }
     }
 
     #[test]
