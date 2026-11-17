@@ -6055,6 +6055,7 @@ mod tests {
         assert!(baseline.issues.is_empty());
         let mut previous = baseline.sections;
         previous.queue_next_eta = Some(42);
+        previous.reviews_total = Some(154);
         for row in previous.prs.as_mut().unwrap() {
             row.title = "old snapshot".to_string();
         }
@@ -6089,6 +6090,7 @@ mod tests {
         assert!(current.issues.iter().all(|issue| issue.stale));
         assert!(current.sections.merged.is_some());
         assert_eq!(current.sections.queue_next_eta, Some(42));
+        assert_eq!(current.sections.reviews_total, Some(154));
         assert!(
             current
                 .sections
@@ -6259,6 +6261,39 @@ mod tests {
             }
             assert!(schedule.next(inactive, false, true).includes(inactive));
         }
+    }
+
+    #[test]
+    fn skipped_reviews_view_keeps_its_capped_total() {
+        let refresh = |reviews_due| {
+            let previous = Sections {
+                reviews: Some(Vec::new()),
+                reviews_total: Some(154),
+                ..Sections::EMPTY
+            };
+            FetchOutcome {
+                sections: Sections {
+                    reviews: Some(Vec::new()),
+                    ..Sections::EMPTY
+                },
+                issues: Vec::new(),
+                shipment_scan: false,
+            }
+            .merge(
+                Some(previous),
+                Vec::new(),
+                Due {
+                    mine: true,
+                    reviews: reviews_due,
+                    shipments: false,
+                },
+            )
+            .sections
+            .reviews_total
+        };
+
+        assert_eq!(refresh(false), Some(154));
+        assert_eq!(refresh(true), None);
     }
 
     #[test]

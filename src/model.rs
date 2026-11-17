@@ -2047,7 +2047,7 @@ fragment rev on PullRequest {
 pub struct ReviewsData {
     /// PRs requesting my review (directly or via a team, per the scope).
     pub requested: ReviewSearch,
-    /// PRs I have already reviewed.
+    /// PRs I have already reviewed that do not request my review again.
     pub reviewed: ReviewSearch,
 }
 

@@ -513,8 +513,10 @@ still performs all teardown through `finish`.
   first 50 `requested` nodes is not shown, and is never shown with a wrong
   state. If
   either 50-node search is capped, the Reviews header shows the fetched unique
-  row count and exact total (`requested.issueCount + reviewed.issueCount`);
-  this cap is not a fetch error.
+  row count and the total (`requested.issueCount + reviewed.issueCount`);
+  this cap is not a fetch error. The total includes drafts, also with
+  `--no-draft`, because the Reviews searches do not use `draft:false`. During a
+  `/` search, the first number counts the matching rows.
 - **Bell:** rings once per refresh when a PR of mine merges or an open PR's
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
   not ring). The first refresh is silent. Changed rows get a `▸` marker. Bell
@@ -713,7 +715,8 @@ still performs all teardown through `finish`.
   `headRefName`, last commit `committedDate`, and
   `reviews(author:<me>)` `submittedAt`s. The Reviews header shows
   `<fetched unique rows> of <requested issueCount + reviewed issueCount>` when
-  either search is capped. `REVIEWS_QUERY`
+  either search is capped (the total includes drafts; during a `/` search the
+  row count is the matching rows). `REVIEWS_QUERY`
   also includes reviewed-and-merged; `WATCH_MINE_REVIEWS_QUERY` includes the
   Mine-merged alias when enabled. The Reviews-only query has only the two
   open-review searches. When both watch views are due, the combined Mine

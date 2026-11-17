@@ -70,9 +70,9 @@ fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
     }
 }
 
-/// Build the open-reviews rows from the two searches, de-duplicating PRs that
-/// appear in both (a re-review). Sorted by state (actionable first), then by
-/// last update (most recent first).
+/// Build the open-reviews rows from the two searches. The searches do not
+/// overlap; de-duplication only guards against a PR found by both. Sorted by
+/// state (actionable first), then by last update (most recent first).
 pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
     let mut nodes: HashMap<i64, (ReviewPrNode, bool)> = HashMap::new();
     for n in data.requested.nodes {
@@ -345,6 +345,24 @@ mod tests {
         assert_eq!(state(7), ReviewState::ReReview);
         assert_eq!(state(8), ReviewState::Awaiting);
         assert_eq!(state(101), ReviewState::Reviewed);
+    }
+
+    #[test]
+    fn capped_reviewed_search_reports_total() {
+        let data = ReviewsData {
+            requested: ReviewSearch {
+                issue_count: 0,
+                nodes: vec![],
+            },
+            reviewed: ReviewSearch {
+                issue_count: 51,
+                nodes: (1..=50)
+                    .map(|number| node(number, "carol", None, &["2026-06-09T00:00:00Z"]))
+                    .collect(),
+            },
+        };
+        assert!(data.is_capped());
+        assert_eq!(data.total_count(), 51);
     }
 
     #[test]
