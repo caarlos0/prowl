@@ -513,11 +513,12 @@ still performs all teardown through `finish`.
   selected view.
   The REST shipment scan has its own cadence in the same schedule: it runs
   every second attempted Mine refresh, even while a Mine section keeps
-  failing, and `Ctrl-R` forces it. When the Merged section failed in a scan
-  refresh, the scan's release map had no rows to annotate, so the next Mine
-  refresh scans again instead of waiting two refreshes. Cached shipment counts
-  and release annotations show their age; an unmapped PR stays `?` until the
-  next scan. A top tab strip marks the active view.
+  failing, and `Ctrl-R` forces it. When the merged search fails in a scan
+  refresh, the watch keeps that scan's release map (`App::unapplied_releases`,
+  session-only) and builds the next merged rows from it, with no extra REST
+  scan. Cached shipment counts
+  and release annotations show their age; otherwise an unmapped PR stays `?`
+  until the next scan. A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
   reviewed by me), `ReReview` (requested again after I reviewed: a requested
   PR with a review of mine), `Updated` (I

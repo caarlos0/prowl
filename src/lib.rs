@@ -520,14 +520,7 @@ impl Schedule {
                 .any(|i| !i.warning && i.scope.is_shipment_scan())
         {
             self.shipments = fetched;
-            // Without merged rows the scan's release map was dropped, so the
-            // next Mine refresh scans again to annotate them.
-            if !issues
-                .iter()
-                .any(|i| !i.warning && i.scope == FetchScope::Merged)
-            {
-                self.shipments_at_mine_refresh = Some(self.mine_refreshes);
-            }
+            self.shipments_at_mine_refresh = Some(self.mine_refreshes);
         }
     }
 
@@ -705,15 +698,19 @@ fn fetch_scheduled(
     default_branch: &mut Option<String>,
     due: Due,
 ) -> FetchOutcome {
-    fetch_scheduled_with_context_memo(cli, client, repo, me, default_branch, due, None)
+    fetch_scheduled_with_context_memo(cli, client, repo, me, default_branch, &mut None, due, None)
 }
 
+/// `unapplied_releases` holds the release map of a shipment scan whose merged
+/// search failed, so the next merged rows use it instead of waiting a scan.
+#[allow(clippy::too_many_arguments)]
 fn fetch_scheduled_with_context_memo(
     cli: &Cli,
     client: &Client,
     repo: &Repo,
     me: &str,
     default_branch: &mut Option<String>,
+    unapplied_releases: &mut Option<commits::ReleaseMap>,
     due: Due,
     required_context_memo: Option<&mut model::RequiredContextMemo>,
 ) -> FetchOutcome {
@@ -762,8 +759,18 @@ fn fetch_scheduled_with_context_memo(
         shipment_scan = true;
         release_map = fetch_merged_release_map(cli, client, repo, me, nodes, &mut issues);
     }
-    let merged =
-        merged_nodes.map(|nodes| merged::build_rows(nodes, cli.merged_limit, &release_map));
+    let merged = if let Some(nodes) = merged_nodes {
+        let unapplied = unapplied_releases.take();
+        if !shipment_scan && let Some(map) = unapplied {
+            release_map = map;
+        }
+        Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
+    } else {
+        if shipment_scan && cli.show_merged() {
+            *unapplied_releases = Some(release_map);
+        }
+        None
+    };
     let commits = if due.mine && due.shipments && cli.show_shipments() {
         commit_stats
     } else {
@@ -2699,6 +2706,7 @@ struct App<'a> {
     repo: &'a Repo,
     me: String,
     default_branch: Option<String>,
+    unapplied_releases: Option<commits::ReleaseMap>,
     required_context_memo: model::RequiredContextMemo,
     /// The constant next-refresh ETA shown in the key-hint footer.
     eta: String,
@@ -2752,6 +2760,7 @@ impl<'a> App<'a> {
             repo,
             me: String::new(),
             default_branch: None,
+            unapplied_releases: None,
             required_context_memo: model::RequiredContextMemo::default(),
             prev: None,
             last_good: None,
@@ -2915,6 +2924,7 @@ impl<'a> App<'a> {
         let (cli, client, repo) = (self.cli.clone(), self.client.clone(), self.repo.clone());
         let mut me = self.me.clone();
         let mut default_branch = self.default_branch.clone();
+        let mut unapplied_releases = self.unapplied_releases.clone();
         let mut required_context_memo = self.required_context_memo.clone();
         let resolve = me.is_empty();
         let shipments_enabled = cli.show_shipments() || cli.show_merged();
@@ -2932,10 +2942,17 @@ impl<'a> App<'a> {
                     &repo,
                     &me,
                     &mut default_branch,
+                    &mut unapplied_releases,
                     due,
                     Some(&mut required_context_memo),
                 );
-                Ok((me, default_branch, required_context_memo, outcome))
+                Ok((
+                    me,
+                    default_branch,
+                    unapplied_releases,
+                    required_context_memo,
+                    outcome,
+                ))
             })();
             let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
         });
@@ -2945,9 +2962,16 @@ impl<'a> App<'a> {
                 return Ok(Flow::Quit);
             }
             match rx.try_recv() {
-                Ok(Ok((me, default_branch, required_context_memo, outcome))) => {
+                Ok(Ok((
+                    me,
+                    default_branch,
+                    unapplied_releases,
+                    required_context_memo,
+                    outcome,
+                ))) => {
                     self.me = me;
                     self.default_branch = default_branch;
+                    self.unapplied_releases = unapplied_releases;
                     self.required_context_memo = required_context_memo;
                     // Cleared before painting, so the result frame already shows
                     // the plain `^R refresh` hint again.
@@ -6673,6 +6697,7 @@ mod tests {
                         &repo,
                         "me",
                         &mut None,
+                        &mut None,
                         Due {
                             mine: true,
                             reviews: want_reviews,
@@ -6738,6 +6763,7 @@ mod tests {
                         &client,
                         &repo,
                         "me",
+                        &mut None,
                         &mut None,
                         Due {
                             mine: expected_posts != 0,
@@ -8089,7 +8115,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_merged_search_retries_the_shipment_scan_for_release_cells() {
+    fn failed_merged_search_keeps_the_scan_release_map_for_the_next_rows() {
         let cli = Cli::try_parse_from(["prowl"]).unwrap();
         let repo = Repo::parse("o/r").unwrap();
         let (client, fake) = github::fake::client(tagged_watch());
@@ -8100,16 +8126,27 @@ mod tests {
         fake.set_response(GRAPHQL, 200, &[], &failed.to_string());
         let mut schedule = Schedule::default();
         let mut branch = Some("main".to_string());
+        let mut releases = None;
         let mut last = None;
         let mut issues = Vec::new();
-        let mut shown = Vec::new();
-        for tick in 1..=2 {
+        for (tick, scan) in [(1, true), (2, false)] {
             if tick == 2 {
                 fake.set_response(GRAPHQL, 200, &[], &graphql(&[3, 2, 1]).1);
             }
+            let sent = fake.requests().len();
             let due = schedule.next(View::Mine, false, true);
-            assert!(due.shipments, "refresh {tick} scans shipments");
-            let out = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+            assert_eq!(due.shipments, scan, "refresh {tick}");
+            let out = fetch_scheduled_with_context_memo(
+                &cli,
+                &client,
+                &repo,
+                "me",
+                &mut branch,
+                &mut releases,
+                due,
+                None,
+            );
+            assert_eq!(gets(&fake.requests()[sent..]) > 0, scan, "refresh {tick}");
             schedule.record(
                 due,
                 &out.issues,
@@ -8118,20 +8155,18 @@ mod tests {
                 out.has_fresh_mine_data(),
             );
             let out = out.merge(last.take(), std::mem::take(&mut issues), due);
-            shown.push(out.sections.merged.as_ref().map(|rows| {
-                merged::to_table(rows, true, &HashSet::new(), false)
-                    .rows
-                    .iter()
-                    .map(|r| (r[2].text.clone(), r[4].text.clone()))
-                    .collect::<Vec<_>>()
-            }));
             issues = out.issues;
             last = Some(out.sections);
         }
-        let second = shown[1].clone().unwrap();
-        assert!(
-            second.contains(&("#2".to_string(), "v2".to_string())),
-            "{second:?}"
-        );
+        let rows = last.unwrap().merged.unwrap();
+        let cells: Vec<_> = merged::to_table(&rows, true, &HashSet::new(), false)
+            .rows
+            .iter()
+            .map(|r| (r[2].text.clone(), r[4].text.clone()))
+            .collect();
+        let expected = [("#3", "\u{2014}"), ("#2", "v2"), ("#1", "v1")]
+            .map(|(pr, release)| (pr.to_string(), release.to_string()));
+        assert_eq!(cells, expected);
+        assert!(releases.is_none());
     }
 }
