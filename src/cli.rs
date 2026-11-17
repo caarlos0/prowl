@@ -220,12 +220,10 @@ impl Cli {
     }
 }
 
-/// A duration that remembers the string it was parsed from, so we can echo it
-/// back (e.g. "the last 7d") instead of a normalized form.
+/// A parsed duration.
 #[derive(Clone, Debug)]
 pub struct Dur {
     pub dur: Duration,
-    pub raw: String,
 }
 
 impl FromStr for Dur {
@@ -233,7 +231,6 @@ impl FromStr for Dur {
     fn from_str(s: &str) -> Result<Self, String> {
         Ok(Dur {
             dur: parse_duration(s).map_err(|e| e.to_string())?,
-            raw: s.trim().to_string(),
         })
     }
 }

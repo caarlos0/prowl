@@ -72,10 +72,6 @@ impl Repo {
             name: name.to_string(),
         })
     }
-
-    pub fn slug(&self) -> String {
-        format!("{}/{}", self.owner, self.name)
-    }
 }
 
 /// Auto-detect the repository from the local git `origin` remote.

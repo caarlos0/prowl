@@ -1846,7 +1846,6 @@ fn watch_body(
 
 /// Paint a watch frame with a scrollable body and a pinned bottom block.
 /// The caller must clear the surface first.
-#[allow(clippy::too_many_arguments)]
 pub fn paint_watch_frame(
     screen: &mut impl TextSurface,
     sections: &Sections,
@@ -1979,25 +1978,13 @@ pub fn render_to_string(
     ascii: bool,
     profile: Profile,
 ) -> String {
-    render_to_string_with_status(sections, ui, changes, "", footer, ascii, profile)
-}
-
-fn render_to_string_with_status(
-    sections: &Sections,
-    ui: &Ui,
-    changes: &Changes,
-    status: &str,
-    footer: Option<(&str, bool)>,
-    ascii: bool,
-    profile: Profile,
-) -> String {
     render_to_string_with_warnings(
         sections,
         ui,
         changes,
         RenderMessages {
             warnings: &[],
-            status,
+            status: "",
         },
         footer,
         ascii,
@@ -2589,7 +2576,6 @@ impl Ui {
 
     /// Apply a watch-frame mouse event. Return the exact painted hyperlink,
     /// if any, for the caller to open.
-    #[allow(clippy::too_many_arguments)]
     pub fn mouse_event(
         &mut self,
         screen: &impl TextSurface,
@@ -7084,11 +7070,14 @@ mod tests {
     fn one_shot_renders_each_section_error() {
         let cli = Cli::try_parse_from(["prowl", "--only", "mine"]).unwrap();
         let status = "error: My PRs unavailable: first\nerror: Merge Queue stale: second";
-        let output = render_to_string_with_status(
+        let output = render_to_string_with_warnings(
             &Sections::EMPTY,
             &Ui::once(&cli),
             &Changes::default(),
-            status,
+            RenderMessages {
+                warnings: &[],
+                status,
+            },
             None,
             true,
             Profile::Disabled,
