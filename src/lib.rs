@@ -141,6 +141,13 @@ impl FetchScope {
             Self::Reviews | Self::ReviewedMerged => View::Reviews,
         }
     }
+
+    fn is_shipment_scan(self) -> bool {
+        matches!(
+            self,
+            Self::Upcoming | Self::Shipments | Self::ReleaseMetadata
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -197,6 +204,7 @@ impl FetchIssue {
 struct FetchOutcome {
     sections: Sections,
     issues: Vec<FetchIssue>,
+    shipment_scan: bool,
 }
 
 #[derive(Default)]
@@ -316,23 +324,40 @@ impl FetchOutcome {
         due: Due,
     ) -> Self {
         let mut previous = previous.unwrap_or(Sections::EMPTY);
+        if !due.shipments {
+            self.sections.commits = previous.commits.take();
+            let releases: std::collections::HashMap<_, _> = previous
+                .merged
+                .iter()
+                .flatten()
+                .filter_map(|row| row.release.as_ref().map(|release| (row.number, release)))
+                .collect();
+            if let Some(rows) = &mut self.sections.merged {
+                for row in rows {
+                    if let Some(release) = releases.get(&row.number) {
+                        row.release = Some((*release).clone());
+                        row.release_unknown = false;
+                    }
+                }
+            }
+        }
         if !due.mine {
             self.sections.merged = previous.merged.take();
             self.sections.queue = previous.queue.take();
             self.sections.queue_next_eta = previous.queue_next_eta.take();
             self.sections.prs = previous.prs.take();
-            self.sections.commits = previous.commits.take();
         }
         if !due.reviews {
             self.sections.reviews = previous.reviews.take();
             self.sections.reviewed_merged = previous.reviewed_merged.take();
         }
         let mut merged = self.reconcile(Some(previous));
-        merged.issues.extend(
-            previous_issues
-                .into_iter()
-                .filter(|issue| !due.includes(issue.scope.view())),
-        );
+        merged
+            .issues
+            .extend(previous_issues.into_iter().filter(|issue| {
+                !due.includes(issue.scope.view())
+                    || (!due.shipments && issue.scope.is_shipment_scan())
+            }));
         // Keep the fetch order (Mine before Reviews) on every refresh.
         merged
             .issues
@@ -353,6 +378,7 @@ struct Fetched {
 struct Due {
     mine: bool,
     reviews: bool,
+    shipments: bool,
 }
 
 impl Due {
@@ -370,12 +396,25 @@ impl Due {
 #[derive(Default)]
 struct Schedule {
     refresh: u64,
+    mine_refreshes: u64,
+    shipments_at_mine_refresh: Option<u64>,
     mine: Option<Fetched>,
     reviews: Option<Fetched>,
+    shipments: Option<Fetched>,
+}
+
+fn updated_note(at: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let age = timefmt::relative_age(now, at);
+    if age == "now" {
+        "updated just now".to_string()
+    } else {
+        format!("updated {age} ago")
+    }
 }
 
 impl Schedule {
     const INACTIVE_EVERY: u64 = 2;
+    const SHIPMENTS_EVERY: u64 = 2;
 
     fn last(&self, view: View) -> Option<Fetched> {
         match view {
@@ -385,7 +424,7 @@ impl Schedule {
     }
 
     /// Start the next refresh and select the views it fetches.
-    fn next(&mut self, active: View, manual: bool) -> Due {
+    fn next(&mut self, active: View, manual: bool, shipments_enabled: bool) -> Due {
         self.refresh += 1;
         let due = |view| {
             view == active
@@ -394,16 +433,30 @@ impl Schedule {
                     .last(view)
                     .is_none_or(|last| self.refresh - last.refresh >= Self::INACTIVE_EVERY)
         };
+        let mine = due(View::Mine);
+        let next_mine_refresh = self.mine_refreshes + u64::from(mine);
         Due {
-            mine: due(View::Mine),
+            mine,
             reviews: due(View::Reviews),
+            shipments: shipments_enabled
+                && mine
+                && (manual
+                    || self
+                        .shipments_at_mine_refresh
+                        .is_none_or(|last| next_mine_refresh - last >= Self::SHIPMENTS_EVERY)),
         }
     }
 
     /// Record a completed refresh of the `due` views. A view with a failed
     /// section keeps its previous time, so the next refresh retries it. A
     /// partial-data warning still delivered data, so it counts as fetched.
-    fn record(&mut self, due: Due, issues: &[FetchIssue], at: chrono::DateTime<chrono::Utc>) {
+    fn record(
+        &mut self,
+        due: Due,
+        issues: &[FetchIssue],
+        at: chrono::DateTime<chrono::Utc>,
+        shipment_scan: bool,
+    ) {
         let fetched = Some(Fetched {
             refresh: self.refresh,
             at,
@@ -413,9 +466,19 @@ impl Schedule {
         };
         if succeeded(View::Mine) {
             self.mine = fetched;
+            self.mine_refreshes += 1;
         }
         if succeeded(View::Reviews) {
             self.reviews = fetched;
+        }
+        if due.shipments
+            && shipment_scan
+            && !issues
+                .iter()
+                .any(|i| !i.warning && i.scope.is_shipment_scan())
+        {
+            self.shipments = fetched;
+            self.shipments_at_mine_refresh = Some(self.mine_refreshes);
         }
     }
 
@@ -426,12 +489,16 @@ impl Schedule {
         if shown.refresh >= other.refresh {
             return None;
         }
-        let age = timefmt::relative_age(now, shown.at);
-        Some(if age == "now" {
-            "updated just now".to_string()
-        } else {
-            format!("updated {age} ago")
-        })
+        Some(updated_note(shown.at, now))
+    }
+
+    fn shipments_age_note(&self, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+        let shipments = self.shipments?;
+        let mine = self.mine?;
+        if shipments.refresh >= mine.refresh {
+            return None;
+        }
+        Some(updated_note(shipments.at, now))
     }
 }
 
@@ -547,13 +614,36 @@ fn fetch(
     want_mine: bool,
     want_reviews: bool,
 ) -> FetchOutcome {
+    fetch_scheduled(
+        cli,
+        client,
+        repo,
+        me,
+        default_branch,
+        want_mine,
+        want_reviews,
+        true,
+    )
+}
+
+fn fetch_scheduled(
+    cli: &Cli,
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    default_branch: &mut Option<String>,
+    want_mine: bool,
+    want_reviews: bool,
+    scan_shipments: bool,
+) -> FetchOutcome {
     let mut issues = Vec::new();
-    let branch_error = if want_mine && cli.show_shipments() {
+    let mut shipment_scan = want_mine && scan_shipments && cli.show_shipments();
+    let branch_error = if want_mine && scan_shipments && cli.show_shipments() {
         resolve_default_branch(client, repo, default_branch)
     } else {
         None
     };
-    let default_branch = if want_mine && cli.show_shipments() {
+    let default_branch = if want_mine && scan_shipments && cli.show_shipments() {
         default_branch.as_deref()
     } else {
         None
@@ -566,6 +656,7 @@ fn fetch(
         me,
         default_branch,
         want_mine,
+        scan_shipments,
         &mut issues,
     );
     if let Some(error) = branch_error {
@@ -575,9 +666,12 @@ fn fetch(
     let fetched_reviews =
         fetch_review_sections(cli, client, repo, me, want_mine, want_reviews, &mut issues);
     let merged_nodes = fetched_reviews.merged_nodes;
-    if !cli.show_shipments()
+    if want_mine
+        && scan_shipments
+        && !cli.show_shipments()
         && let Some(nodes) = merged_nodes.as_deref()
     {
+        shipment_scan = true;
         release_map = fetch_merged_release_map(cli, client, repo, me, nodes, &mut issues);
     }
     let merged =
@@ -640,6 +734,7 @@ fn fetch(
             reviewed_merged: fetched_reviews.reviewed_merged,
         },
         issues,
+        shipment_scan,
     }
 }
 
@@ -667,10 +762,11 @@ fn fetch_release_data(
     me: &str,
     default_branch: Option<&str>,
     want_mine: bool,
+    scan_shipments: bool,
     issues: &mut Vec<FetchIssue>,
 ) -> (Option<commits::CommitStats>, commits::ReleaseMap) {
     // Shipment counts also supply merged-row release annotations.
-    if want_mine && cli.show_shipments() {
+    if want_mine && scan_shipments && cli.show_shipments() {
         match commits::fetch(client, repo, me, default_branch, cli.include_pre_releases) {
             Ok((stats, release_map, errors)) => {
                 release_errors(errors, issues, FetchScope::Shipments, cli.show_merged());
@@ -687,6 +783,8 @@ fn fetch_release_data(
                 )
             }
         }
+    } else if want_mine && !scan_shipments {
+        (None, commits::ReleaseMap::incomplete())
     } else {
         (None, commits::ReleaseMap::new())
     }
@@ -2550,7 +2648,8 @@ impl<'a> App<'a> {
         let mut me = self.me.clone();
         let mut default_branch = self.default_branch.clone();
         let resolve = me.is_empty();
-        let due = self.schedule.next(self.ui.view, manual);
+        let shipments_enabled = cli.show_shipments() || cli.show_merged();
+        let due = self.schedule.next(self.ui.view, manual, shipments_enabled);
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -2558,7 +2657,7 @@ impl<'a> App<'a> {
                 if resolve {
                     me = client.me()?;
                 }
-                let outcome = fetch(
+                let outcome = fetch_scheduled(
                     &cli,
                     &client,
                     &repo,
@@ -2566,6 +2665,7 @@ impl<'a> App<'a> {
                     &mut default_branch,
                     due.mine,
                     due.reviews,
+                    due.shipments,
                 );
                 Ok((me, default_branch, outcome))
             })();
@@ -2583,8 +2683,12 @@ impl<'a> App<'a> {
                     // Cleared before painting, so the result frame already shows
                     // the plain `^R refresh` hint again.
                     self.refreshing = false;
-                    self.schedule
-                        .record(due, &outcome.issues, chrono::Utc::now());
+                    self.schedule.record(
+                        due,
+                        &outcome.issues,
+                        chrono::Utc::now(),
+                        outcome.shipment_scan,
+                    );
                     self.apply(outcome, due)?;
                     return Ok(Flow::Continue);
                 }
@@ -2897,7 +3001,9 @@ impl<'a> App<'a> {
             std::mem::take(&mut self.fetch_issues),
             due,
         );
-        let FetchOutcome { sections, issues } = outcome;
+        let FetchOutcome {
+            sections, issues, ..
+        } = outcome;
         let mut tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
         tracker.preserve_untrusted(
             self.prev.as_ref(),
@@ -2931,10 +3037,25 @@ impl<'a> App<'a> {
     }
 
     fn status(&self) -> String {
+        let now = chrono::Utc::now();
+        let shipment_label = match (
+            self.ui.view == View::Mine,
+            self.cli.show_shipments(),
+            self.cli.show_merged(),
+        ) {
+            (true, true, true) => Some("My Shipments and merged release metadata"),
+            (true, true, false) => Some("My Shipments"),
+            (true, false, true) => Some("Merged release metadata"),
+            _ => None,
+        };
+        let shipment_age = shipment_label
+            .zip(self.schedule.shipments_age_note(now))
+            .map(|(label, age)| format!("{label} {age}"));
         self.fetch_issues
             .iter()
             .map(FetchIssue::line)
-            .chain(self.schedule.age_note(self.ui.view, chrono::Utc::now()))
+            .chain(self.schedule.age_note(self.ui.view, now))
+            .chain(shipment_age)
             .chain((!self.last_status.is_empty()).then(|| self.last_status.clone()))
             .collect::<Vec<_>>()
             .join("\n")
@@ -5255,9 +5376,18 @@ mod tests {
         let cli = Cli::try_parse_from(["prowl"]).unwrap();
         let repo = Repo::parse("o/r").unwrap();
         let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
-        let fetch_views = |client: &Client, mine, reviews| {
+        let fetch_views = |client: &Client, mine, reviews, shipments| {
             let mut branch = Some("main".to_string());
-            fetch(&cli, client, &repo, "me", &mut branch, mine, reviews)
+            fetch_scheduled(
+                &cli,
+                client,
+                &repo,
+                "me",
+                &mut branch,
+                mine,
+                reviews,
+                shipments,
+            )
         };
         let render = |sections: &Sections, view| {
             render_to_string(
@@ -5271,23 +5401,17 @@ mod tests {
         };
         for active in [View::Mine, View::Reviews] {
             let inactive = active.toggle();
-            // (GET, POST) of a refresh that skips the inactive view. With Mine
-            // active, Mine merged leaves the Reviews request as its own search.
-            let skipped_counts = match active {
-                View::Mine => (4, 3),
-                View::Reviews => (0, 1),
-            };
             let (client, fake) = github::fake::client(tagged_watch());
             let mut schedule = Schedule::default();
             let mut last_good = None;
             let mut issues = Vec::new();
             let mut inactive_shown = String::new();
             // (refresh, Ctrl-R, PRs in the fixture, inactive view due)
-            for (tick, manual, numbers, inactive_due) in [
-                (1, false, &[3, 2, 1][..], true),
-                (2, false, &[2, 1][..], false),
-                (3, false, &[1][..], true),
-                (4, true, &[3][..], true),
+            for (tick, manual, numbers, inactive_due, shipments_due) in [
+                (1, false, &[3, 2, 1][..], true, true),
+                (2, false, &[2, 1][..], false, false),
+                (3, false, &[1][..], true, active == View::Mine),
+                (4, true, &[3][..], true, true),
             ] {
                 let label = format!("{active:?} active, refresh {tick}");
                 let routes = tagged_watch_with_merged(numbers);
@@ -5295,15 +5419,15 @@ mod tests {
                 fake.set_response(GRAPHQL, 200, &[], graphql);
                 // Baseline: a refresh that fetches both views.
                 let (base_client, base_fake) = github::fake::client(routes.clone());
-                let base = fetch_views(&base_client, true, true);
+                let base = fetch_views(&base_client, true, true, true);
                 let before = counts(&base_fake.requests());
 
                 let sent = fake.requests().len();
-                let due = schedule.next(active, manual);
-                let outcome = fetch_views(&client, due.mine, due.reviews);
+                let due = schedule.next(active, manual, true);
+                let outcome = fetch_views(&client, due.mine, due.reviews, due.shipments);
                 let after = counts(&fake.requests()[sent..]);
                 let now = start + chrono::TimeDelta::minutes(5 * tick);
-                schedule.record(due, &outcome.issues, now);
+                schedule.record(due, &outcome.issues, now, outcome.shipment_scan);
                 let outcome = outcome.merge(last_good.take(), std::mem::take(&mut issues), due);
                 println!(
                     "TICK_COUNTS {label}: before GET={} POST={} after GET={} POST={}",
@@ -5313,9 +5437,19 @@ mod tests {
                 assert!(due.includes(active), "{label}: {due:?}");
                 assert_eq!(due.includes(inactive), inactive_due, "{label}: {due:?}");
                 assert_eq!(before, (4, 3), "{label}");
+                assert_eq!(due.shipments, shipments_due, "{label}: {due:?}");
                 assert_eq!(
                     after,
-                    if inactive_due { before } else { skipped_counts },
+                    (
+                        if due.shipments { before.0 } else { 0 },
+                        if due.reviews {
+                            if due.mine { before.1 } else { 1 }
+                        } else if due.mine {
+                            before.1
+                        } else {
+                            0
+                        },
+                    ),
                     "{label}"
                 );
                 assert!(outcome.issues.is_empty(), "{label}: {:?}", outcome.issues);
@@ -5347,7 +5481,7 @@ mod tests {
                 issues = outcome.issues;
             }
             // After Tab, the next refresh fetches the newly active view.
-            assert!(schedule.next(inactive, false).includes(inactive));
+            assert!(schedule.next(inactive, false, true).includes(inactive));
         }
     }
 
@@ -5360,6 +5494,7 @@ mod tests {
         let outcome = FetchOutcome {
             sections: Sections::EMPTY,
             issues: vec![FetchIssue::new(FetchScope::Reviews, &error)],
+            shipment_scan: false,
         }
         .merge(
             None,
@@ -5367,6 +5502,7 @@ mod tests {
             Due {
                 mine: false,
                 reviews: true,
+                shipments: false,
             },
         );
 
@@ -5386,19 +5522,19 @@ mod tests {
         )];
         let mut schedule = Schedule::default();
         for tick in 1..=2 {
-            let due = schedule.next(View::Mine, false);
-            schedule.record(due, &[], at(tick));
+            let due = schedule.next(View::Mine, false, false);
+            schedule.record(due, &[], at(tick), false);
         }
 
-        let due = schedule.next(View::Mine, false);
+        let due = schedule.next(View::Mine, false, false);
         assert!(due.reviews, "{due:?}");
-        schedule.record(due, &failed, at(3));
+        schedule.record(due, &failed, at(3), false);
 
         assert_eq!(
             schedule.age_note(View::Reviews, at(3)).as_deref(),
             Some("updated 10m ago")
         );
-        let due = schedule.next(View::Mine, false);
+        let due = schedule.next(View::Mine, false, false);
         assert!(due.reviews, "retry after the failure: {due:?}");
     }
 
@@ -5411,13 +5547,36 @@ mod tests {
             ..FetchIssue::new(FetchScope::ReviewedMerged, &anyhow::anyhow!("denied"))
         }];
         let mut schedule = Schedule::default();
-        let due = schedule.next(View::Mine, false);
+        let due = schedule.next(View::Mine, false, false);
         assert!(due.reviews, "{due:?}");
-        schedule.record(due, &partial, at(1));
+        schedule.record(due, &partial, at(1), false);
 
         assert_eq!(schedule.age_note(View::Reviews, at(1)), None);
-        let due = schedule.next(View::Mine, false);
+        let due = schedule.next(View::Mine, false, false);
         assert!(!due.reviews, "partial data is not retried: {due:?}");
+    }
+
+    #[test]
+    fn shipment_scans_retry_until_an_attempt_succeeds() {
+        let at = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let mut schedule = Schedule::default();
+
+        let due = schedule.next(View::Mine, false, true);
+        assert!(due.shipments);
+        schedule.record(due, &[], at, false);
+
+        let due = schedule.next(View::Mine, false, true);
+        assert!(due.shipments, "a skipped scan must stay due");
+        let failure = [FetchIssue::new(
+            FetchScope::Shipments,
+            &anyhow::anyhow!("rate limit"),
+        )];
+        schedule.record(due, &failure, at, true);
+
+        assert!(
+            schedule.next(View::Mine, false, true).shipments,
+            "a failed scan must be retried"
+        );
     }
 
     #[test]
@@ -6207,6 +6366,88 @@ mod tests {
             );
             assert_eq!(watch.sections.reviewed_merged.unwrap().len(), numbers.len());
         }
+    }
+
+    #[test]
+    fn skipped_release_scan_preserves_known_tags_and_marks_new_prs_unknown() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "merged"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch_with_merged(&[2]));
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let mut schedule = Schedule::default();
+        let mut branch = Some("main".to_string());
+
+        let first_due = schedule.next(View::Mine, false, true);
+        assert!(first_due.shipments);
+        let first = fetch_scheduled(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut branch,
+            first_due.mine,
+            first_due.reviews,
+            first_due.shipments,
+        );
+        assert!(first.shipment_scan);
+        schedule.record(
+            first_due,
+            &first.issues,
+            start + chrono::TimeDelta::minutes(5),
+            first.shipment_scan,
+        );
+        let first = first.merge(None, Vec::new(), first_due);
+        assert_eq!(shipped(&first.sections), [(2, Some("v2".to_string()))]);
+
+        let updated = tagged_watch_with_merged(&[3, 2]);
+        let graphql = &updated
+            .iter()
+            .find(|(route, _)| route == GRAPHQL)
+            .unwrap()
+            .1;
+        fake.set_response(GRAPHQL, 200, &[], graphql);
+        let sent = fake.requests().len();
+        let second_due = schedule.next(View::Mine, false, true);
+        assert!(!second_due.shipments);
+        let second = fetch_scheduled(
+            &cli,
+            &client,
+            &repo,
+            "me",
+            &mut branch,
+            second_due.mine,
+            second_due.reviews,
+            second_due.shipments,
+        );
+        assert!(!second.shipment_scan);
+        assert_eq!(fake.requests()[sent..], [GRAPHQL]);
+        schedule.record(
+            second_due,
+            &second.issues,
+            start + chrono::TimeDelta::minutes(10),
+            second.shipment_scan,
+        );
+        let second = second.merge(Some(first.sections), first.issues, second_due);
+        let rows = second.sections.merged.as_ref().unwrap();
+        let shipped_pr = rows.iter().find(|row| row.number == 2).unwrap();
+        assert_eq!(shipped_pr.release.as_ref().unwrap().tag, "v2");
+        let new_pr = rows.iter().find(|row| row.number == 3).unwrap();
+        assert!(new_pr.release_unknown);
+        assert_eq!(
+            merged::to_table(rows, true, &HashSet::new(), false)
+                .rows
+                .iter()
+                .find(|row| row[2].text == "#3")
+                .unwrap()[4]
+                .text,
+            "?"
+        );
+        assert_eq!(
+            schedule
+                .shipments_age_note(start + chrono::TimeDelta::minutes(10))
+                .as_deref(),
+            Some("updated 5m ago")
+        );
     }
 
     #[test]
