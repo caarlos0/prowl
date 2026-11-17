@@ -373,9 +373,9 @@ fragment merged on PullRequest {
   number title url headRefName mergedAt author { login }
 }"#;
 
-const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeQueue: Boolean!, $me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
+const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeDefaultBranchRef: Boolean!, $includeQueue: Boolean!, $includeMine: Boolean!, $me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
   repository(owner: $owner, name: $name) {
-    defaultBranchRef {
+    defaultBranchRef @include(if: $includeDefaultBranchRef) {
       id
       refUpdateRule { requiredStatusCheckContexts }
       rules(first: 100) {
@@ -411,7 +411,7 @@ const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!,
       }
     }
   }
-  search(type: ISSUE, first: 5, after: $after, query: $q) {
+  search(type: ISSUE, first: 5, after: $after, query: $q) @include(if: $includeMine) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
@@ -813,6 +813,7 @@ pub(crate) struct WatchQueryOptions<'a> {
     pub(crate) since: &'a str,
     pub(crate) merged_limit: usize,
     pub(crate) no_draft: bool,
+    pub(crate) include_mine: bool,
     pub(crate) include_queue: bool,
     pub(crate) include_mine_merged: bool,
 }
@@ -840,7 +841,9 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_cache(
             "name": repo.name,
             "q": q,
             "after": null,
+            "includeDefaultBranchRef": options.include_mine || options.include_queue,
             "includeQueue": options.include_queue,
+            "includeMine": options.include_mine,
             "me": me,
             "requested": requested,
             "reviewed": reviewed,
@@ -860,7 +863,7 @@ pub(crate) fn fetch_mine_queue_reviews_with_context_cache(
         MineQueueOptions {
             q: &q,
             required_only,
-            include_mine: true,
+            include_mine: options.include_mine,
             include_queue: options.include_queue,
             include_merged: options.include_mine_merged,
         },

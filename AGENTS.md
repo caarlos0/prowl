@@ -125,12 +125,14 @@ watch event loop); everything else is testable modules:
   and `reviewed:` open-review searches with the reviewed-merged search. The Mine
   merged search rides in the first Mine GraphQL request: the combined queue-
   and-Mine request, the queue request when My PRs are hidden, or Mine page 1
-  when the queue is hidden. `WATCH_MINE_REVIEWS_QUERY` combines the first Mine
-  page, optional queue, and Reviews searches when both views are due and My PRs
-  is shown; it includes the Mine merged search exactly once when that section is
-  enabled. `REVIEWS_QUERY` never carries Mine merged; a standalone search is
-  needed only when neither My PRs nor Merge Queue can carry it. Alias errors
-  stay scoped to their sections. My PRs and
+  when the queue is hidden. `WATCH_MINE_REVIEWS_QUERY` combines the Reviews
+  searches with the enabled Mine sections (first Mine page, queue, Mine merged)
+  when both views are due and My PRs or My merged PRs is shown; it includes the
+  Mine merged search exactly once when that section is enabled, and skips the
+  Mine page and default-branch rules when neither My PRs nor Merge Queue is
+  shown. `REVIEWS_QUERY` never carries Mine merged; a standalone search is
+  needed only when no Mine, queue, or two-view watch request can carry it.
+  Alias errors stay scoped to their sections. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   GraphQL partial-data errors warn in each affected section, including a
   section that consumes warned shared rule data; the cache adds no requests.
@@ -468,9 +470,10 @@ still performs all teardown through `finish`.
   (`FetchOutcome::merge`), so Tab switches instantly from `last_good` with no
   request; the next refresh fetches the newly active view. When the shown view
   was fetched before the other, a dim `updated 6m ago` status line
-  (`Schedule::age_note`) shows its age. When both views are due and My PRs is
-  enabled, the first Mine page, optional queue, and Reviews searches share one
-  request; the Mine merged search appears once when enabled. Otherwise Mine
+  (`Schedule::age_note`) shows its age. When both views are due and My PRs or
+  My merged PRs is enabled, the Reviews searches and the enabled Mine sections
+  (first Mine page, queue, Mine merged) share one request; the Mine merged
+  search appears once when enabled. Otherwise Mine
   merged is fetched with the first Mine request when that view is due, and
   Reviews fetches only its open review searches and reviewed-and-merged search.
   `--once`/piped fetches only the
@@ -671,8 +674,9 @@ still performs all teardown through `finish`.
   re-sorted by `mergedAt` for display). The first Mine request carries it as
   `mineMerged`: the combined queue-and-Mine request, the queue request when My
   PRs are hidden, Mine page 1 when the queue is hidden, or the combined
-  two-view watch request. A standalone merged request is used only when no Mine
-  or queue request can carry it. It also fetches `author` (used by the
+  two-view watch request (also with `--only merged`). A standalone merged
+  request is used only when no Mine, queue, or two-view watch request can carry
+  it. It also fetches `author` (used by the
   reviewed-and-merged section; the Mine merged section ignores it). An alias
   error affects only that section; a request-level failure reports each section
   included in that request.

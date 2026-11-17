@@ -681,14 +681,15 @@ fn fetch_scheduled(
         issues.push(FetchIssue::new(FetchScope::Upcoming, &error));
     }
 
-    let (fetched_reviews, mine_sections) = if due.mine && due.reviews && cli.show_mine() {
-        fetch_mine_reviews_sections(cli, client, repo, me, &mut issues)
-    } else {
-        let fetched_reviews =
-            fetch_review_sections(cli, client, repo, me, due.reviews, &mut issues);
-        let mine_sections = fetch_mine_sections(cli, client, repo, me, due.mine, &mut issues);
-        (fetched_reviews, mine_sections)
-    };
+    let (fetched_reviews, mine_sections) =
+        if due.mine && due.reviews && (cli.show_mine() || cli.show_merged()) {
+            fetch_mine_reviews_sections(cli, client, repo, me, &mut issues)
+        } else {
+            let fetched_reviews =
+                fetch_review_sections(cli, client, repo, me, due.reviews, &mut issues);
+            let mine_sections = fetch_mine_sections(cli, client, repo, me, due.mine, &mut issues);
+            (fetched_reviews, mine_sections)
+        };
     let merged_nodes = mine_sections.merged_nodes;
     if due.mine
         && due.shipments
@@ -1076,6 +1077,7 @@ fn fetch_mine_reviews_sections(
             since: &since,
             merged_limit: cli.merged_limit,
             no_draft: cli.no_draft,
+            include_mine: cli.show_mine(),
             include_queue: cli.show_queue(),
             include_mine_merged: cli.show_merged(),
         },
@@ -1086,7 +1088,7 @@ fn fetch_mine_reviews_sections(
         ),
         Err(error) => {
             let sections = MineSectionsToFetch {
-                mine: true,
+                mine: cli.show_mine(),
                 queue: cli.show_queue(),
                 merged: cli.show_merged(),
             };
@@ -7024,7 +7026,20 @@ mod tests {
         let repo = Repo::parse("o/r").unwrap();
         for numbers in [&[][..], &[2][..], &[3][..]] {
             let (once, requests) = fetch_offline(&args, tagged_with_merged(numbers));
-            let (client, fake) = github::fake::client(tagged_with_merged(numbers));
+            let routes = tagged_with_merged(numbers);
+            let graphql = routes
+                .iter()
+                .find(|(route, _)| route == GRAPHQL)
+                .unwrap()
+                .1
+                .clone();
+            let (client, fake) = github::fake::client(routes);
+            let variables = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = std::sync::Arc::clone(&variables);
+            fake.set_graphql_responder(move |body| {
+                seen.lock().unwrap().push(body["variables"].clone());
+                graphql.clone()
+            });
             let watch = fetch(
                 &cli,
                 &client,
@@ -7036,9 +7051,14 @@ mod tests {
             );
 
             assert!(watch.issues.is_empty(), "{:?}", watch.issues);
-            let watch_requests = fake.requests();
-            assert_eq!(watch_requests.len(), requests.len() + 1);
-            assert_eq!(&watch_requests[1..], requests);
+            assert_eq!(fake.requests(), requests);
+            let variables = variables.lock().unwrap();
+            assert_eq!(variables.len(), 1);
+            assert_eq!(variables[0]["includeMine"], false);
+            assert_eq!(variables[0]["includeQueue"], false);
+            assert_eq!(variables[0]["includeDefaultBranchRef"], false);
+            assert_eq!(variables[0]["includeMineMerged"], true);
+            assert!(variables[0].get("requested").is_some());
             assert_eq!(
                 serde_json::to_value(&watch.sections.merged).unwrap(),
                 serde_json::to_value(&once.merged).unwrap()
