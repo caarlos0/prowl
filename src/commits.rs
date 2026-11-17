@@ -811,7 +811,7 @@ mod tests {
 
         assert!(stats.available);
         assert!(stats.upcoming.is_none());
-        assert!(stats.releases.is_empty());
+        assert_eq!(stats.releases, Vec::<Release>::new());
         assert!(map.is_complete());
         assert!(matches!(errors.as_slice(), [FetchError::Upcoming(_)]));
         assert_eq!(fake.requests().len(), 3);
