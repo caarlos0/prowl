@@ -300,10 +300,14 @@ watch event loop); everything else is testable modules:
   enabled, even if the initial tab is Reviews, and reuses only a successful
   resolution. A failed lookup leaves the upcoming bucket unavailable while
   shipped release counts and release-map data are still computed; the next
-  scheduled refresh retries the lookup. No compare request uses a guessed
+  scheduled refresh retries the lookup. When the whole shipment fetch also
+  failed (a REST outage or `core` limit), the lookup failure is not reported
+  separately, so the cached or previous upcoming bucket stays on the stale
+  section. No compare request uses a guessed
   branch. In watch mode, the REST shipment scan runs every second Mine refresh;
   `Ctrl-R` forces it immediately. Cached shipment counts and release annotations
-  show an age while newer Mine data is displayed.
+  show an age while newer Mine data is displayed; only a fetched Mine section
+  or an available shipment scan counts as newer data.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
@@ -529,7 +533,9 @@ still performs all teardown through `finish`.
   failing, and `Ctrl-R` forces it. When the merged search fails in a scan
   refresh, the watch keeps that scan's release map (`App::unapplied_releases`,
   session-only) and builds the next merged rows from it, with no extra REST
-  scan. Cached shipment counts
+  scan. A failed or incomplete scan keeps the saved map: fresh entries are
+  overlaid on it, the result stays incomplete so unmapped PRs show `?`, and
+  the release metadata line reads `stale` when saved tags fill rows. Cached shipment counts
   and release annotations show their age; otherwise an unmapped PR stays `?`
   until the next scan. A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet

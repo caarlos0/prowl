@@ -87,6 +87,12 @@ impl ReleaseMap {
         self.releases.insert(number, release);
     }
 
+    /// Adds `fresh` entries over this map's. Only complete maps make a complete result.
+    pub fn extend(&mut self, fresh: ReleaseMap) {
+        self.releases.extend(fresh.releases);
+        self.complete &= fresh.complete;
+    }
+
     pub fn is_complete(&self) -> bool {
         self.complete
     }

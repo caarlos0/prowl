@@ -258,7 +258,11 @@ impl FetchOutcome {
         self.sections.merged.is_some()
             || self.sections.queue.is_some()
             || self.sections.prs.is_some()
-            || self.sections.commits.is_some()
+            || self
+                .sections
+                .commits
+                .as_ref()
+                .is_some_and(|stats| stats.available)
     }
 
     fn reconcile(mut self, previous: Option<Sections>) -> Self {
@@ -739,7 +743,9 @@ fn fetch_scheduled_with_context_memo(
 
     let (commit_stats, mut release_map) =
         fetch_release_data(cli, client, repo, me, default_branch, due, &mut issues);
-    if let Some(error) = branch_error {
+    if let Some(error) = branch_error
+        && commit_stats.as_ref().is_some_and(|stats| stats.available)
+    {
         issues.push(FetchIssue::new(FetchScope::Upcoming, &error));
     }
 
@@ -769,15 +775,36 @@ fn fetch_scheduled_with_context_memo(
         shipment_scan = true;
         release_map = fetch_merged_release_map(cli, client, repo, me, nodes, &mut issues);
     }
+    let saved = unapplied_releases.take();
     let merged = if let Some(nodes) = merged_nodes {
-        let unapplied = unapplied_releases.take();
-        if !shipment_scan && let Some(map) = unapplied {
+        if !shipment_scan {
+            if let Some(map) = saved {
+                release_map = map;
+            }
+        } else if !release_map.is_complete()
+            && let Some(mut map) = saved
+        {
+            let used = nodes.iter().any(|node| map.get(&node.number).is_some());
+            map.extend(release_map);
             release_map = map;
+            if used {
+                for issue in &mut issues {
+                    issue.stale |= issue.scope == FetchScope::ReleaseMetadata;
+                }
+            }
         }
         Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
     } else {
         if shipment_scan && cli.show_merged() {
+            if !release_map.is_complete()
+                && let Some(mut map) = saved
+            {
+                map.extend(release_map);
+                release_map = map;
+            }
             *unapplied_releases = Some(release_map);
+        } else {
+            *unapplied_releases = saved;
         }
         None
     };
@@ -7658,6 +7685,63 @@ mod tests {
     }
 
     #[test]
+    fn failed_shipment_fetch_keeps_cached_upcoming() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (cached, _) = fetch_offline(&["prowl"], tagged());
+        assert!(cached.commits.as_ref().unwrap().upcoming.is_some());
+
+        let (client, fake, _) = core_limited();
+        let me = client.me().unwrap();
+        let due = Schedule::default().next(View::Mine, false, true);
+        let outcome = fetch_scheduled(&cli, &client, &repo, &me, &mut None, due).merge(
+            Some(cached),
+            Vec::new(),
+            due,
+        );
+
+        assert_eq!(
+            outcome
+                .issues
+                .iter()
+                .map(|issue| issue.scope)
+                .collect::<Vec<_>>(),
+            [FetchScope::Shipments, FetchScope::ReleaseMetadata]
+        );
+        let stats = outcome.sections.commits.as_ref().unwrap();
+        assert!(stats.available);
+        assert!(stats.upcoming.is_some());
+        assert!(!outcome.status().contains("upcoming unavailable"));
+        assert_eq!(fake.requests(), ["GET /user", GRAPHQL, GRAPHQL]);
+    }
+
+    #[test]
+    fn default_branch_lookup_failure_marks_upcoming_unavailable() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let (client, fake) = github::fake::client(tagged());
+        let due = Schedule::default().next(View::Mine, false, true);
+        let outcome = fetch_scheduled(
+            &cli,
+            &client,
+            &Repo::parse("o/r").unwrap(),
+            "me",
+            &mut None,
+            due,
+        );
+
+        assert_eq!(
+            outcome
+                .issues
+                .iter()
+                .map(|issue| issue.scope)
+                .collect::<Vec<_>>(),
+            [FetchScope::Upcoming]
+        );
+        assert!(outcome.sections.commits.as_ref().unwrap().available);
+        assert_eq!(fake.requests()[0], "GET /repos/o/r");
+    }
+
+    #[test]
     fn one_shot_reviews_request_failure_reports_both_sections() {
         let cli = Cli::try_parse_from(["prowl", "--view", "reviews"]).unwrap();
         let (client, fake) = github::fake::client(tagged());
@@ -8220,6 +8304,49 @@ mod tests {
     }
 
     #[test]
+    fn failed_shipment_scan_with_failed_mine_does_not_age_shipments() {
+        let cli = Cli::try_parse_from(["prowl", "--only", "mine,merged,shipments"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch_with_merged(&[3, 2, 1]));
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let mut schedule = Schedule::default();
+        let mut branch = Some("main".to_string());
+        let mut previous = None;
+        let mut previous_issues = Vec::new();
+        let mut dues = Vec::new();
+        let mut notes = Vec::new();
+
+        for tick in 1..=4 {
+            match tick {
+                2 => fake.set_response(GRAPHQL, 500, &[], r#"{"message":"graphql down"}"#),
+                3 => fake.set_response(RELEASES, 500, &[], r#"{"message":"rest down"}"#),
+                _ => {}
+            }
+            let due = schedule.next(View::Mine, false, true);
+            dues.push(due.shipments);
+            let outcome = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+            let now = start + chrono::TimeDelta::minutes(5 * tick);
+            schedule.record(
+                due,
+                &outcome.issues,
+                now,
+                outcome.shipment_scan,
+                outcome.has_fresh_mine_data(),
+            );
+            if tick == 3 {
+                assert!(!outcome.has_fresh_mine_data());
+            }
+            notes.push(schedule.shipments_age_note(now));
+            let merged = outcome.merge(previous.take(), previous_issues, due);
+            previous = Some(merged.sections);
+            previous_issues = merged.issues;
+        }
+
+        assert_eq!(dues, [true, false, true, true]);
+        assert_eq!(notes, [None, None, None, None]);
+    }
+
+    #[test]
     fn shown_shipments_fetch_requests() {
         let (sections, requests) = fetch_offline(&["prowl"], tagged());
         assert_eq!(
@@ -8607,5 +8734,170 @@ mod tests {
             .map(|(pr, release)| (pr.to_string(), release.to_string()));
         assert_eq!(cells, expected);
         assert!(releases.is_none());
+    }
+
+    struct ScanWatch {
+        cli: Cli,
+        repo: Repo,
+        client: Client,
+        fake: github::fake::Fake,
+        schedule: Schedule,
+        branch: Option<String>,
+        releases: Option<commits::ReleaseMap>,
+        last: Option<Sections>,
+        issues: Vec<FetchIssue>,
+    }
+
+    impl ScanWatch {
+        fn new(routes: Vec<(String, String)>) -> Self {
+            let (client, fake) = github::fake::client(routes);
+            Self {
+                cli: Cli::try_parse_from(["prowl"]).unwrap(),
+                repo: Repo::parse("o/r").unwrap(),
+                client,
+                fake,
+                schedule: Schedule::default(),
+                branch: Some("main".to_string()),
+                releases: None,
+                last: None,
+                issues: Vec::new(),
+            }
+        }
+
+        fn merged_search_fails(&self, numbers: &[i64]) {
+            let mut failed: serde_json::Value = serde_json::from_str(&graphql(numbers).1).unwrap();
+            failed["data"]["mineMerged"] = serde_json::Value::Null;
+            failed["errors"] =
+                serde_json::json!([{ "message": "merged boom", "path": ["mineMerged"] }]);
+            self.fake
+                .set_response(GRAPHQL, 200, &[], &failed.to_string());
+        }
+
+        fn merged_search_works(&self, numbers: &[i64]) {
+            self.fake
+                .set_response(GRAPHQL, 200, &[], &graphql(numbers).1);
+        }
+
+        fn rest_down(&self, route: &str) {
+            self.fake
+                .set_response(route, 500, &[], r#"{"message":"rest down"}"#);
+        }
+
+        fn tick(&mut self, scan: bool) {
+            let due = self.schedule.next(View::Mine, false, true);
+            assert_eq!(due.shipments, scan);
+            let out = fetch_scheduled_with_context_memo(
+                &self.cli,
+                &self.client,
+                &self.repo,
+                "me",
+                &mut self.branch,
+                &mut self.releases,
+                due,
+                None,
+            );
+            self.schedule.record(
+                due,
+                &out.issues,
+                chrono::Utc::now(),
+                out.shipment_scan,
+                out.has_fresh_mine_data(),
+            );
+            let out = out.merge(self.last.take(), std::mem::take(&mut self.issues), due);
+            self.issues = out.issues;
+            self.last = Some(out.sections);
+        }
+
+        fn cells(&self) -> Vec<(String, String)> {
+            let rows = self.last.as_ref().unwrap().merged.as_ref().unwrap();
+            merged::to_table(rows, true, &HashSet::new(), false)
+                .rows
+                .iter()
+                .map(|r| (r[2].text.clone(), r[4].text.clone()))
+                .collect()
+        }
+
+        fn metadata_is_stale(&self) -> bool {
+            self.issues
+                .iter()
+                .any(|issue| issue.scope == FetchScope::ReleaseMetadata && issue.stale)
+        }
+    }
+
+    fn cells(rows: [(&str, &str); 3]) -> Vec<(String, String)> {
+        rows.map(|(pr, release)| (pr.to_string(), release.to_string()))
+            .to_vec()
+    }
+
+    #[test]
+    fn failed_scan_keeps_the_saved_release_map() {
+        // A degraded scan must not drop the tags of an earlier scan whose merged
+        // search failed; #3 is unknown because the scan could not confirm it.
+        let expected = cells([("#3", "?"), ("#2", "v2"), ("#1", "v1")]);
+
+        let mut watch = ScanWatch::new(tagged_watch());
+        watch.merged_search_fails(&[3, 2, 1]);
+        watch.tick(true);
+        watch.tick(false);
+        watch.rest_down(RELEASES);
+        watch.merged_search_works(&[3, 2, 1]);
+        watch.tick(true);
+        assert_eq!(watch.cells(), expected);
+        assert!(watch.metadata_is_stale());
+
+        let mut watch = ScanWatch::new(tagged_watch());
+        watch.merged_search_fails(&[3, 2, 1]);
+        watch.tick(true);
+        watch.tick(false);
+        watch.rest_down(RELEASES);
+        watch.tick(true);
+        watch.merged_search_works(&[3, 2, 1]);
+        watch.tick(true);
+        assert_eq!(watch.cells(), expected);
+        assert!(watch.metadata_is_stale());
+    }
+
+    #[test]
+    fn empty_saved_release_map_does_not_mark_metadata_stale() {
+        let mut watch = ScanWatch::new(tagged_watch());
+        watch.merged_search_fails(&[3, 2, 1]);
+        watch.rest_down(RELEASES);
+        watch.tick(true);
+        watch.merged_search_works(&[3, 2, 1]);
+        watch.tick(true);
+
+        assert_eq!(
+            watch.cells(),
+            cells([("#3", "?"), ("#2", "?"), ("#1", "?")])
+        );
+        assert!(!watch.metadata_is_stale());
+    }
+
+    #[test]
+    fn partial_scan_overlays_fresh_entries_on_the_saved_release_map() {
+        let mut watch = ScanWatch::new(tagged_watch());
+        watch.merged_search_fails(&[4, 2, 1]);
+        watch.tick(true);
+        watch.tick(false);
+
+        watch.rest_down("GET /repos/o/r/compare/v1...v2");
+        watch.fake.set_response(
+            "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+            200,
+            &[],
+            &serde_json::json!([
+                commit("me", "feat: one (#1)"),
+                commit("me", "feat: four (#4)")
+            ])
+            .to_string(),
+        );
+        watch.merged_search_works(&[4, 2, 1]);
+        watch.tick(true);
+
+        assert_eq!(
+            watch.cells(),
+            cells([("#4", "v1"), ("#2", "v2"), ("#1", "v1")])
+        );
+        assert!(watch.metadata_is_stale());
     }
 }
