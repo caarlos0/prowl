@@ -445,9 +445,10 @@ still performs all teardown through `finish`.
   view on every second refresh (`Schedule::INACTIVE_EVERY`), so after a
   successful fetch its data is at most two intervals old. A view with a failed
   section is not marked fetched, so the next refresh retries it and its age
-  stays that of its last full success. The first refresh, including after a
-  cached start, and every `Ctrl-R` refresh fetch both views. A refresh that
-  skips a view keeps that view's sections and section errors
+  stays that of its last successful fetch; a partial-data warning still counts
+  as fetched. The first refresh, including after a cached start, and every
+  `Ctrl-R` refresh fetch both views. A refresh that skips a view keeps that
+  view's sections, section errors, and warnings
   (`FetchOutcome::merge`), so Tab switches instantly from `last_good` with no
   request; the next refresh fetches the newly active view. When the shown view
   was fetched before the other, a dim `updated 6m ago` status line

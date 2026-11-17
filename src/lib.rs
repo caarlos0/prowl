@@ -401,13 +401,16 @@ impl Schedule {
     }
 
     /// Record a completed refresh of the `due` views. A view with a failed
-    /// section keeps its previous time, so the next refresh retries it.
+    /// section keeps its previous time, so the next refresh retries it. A
+    /// partial-data warning still delivered data, so it counts as fetched.
     fn record(&mut self, due: Due, issues: &[FetchIssue], at: chrono::DateTime<chrono::Utc>) {
         let fetched = Some(Fetched {
             refresh: self.refresh,
             at,
         });
-        let succeeded = |view| due.includes(view) && !issues.iter().any(|i| i.scope.view() == view);
+        let succeeded = |view| {
+            due.includes(view) && !issues.iter().any(|i| !i.warning && i.scope.view() == view)
+        };
         if succeeded(View::Mine) {
             self.mine = fetched;
         }
@@ -5397,6 +5400,24 @@ mod tests {
         );
         let due = schedule.next(View::Mine, false);
         assert!(due.reviews, "retry after the failure: {due:?}");
+    }
+
+    #[test]
+    fn partial_view_counts_as_fetched() {
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let at = |tick: i64| start + chrono::TimeDelta::minutes(5 * tick);
+        let partial = [FetchIssue {
+            warning: true,
+            ..FetchIssue::new(FetchScope::ReviewedMerged, &anyhow::anyhow!("denied"))
+        }];
+        let mut schedule = Schedule::default();
+        let due = schedule.next(View::Mine, false);
+        assert!(due.reviews, "{due:?}");
+        schedule.record(due, &partial, at(1));
+
+        assert_eq!(schedule.age_note(View::Reviews, at(1)), None);
+        let due = schedule.next(View::Mine, false);
+        assert!(!due.reviews, "partial data is not retried: {due:?}");
     }
 
     #[test]
