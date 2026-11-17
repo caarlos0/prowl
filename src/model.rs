@@ -2139,7 +2139,8 @@ pub struct ReviewPrNode {
     pub author: Option<Login>,
     pub commits: ReviewCommits,
     /// My reviews on this PR (submitted only; the query filters out PENDING).
-    pub reviews: MyReviews,
+    /// `None` when the field errored; it then counts as no reviews.
+    pub reviews: Option<MyReviews>,
 }
 
 #[derive(Debug, Deserialize)]
