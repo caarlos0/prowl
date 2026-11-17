@@ -270,7 +270,9 @@ watch event loop); everything else is testable modules:
   resolution. A failed lookup leaves the upcoming bucket unavailable while
   shipped release counts and release-map data are still computed; the next
   scheduled refresh retries the lookup. No compare request uses a guessed
-  branch.
+  branch. In watch mode, the REST shipment scan runs every second Mine refresh;
+  `Ctrl-R` forces it immediately. Cached shipment counts and release annotations
+  show an age while newer Mine data is displayed.
 - `changes.rs` — `Tracker`/`Changes`: bell + highlight detection (Mine view).
   Each refresh's diff drives the bell and is accumulated into `App::unread`;
   every repaint uses those session-only markers until `r`/`R` clears them.
@@ -459,7 +461,10 @@ still performs all teardown through `finish`.
   (`Schedule::age_note`) shows its age. When both views are due, the Mine merged
   search is aliased into the Reviews request; a refresh that skips Reviews sends
   Mine merged as its own search. `--once`/piped fetches only the selected view.
-  A top tab strip marks the active view.
+  The REST shipment scan has its own cadence in the same schedule: it runs
+  every second Mine refresh, while `Ctrl-R` forces it. Cached shipment counts
+  and release annotations show their age; an unmapped PR stays `?` until the
+  next scan. A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
   reviewed by me), `ReReview` (requested again after I reviewed), `Updated` (I
   reviewed; last commit `committedDate` > my latest review `submittedAt`), or
