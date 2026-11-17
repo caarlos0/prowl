@@ -367,6 +367,16 @@ pub(crate) fn fetch_release_map(
     Ok((map, errors))
 }
 
+/// The log the upcoming label links to: everything since `latest`, or the
+/// whole default branch when there is no release.
+pub fn upcoming_url(repo: &Repo, latest: Option<&str>, default_branch: &str) -> String {
+    let base_url = format!("https://github.com/{}/{}", repo.owner, repo.name);
+    match latest {
+        Some(latest) => format!("{base_url}/compare/{latest}...{default_branch}"),
+        None => format!("{base_url}/commits/{default_branch}"),
+    }
+}
+
 /// Compute the commit stats for `repo` (my work in each of the last
 /// [`RELEASES`] releases — stable only, or including prereleases when
 /// `include_prereleases` is set — and, when `default_branch` is provided, in the
@@ -393,10 +403,7 @@ pub fn fetch(
         match range_mine(client, repo, me, latest, default_branch) {
             Ok((count, _)) => Some(Bucket {
                 count,
-                url: match latest {
-                    Some(latest) => format!("{base_url}/compare/{latest}...{default_branch}"),
-                    None => format!("{base_url}/commits/{default_branch}"),
-                },
+                url: upcoming_url(repo, latest, default_branch),
             }),
             Err(error) => {
                 errors.push(FetchError::Upcoming(error));
