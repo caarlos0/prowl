@@ -784,10 +784,13 @@ fn fetch_scheduled_with_context_memo(
         } else if !release_map.is_complete()
             && let Some(mut map) = saved
         {
+            let used = nodes.iter().any(|node| map.get(&node.number).is_some());
             map.extend(release_map);
             release_map = map;
-            for issue in &mut issues {
-                issue.stale |= issue.scope == FetchScope::ReleaseMetadata;
+            if used {
+                for issue in &mut issues {
+                    issue.stale |= issue.scope == FetchScope::ReleaseMetadata;
+                }
             }
         }
         Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
@@ -8852,6 +8855,22 @@ mod tests {
         watch.tick(true);
         assert_eq!(watch.cells(), expected);
         assert!(watch.metadata_is_stale());
+    }
+
+    #[test]
+    fn empty_saved_release_map_does_not_mark_metadata_stale() {
+        let mut watch = ScanWatch::new(tagged_watch());
+        watch.merged_search_fails(&[3, 2, 1]);
+        watch.rest_down(RELEASES);
+        watch.tick(true);
+        watch.merged_search_works(&[3, 2, 1]);
+        watch.tick(true);
+
+        assert_eq!(
+            watch.cells(),
+            cells([("#3", "?"), ("#2", "?"), ("#1", "?")])
+        );
+        assert!(!watch.metadata_is_stale());
     }
 
     #[test]
