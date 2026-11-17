@@ -1151,6 +1151,7 @@ mod tests {
     }
 
     const VIEWER: &str = r#"{"data":{"viewer":{"login":"me"}}}"#;
+    const CORE_LIMITED: &str = r#"{"message":"API rate limit exceeded"}"#;
     const CORE_EXHAUSTED: [(&str, &str); 3] = [
         ("x-ratelimit-resource", "core"),
         ("x-ratelimit-remaining", "0"),
@@ -1168,7 +1169,7 @@ mod tests {
     fn core_limit_resolves_identity_through_graphql_without_more_rest() {
         for status in [403, 429] {
             let (client, fake) = client();
-            fake.set_response(REST, status, &CORE_EXHAUSTED, SECONDARY_FREE);
+            fake.set_response(REST, status, &CORE_EXHAUSTED, CORE_LIMITED);
             fake.set_response(GRAPHQL, 200, &[], VIEWER);
             assert_eq!(client.me().unwrap(), "me", "status={status}");
             assert_eq!(client.clone().me().unwrap(), "me", "status={status}");
@@ -1180,8 +1181,6 @@ mod tests {
             assert_eq!(fake.requests(), [REST, GRAPHQL, GRAPHQL, REST]);
         }
     }
-
-    const SECONDARY_FREE: &str = r#"{"message":"API rate limit exceeded"}"#;
 
     #[test]
     fn secondary_limit_does_not_fall_back() {
@@ -1206,7 +1205,7 @@ mod tests {
     #[test]
     fn core_limit_with_a_limited_graphql_bucket_fails_once() {
         let (client, fake) = client();
-        fake.set_response(REST, 403, &CORE_EXHAUSTED, SECONDARY_FREE);
+        fake.set_response(REST, 403, &CORE_EXHAUSTED, CORE_LIMITED);
         fake.set_response(
             GRAPHQL,
             200,
@@ -1229,13 +1228,9 @@ mod tests {
 
     #[test]
     fn unauthorized_and_forbidden_identity_do_not_fall_back() {
-        for (status, remaining, message) in [
-            (
-                401,
-                "4000",
-                "GitHub rejected the token (401); run `prowl --login`",
-            ),
-            (403, "4000", "GitHub request failed: http status: 403"),
+        for (status, message) in [
+            (401, "GitHub rejected the token (401); run `prowl --login`"),
+            (403, "GitHub request failed: http status: 403"),
         ] {
             let (client, fake) = client();
             fake.set_response(
@@ -1243,7 +1238,7 @@ mod tests {
                 status,
                 &[
                     ("x-ratelimit-resource", "core"),
-                    ("x-ratelimit-remaining", remaining),
+                    ("x-ratelimit-remaining", "4000"),
                 ],
                 r#"{"message":"Forbidden"}"#,
             );
