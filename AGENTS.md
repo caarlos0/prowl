@@ -533,7 +533,9 @@ still performs all teardown through `finish`.
   failing, and `Ctrl-R` forces it. When the merged search fails in a scan
   refresh, the watch keeps that scan's release map (`App::unapplied_releases`,
   session-only) and builds the next merged rows from it, with no extra REST
-  scan. Cached shipment counts
+  scan. A failed or incomplete scan keeps the saved map: fresh entries are
+  overlaid on it, the result stays incomplete so unmapped PRs show `?`, and
+  the release metadata line reads `stale` when saved tags fill rows. Cached shipment counts
   and release annotations show their age; otherwise an unmapped PR stays `?`
   until the next scan. A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet

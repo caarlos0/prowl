@@ -775,15 +775,33 @@ fn fetch_scheduled_with_context_memo(
         shipment_scan = true;
         release_map = fetch_merged_release_map(cli, client, repo, me, nodes, &mut issues);
     }
+    let saved = unapplied_releases.take();
     let merged = if let Some(nodes) = merged_nodes {
-        let unapplied = unapplied_releases.take();
-        if !shipment_scan && let Some(map) = unapplied {
+        if !shipment_scan {
+            if let Some(map) = saved {
+                release_map = map;
+            }
+        } else if !release_map.is_complete()
+            && let Some(mut map) = saved
+        {
+            map.extend(release_map);
             release_map = map;
+            for issue in &mut issues {
+                issue.stale |= issue.scope == FetchScope::ReleaseMetadata;
+            }
         }
         Some(merged::build_rows(nodes, cli.merged_limit, &release_map))
     } else {
         if shipment_scan && cli.show_merged() {
+            if !release_map.is_complete()
+                && let Some(mut map) = saved
+            {
+                map.extend(release_map);
+                release_map = map;
+            }
             *unapplied_releases = Some(release_map);
+        } else {
+            *unapplied_releases = saved;
         }
         None
     };
@@ -8713,5 +8731,154 @@ mod tests {
             .map(|(pr, release)| (pr.to_string(), release.to_string()));
         assert_eq!(cells, expected);
         assert!(releases.is_none());
+    }
+
+    struct ScanWatch {
+        cli: Cli,
+        repo: Repo,
+        client: Client,
+        fake: github::fake::Fake,
+        schedule: Schedule,
+        branch: Option<String>,
+        releases: Option<commits::ReleaseMap>,
+        last: Option<Sections>,
+        issues: Vec<FetchIssue>,
+    }
+
+    impl ScanWatch {
+        fn new(routes: Vec<(String, String)>) -> Self {
+            let (client, fake) = github::fake::client(routes);
+            Self {
+                cli: Cli::try_parse_from(["prowl"]).unwrap(),
+                repo: Repo::parse("o/r").unwrap(),
+                client,
+                fake,
+                schedule: Schedule::default(),
+                branch: Some("main".to_string()),
+                releases: None,
+                last: None,
+                issues: Vec::new(),
+            }
+        }
+
+        fn merged_search_fails(&self, numbers: &[i64]) {
+            let mut failed: serde_json::Value = serde_json::from_str(&graphql(numbers).1).unwrap();
+            failed["data"]["mineMerged"] = serde_json::Value::Null;
+            failed["errors"] =
+                serde_json::json!([{ "message": "merged boom", "path": ["mineMerged"] }]);
+            self.fake
+                .set_response(GRAPHQL, 200, &[], &failed.to_string());
+        }
+
+        fn merged_search_works(&self, numbers: &[i64]) {
+            self.fake
+                .set_response(GRAPHQL, 200, &[], &graphql(numbers).1);
+        }
+
+        fn rest_down(&self, route: &str) {
+            self.fake
+                .set_response(route, 500, &[], r#"{"message":"rest down"}"#);
+        }
+
+        fn tick(&mut self, scan: bool) {
+            let due = self.schedule.next(View::Mine, false, true);
+            assert_eq!(due.shipments, scan);
+            let out = fetch_scheduled_with_context_memo(
+                &self.cli,
+                &self.client,
+                &self.repo,
+                "me",
+                &mut self.branch,
+                &mut self.releases,
+                due,
+                None,
+            );
+            self.schedule.record(
+                due,
+                &out.issues,
+                chrono::Utc::now(),
+                out.shipment_scan,
+                out.has_fresh_mine_data(),
+            );
+            let out = out.merge(self.last.take(), std::mem::take(&mut self.issues), due);
+            self.issues = out.issues;
+            self.last = Some(out.sections);
+        }
+
+        fn cells(&self) -> Vec<(String, String)> {
+            let rows = self.last.as_ref().unwrap().merged.as_ref().unwrap();
+            merged::to_table(rows, true, &HashSet::new(), false)
+                .rows
+                .iter()
+                .map(|r| (r[2].text.clone(), r[4].text.clone()))
+                .collect()
+        }
+
+        fn metadata_is_stale(&self) -> bool {
+            self.issues
+                .iter()
+                .any(|issue| issue.scope == FetchScope::ReleaseMetadata && issue.stale)
+        }
+    }
+
+    fn cells(rows: [(&str, &str); 3]) -> Vec<(String, String)> {
+        rows.map(|(pr, release)| (pr.to_string(), release.to_string()))
+            .to_vec()
+    }
+
+    #[test]
+    fn failed_scan_keeps_the_saved_release_map() {
+        // A degraded scan must not drop the tags of an earlier scan whose merged
+        // search failed; #3 is unknown because the scan could not confirm it.
+        let expected = cells([("#3", "?"), ("#2", "v2"), ("#1", "v1")]);
+
+        let mut watch = ScanWatch::new(tagged_watch());
+        watch.merged_search_fails(&[3, 2, 1]);
+        watch.tick(true);
+        watch.tick(false);
+        watch.rest_down(RELEASES);
+        watch.merged_search_works(&[3, 2, 1]);
+        watch.tick(true);
+        assert_eq!(watch.cells(), expected);
+        assert!(watch.metadata_is_stale());
+
+        let mut watch = ScanWatch::new(tagged_watch());
+        watch.merged_search_fails(&[3, 2, 1]);
+        watch.tick(true);
+        watch.tick(false);
+        watch.rest_down(RELEASES);
+        watch.tick(true);
+        watch.merged_search_works(&[3, 2, 1]);
+        watch.tick(true);
+        assert_eq!(watch.cells(), expected);
+        assert!(watch.metadata_is_stale());
+    }
+
+    #[test]
+    fn partial_scan_overlays_fresh_entries_on_the_saved_release_map() {
+        let mut watch = ScanWatch::new(tagged_watch());
+        watch.merged_search_fails(&[4, 2, 1]);
+        watch.tick(true);
+        watch.tick(false);
+
+        watch.rest_down("GET /repos/o/r/compare/v1...v2");
+        watch.fake.set_response(
+            "GET /repos/o/r/commits?sha=v1&author=me&per_page=100&page=1",
+            200,
+            &[],
+            &serde_json::json!([
+                commit("me", "feat: one (#1)"),
+                commit("me", "feat: four (#4)")
+            ])
+            .to_string(),
+        );
+        watch.merged_search_works(&[4, 2, 1]);
+        watch.tick(true);
+
+        assert_eq!(
+            watch.cells(),
+            cells([("#4", "v1"), ("#2", "v2"), ("#1", "v1")])
+        );
+        assert!(watch.metadata_is_stale());
     }
 }
