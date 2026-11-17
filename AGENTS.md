@@ -131,10 +131,11 @@ watch event loop); everything else is testable modules:
   section that consumes warned shared rule data; the cache adds no requests.
   It reads required context names from each distinct base ref's `refUpdateRule`
   and all pages of active `rules`, in groups of up to five refs per GraphQL
-  request, once per distinct ref across the enabled sections. The queue request
-  seeds the default ref's first page; when the queue is off, the first Mine
-  search page does so. Remaining pages are fetched only if an enabled section
-  uses that ref. Each ref advances its own rules cursor. Missing required
+  request, once per distinct ref across the enabled sections. When both sections
+  are enabled, the first Mine request also includes the merge queue and seeds
+  the default ref's first page; otherwise the enabled section's first request
+  seeds it. Remaining pages are fetched only if an enabled section uses that
+  ref. Each ref advances its own rules cursor. Missing required
   contexts are added to `RUN` in both normal and required-only mode, after
   comparing them with the commit's paginated `isRequired` contexts (the
   speculative commit for queue entries, not the PR head). Entries without a
@@ -414,12 +415,12 @@ still performs all teardown through `finish`.
   reported on the relevant commit (PR head or speculative merge).
   Required context names come from the actual base branch's classic protection
   and active repository/organization rulesets. The refresh seeds the default
-  branch's first rules page from the queue request, or from the first Mine
-  search page when the queue is off; remaining pages are fetched only when an
-  enabled PR section uses that ref. Other base refs are fetched in GraphQL
-  batches of up to five, once per distinct base ref per refresh across My PRs
-  and Merge Queue. Each ref's active-rule pages use an independent cursor. All
-  reported required checks are paginated before counting missing ones, so a
+  branch's first rules page from the combined Mine-and-queue request, the queue
+  request, or the Mine request, depending on enabled sections; remaining pages
+  are fetched only when an enabled PR section uses that ref. Other base refs
+  are fetched in GraphQL batches of up to five, once per distinct base ref per
+  refresh across My PRs and Merge Queue. Each ref's active-rule pages use an
+  independent cursor. All reported required checks are paginated before counting missing ones, so a
   queued, running, failed, or passed check is not also counted as missing. This
   applies with and without `--required`, including commits with no rollup. Queue
   entries without a speculative commit count all expected checks in `RUN`;
@@ -617,7 +618,10 @@ still performs all teardown through `finish`.
 
 ## The GraphQL queries + REST (see `model.rs` / `commits.rs`)
 
-- Merge queue: `repository.defaultBranchRef` returns the default ref ID, classic
+- Merge queue: when My PRs and the queue are both enabled, the first Mine request
+  includes `mergeQueue @include(if: $includeQueue)`; `--only queue` keeps its
+  separate queue request. `repository.defaultBranchRef` returns the default ref
+  ID, classic
   required contexts, and its first active-rules page.
   `repository.mergeQueue.entries` (vars `owner`, `name`) returns each entry
   carrying `headRefName`, `enqueuedAt` (WAIT) and
@@ -630,7 +634,9 @@ still performs all teardown through `finish`.
   My PRs, using the queue entry's `headCommit` to count missing checks. When
   the queue is off, the first Mine search page requests the same default-branch
   rules fields.
-- Open PRs: `search(is:pr is:open author:<me>)`, five per cursor page, with `mergeable`,
+- Open PRs: the first Mine request also selects the merge queue when its section
+  is enabled; later Mine pages do not. `search(is:pr is:open author:<me>)`, five
+  per cursor page, with `mergeable`,
   `mergeStateStatus`, `reviewDecision`,
   `latestOpinionatedReviews(first: 100) { nodes { state } }`,
   `mergeQueueEntry`, `headRefName`, `updatedAt`, `createdAt`,
