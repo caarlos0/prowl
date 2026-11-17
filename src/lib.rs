@@ -490,9 +490,11 @@ impl Schedule {
         if due.mine && mine_data_updated {
             self.mine_data = fetched;
         }
+        if due.mine {
+            self.mine_refreshes += 1;
+        }
         if succeeded(View::Mine) {
             self.mine = fetched;
-            self.mine_refreshes += 1;
         }
         if succeeded(View::Reviews) {
             self.reviews = fetched;
@@ -3985,8 +3987,8 @@ mod tests {
             Some("updated 5m ago")
         );
         assert!(
-            !schedule.next(View::Mine, false, true).shipments,
-            "a partial Mine refresh must not advance the successful-refresh cadence"
+            schedule.next(View::Mine, false, true).shipments,
+            "a failed Mine section must not stop the every-second-refresh cadence"
         );
     }
 
@@ -7510,5 +7512,64 @@ mod tests {
             })
         );
         assert_eq!(stats.releases, []);
+    }
+
+    fn with_errors(numbers: &[i64], errors: serde_json::Value) -> String {
+        let (_, body) = graphql(numbers);
+        let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        value["errors"] = errors;
+        value.to_string()
+    }
+
+    fn queue_error() -> serde_json::Value {
+        serde_json::json!([{ "type": "FORBIDDEN", "message": "queue boom",
+            "path": ["repository", "mergeQueue"] }])
+    }
+
+    fn gets(requests: &[String]) -> usize {
+        requests
+            .iter()
+            .filter(|request| request.starts_with("GET "))
+            .count()
+    }
+
+    #[test]
+    fn failing_queue_does_not_starve_shipment_scan() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let mut per_refresh = Vec::new();
+        for queue_fails in [false, true] {
+            let (client, fake) = github::fake::client(tagged_watch());
+            let mut schedule = Schedule::default();
+            let mut branch = Some("main".to_string());
+            let mut counts = Vec::new();
+            for tick in 1..=7 {
+                if tick >= 2 && queue_fails {
+                    fake.set_response(GRAPHQL, 200, &[], &with_errors(&[3, 2, 1], queue_error()));
+                }
+                let sent = fake.requests().len();
+                let due = schedule.next(View::Mine, false, true);
+                let outcome = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+                assert_eq!(
+                    outcome
+                        .issues
+                        .iter()
+                        .any(|issue| issue.scope == FetchScope::Queue && !issue.warning),
+                    tick >= 2 && queue_fails
+                );
+                schedule.record(
+                    due,
+                    &outcome.issues,
+                    start + chrono::TimeDelta::minutes(5 * tick),
+                    outcome.shipment_scan,
+                    outcome.has_fresh_mine_data(),
+                );
+                counts.push(gets(&fake.requests()[sent..]));
+            }
+            per_refresh.push(counts);
+        }
+        assert_eq!(per_refresh[0], [4, 0, 4, 0, 4, 0, 4]);
+        assert_eq!(per_refresh[1], per_refresh[0]);
     }
 }

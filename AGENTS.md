@@ -495,7 +495,8 @@ still performs all teardown through `finish`.
   `--once`/piped fetches only the
   selected view.
   The REST shipment scan has its own cadence in the same schedule: it runs
-  every second Mine refresh, while `Ctrl-R` forces it. Cached shipment counts
+  every second attempted Mine refresh, even while a Mine section keeps
+  failing, and `Ctrl-R` forces it. Cached shipment counts
   and release annotations show their age; an unmapped PR stays `?` until the
   next scan. A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
