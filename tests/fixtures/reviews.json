@@ -26,18 +26,8 @@
       ]
     },
     "reviewed": {
-      "issueCount": 3,
+      "issueCount": 2,
       "nodes": [
-        {
-          "number": 102,
-          "title": "fix: a bug",
-          "url": "https://github.com/octo/repo/pull/102",
-          "isDraft": false,
-          "updatedAt": "2026-06-10T09:00:00Z",
-          "author": { "login": "bob" },
-          "commits": { "nodes": [{ "commit": { "committedDate": "2026-06-10T08:30:00Z" } }] },
-          "reviews": { "nodes": [{ "submittedAt": "2026-06-09T12:00:00Z" }] }
-        },
         {
           "number": 103,
           "title": "refactor: tidy up",
@@ -59,10 +49,6 @@
           "reviews": { "nodes": [{ "submittedAt": "2026-06-05T00:00:00Z" }] }
         }
       ]
-    },
-    "rereviewed": {
-      "issueCount": 1,
-      "nodes": [{ "number": 102 }]
     }
   }
 }

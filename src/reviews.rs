@@ -6,7 +6,7 @@ use crate::model::{MergedNode, ReviewPrNode, ReviewsData};
 use crate::render::{self, Cell, Table};
 use crate::status::{self, BLUE, ReviewState};
 use crate::timefmt;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uncurses::style::Style;
 
 /// Author logins are truncated to this many display columns (matches the queue).
@@ -75,12 +75,6 @@ fn review_state(requested: bool, node: &ReviewPrNode) -> ReviewState {
 /// last update (most recent first).
 pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
     let mut nodes: HashMap<i64, (ReviewPrNode, bool)> = HashMap::new();
-    let rereviewed: HashSet<i64> = data
-        .rereviewed
-        .nodes
-        .into_iter()
-        .map(|node| node.number)
-        .collect();
     for n in data.requested.nodes {
         nodes.entry(n.number).or_insert((n, true));
     }
@@ -91,11 +85,7 @@ pub fn build_open_rows(data: ReviewsData) -> Vec<ReviewRow> {
     let mut rows: Vec<ReviewRow> = nodes
         .into_values()
         .map(|(n, requested)| {
-            let state = if rereviewed.contains(&n.number) {
-                ReviewState::ReReview
-            } else {
-                review_state(requested, &n)
-            };
+            let state = review_state(requested, &n);
             ReviewRow {
                 number: n.number,
                 is_draft: n.is_draft,
@@ -311,10 +301,6 @@ mod tests {
                     ),
                 ],
             },
-            rereviewed: crate::model::ReviewNumberSearch {
-                issue_count: 1,
-                nodes: vec![crate::model::ReviewNumberNode { number: 2 }],
-            },
         };
         let rows = build_open_rows(data);
         // De-duplicated to four unique PRs.
@@ -332,11 +318,13 @@ mod tests {
     }
 
     #[test]
-    fn re_review_state_survives_the_requested_search_cap() {
-        let requested = (1..=51)
-            .filter(|number| *number != 7)
-            .take(50)
+    fn capped_requested_search_keeps_states_and_reports_exact_total() {
+        let mut requested: Vec<_> = (1..=50)
             .map(|number| node(number, "alice", None, &[]))
+            .collect();
+        requested[6] = node(7, "bob", None, &["2026-06-09T00:00:00Z"]);
+        let reviewed = (101..=137)
+            .map(|number| node(number, "carol", None, &["2026-06-09T00:00:00Z"]))
             .collect();
         let data = ReviewsData {
             requested: ReviewSearch {
@@ -344,23 +332,19 @@ mod tests {
                 nodes: requested,
             },
             reviewed: ReviewSearch {
-                issue_count: 56,
-                nodes: vec![node(7, "bob", None, &["2026-06-09T00:00:00Z"])],
-            },
-            rereviewed: crate::model::ReviewNumberSearch {
-                issue_count: 19,
-                nodes: vec![crate::model::ReviewNumberNode { number: 7 }],
+                issue_count: 37,
+                nodes: reviewed,
             },
         };
         assert!(data.is_capped());
         assert_eq!(data.total_count(), 154);
 
         let rows = build_open_rows(data);
-        assert_eq!(rows.len(), 51);
-        assert_eq!(
-            rows.iter().find(|row| row.number == 7).unwrap().state,
-            ReviewState::ReReview
-        );
+        assert_eq!(rows.len(), 87);
+        let state = |number| rows.iter().find(|row| row.number == number).unwrap().state;
+        assert_eq!(state(7), ReviewState::ReReview);
+        assert_eq!(state(8), ReviewState::Awaiting);
+        assert_eq!(state(101), ReviewState::Reviewed);
     }
 
     #[test]
@@ -380,10 +364,6 @@ mod tests {
                     &["2026-06-10T00:00:00Z"],
                 )],
             },
-            rereviewed: crate::model::ReviewNumberSearch {
-                issue_count: 0,
-                nodes: vec![],
-            },
         };
         let rows = build_open_rows(data);
         assert_eq!(rows[0].state, ReviewState::Reviewed);
@@ -397,10 +377,6 @@ mod tests {
                 nodes: vec![node(1, "alice", None, &[])],
             },
             reviewed: ReviewSearch {
-                issue_count: 0,
-                nodes: vec![],
-            },
-            rereviewed: crate::model::ReviewNumberSearch {
                 issue_count: 0,
                 nodes: vec![],
             },
