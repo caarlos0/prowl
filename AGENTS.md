@@ -106,9 +106,11 @@ watch event loop); everything else is testable modules:
   `parse_graphql()`. Client clones share rate-limit deadlines: primary REST
   core and GraphQL budgets stay separate, while secondary limits block both.
   Clones also share a per-client, in-memory cache of up to 32 successful REST
-  GET responses with ETags. Matching GETs send `If-None-Match`; a `304` reuses
-  the cached body. It does not reduce HTTP request count, is isolated between
-  clients/tokens, and does not apply to GraphQL.
+  GET responses with ETags. The cache keeps only fields parsed by the caller,
+  promotes reused entries ahead of older unused entries, and sends
+  `If-None-Match` for matching GETs; a `304` reuses the cached body. It does not
+  reduce HTTP request count, is isolated between clients/tokens, and does not
+  apply to GraphQL.
   HTTP status, headers, and GraphQL errors identify limits; a successful last
   response with zero remaining quota still returns its data. The test-only
   `github::fake` supplies in-memory responses and a controlled clock through
