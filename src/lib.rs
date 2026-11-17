@@ -5719,15 +5719,19 @@ mod tests {
         assert_eq!(current.status().lines().count(), 2);
     }
 
+    fn shipment_request_counts(requests: &[String]) -> (usize, usize) {
+        let gets = requests
+            .iter()
+            .filter(|request| request.starts_with("GET "))
+            .count();
+        (gets, requests.len() - gets)
+    }
+
     /// Four watch refreshes through the real schedule, fetch, and merge. The
     /// GraphQL fixture changes on every refresh, so a skipped view must keep the
     /// rows of the refresh that last fetched it.
     #[test]
     fn inactive_view_refreshes_every_second_interval() {
-        fn counts(requests: &[String]) -> (usize, usize) {
-            let gets = requests.iter().filter(|r| r.starts_with("GET ")).count();
-            (gets, requests.len() - gets)
-        }
         let cli = Cli::try_parse_from(["prowl"]).unwrap();
         let repo = Repo::parse("o/r").unwrap();
         let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
@@ -5752,7 +5756,6 @@ mod tests {
             let mut last_good = None;
             let mut issues = Vec::new();
             let mut inactive_shown = String::new();
-            // (refresh, Ctrl-R, PRs in the fixture, inactive view due)
             for (tick, manual, numbers, inactive_due, shipments_due) in [
                 (1, false, &[3, 2, 1][..], true, true),
                 (2, false, &[2, 1][..], false, false),
@@ -5763,7 +5766,6 @@ mod tests {
                 let routes = tagged_watch_with_merged(numbers);
                 let graphql = &routes.iter().find(|(route, _)| route == GRAPHQL).unwrap().1;
                 fake.set_response(GRAPHQL, 200, &[], graphql);
-                // Baseline: a refresh that fetches both views.
                 let (base_client, base_fake) = github::fake::client(routes.clone());
                 let base = fetch_views(
                     &base_client,
@@ -5773,12 +5775,12 @@ mod tests {
                         shipments: true,
                     },
                 );
-                let before = counts(&base_fake.requests());
+                let before = shipment_request_counts(&base_fake.requests());
 
                 let sent = fake.requests().len();
                 let due = schedule.next(active, manual, true);
                 let outcome = fetch_views(&client, due);
-                let after = counts(&fake.requests()[sent..]);
+                let after = shipment_request_counts(&fake.requests()[sent..]);
                 let now = start + chrono::TimeDelta::minutes(5 * tick);
                 schedule.record(
                     due,
@@ -5797,14 +5799,12 @@ mod tests {
                 assert_eq!(due.includes(inactive), inactive_due, "{label}: {due:?}");
                 assert_eq!(before, (4, 2), "{label}");
                 assert_eq!(due.shipments, shipments_due, "{label}: {due:?}");
-                let expected_after = (
-                    if due.shipments { before.0 } else { 0 },
-                    if due.mine {
-                        before.1
-                    } else {
-                        usize::from(due.reviews)
-                    },
-                );
+                let expected_posts = if due.mine {
+                    before.1
+                } else {
+                    usize::from(due.reviews)
+                };
+                let expected_after = (if due.shipments { before.0 } else { 0 }, expected_posts);
                 assert_eq!(after, expected_after, "{label}");
                 assert!(outcome.issues.is_empty(), "{label}: {:?}", outcome.issues);
                 assert_eq!(
@@ -5813,7 +5813,6 @@ mod tests {
                     "{label}: active view output"
                 );
 
-                // Tab paints the inactive view from retained data, with no request.
                 let sent = fake.requests().len();
                 let shown = render(&outcome.sections, inactive);
                 assert_eq!(fake.requests().len(), sent, "{label}: Tab requested");
@@ -5834,7 +5833,6 @@ mod tests {
                 last_good = Some(outcome.sections);
                 issues = outcome.issues;
             }
-            // After Tab, the next refresh fetches the newly active view.
             assert!(schedule.next(inactive, false, true).includes(inactive));
         }
     }
