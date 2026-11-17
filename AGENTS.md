@@ -121,11 +121,12 @@ watch event loop); everything else is testable modules:
   (`METHOD /path?query`) and the `If-None-Match` value.
 - `auth.rs` — device-flow login + token storage (keyring/file).
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
-  the three Mine queries plus `REVIEWS_QUERY`, which combines the `requested:`
-  and `reviewed:` open-review searches with the reviewed-merged search. Watch
-  mode also aliases the Mine merged search into that request when fetching both
-  views; when Reviews is not fetched, Mine merged keeps its single-search path.
-  Alias errors stay scoped to their sections. My PRs and
+  the Mine query paths plus `REVIEWS_QUERY`, which combines the `requested:`
+  and `reviewed:` open-review searches with the reviewed-merged search.
+  `WATCH_MINE_REVIEWS_QUERY` combines the first Mine page, optional queue, and
+  Reviews searches when both views are due; it includes the Mine merged search
+  exactly once when that section is enabled. Alias errors stay scoped to their
+  sections. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
   GraphQL partial-data errors warn in each affected section, including a
   section that consumes warned shared rule data; the cache adds no requests.
@@ -456,9 +457,11 @@ still performs all teardown through `finish`.
   (`FetchOutcome::merge`), so Tab switches instantly from `last_good` with no
   request; the next refresh fetches the newly active view. When the shown view
   was fetched before the other, a dim `updated 6m ago` status line
-  (`Schedule::age_note`) shows its age. When both views are due, the Mine merged
-  search is aliased into the Reviews request; a refresh that skips Reviews sends
-  Mine merged as its own search. `--once`/piped fetches only the selected view.
+  (`Schedule::age_note`) shows its age. When both views are due and My PRs is
+  enabled, the first Mine page, optional queue, and Reviews searches share one
+  request; the Mine merged search appears once when enabled. A single-view
+  refresh keeps its existing query path. `--once`/piped fetches only the
+  selected view.
   A top tab strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
   reviewed by me), `ReReview` (requested again after I reviewed), `Updated` (I
@@ -649,18 +652,21 @@ still performs all teardown through `finish`.
   `headRefName` and `mergedAt`
   (fetched `sort:updated-desc`, since search can't sort by merge time, then
   re-sorted by `mergedAt` for display). Now also fetches `author` (used by the
-  reviewed-and-merged section; the Mine merged section ignores it). In watch
-  mode, when Reviews is fetched, Mine and reviewed-by-me merged searches are
-  aliases in the Reviews request; otherwise Mine uses its single search. An
-  error on one alias leaves the other sections usable and names the failed one.
-  A request-level failure reports each section included in that request.
-- Reviews (one POST, three aliased searches; four in watch): `requested: search(is:pr is:open
+  reviewed-and-merged section; the Mine merged section ignores it). When both
+  watch views are due, the first Mine request carries the Mine merged and
+  reviewed-by-me merged searches as aliases; otherwise Mine merged uses its
+  standalone search path. An error on one alias leaves the other sections usable
+  and names the failed one. A request-level failure reports each section
+  included in that request.
+- Reviews (one POST, three aliased searches; combined with the first Mine
+  request in a two-view watch): `requested: search(is:pr is:open
   <scope>:<me> -author:<me>)` and `reviewed: search(is:pr is:open
   reviewed-by:<me> -author:<me>)`, each node carrying `author`, `headRefName`,
   last commit `committedDate`, and `reviews(author:<me>)` `submittedAt`s.
-  Re-review = a PR in both result sets. The same request includes the
-  reviewed-and-merged search and, in watch mode when Mine is fetched, the Mine
-  merged search.
+  Re-review = a PR in both result sets. The request includes the
+  reviewed-and-merged search. When both watch views are due, it shares the
+  first Mine request, which carries the Mine merged alias exactly once when
+  enabled.
 - Reviewed & merged: `search(is:pr is:merged reviewed-by:<me> -author:<me>
   merged:>=<since>)`, aliased into the Reviews request with the configured
   merged limit.
