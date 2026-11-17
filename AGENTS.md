@@ -23,7 +23,10 @@ interval, and reads `^R refreshing` while a fetch is in flight; `^R` means
 `Ctrl-R`). While watching, the very top shows a `my PRs / reviews` tab strip
 with the active view accented. It rings the terminal bell when one of your PRs
 merges or an open PR's status changes, and flags the changed rows until marked
-read (the bell and change markers track the Mine view only).
+read (the bell and change markers track the Mine view only). The watch fetches
+the active view on every refresh and the inactive view on every second one;
+`Ctrl-R` fetches both. When the shown view is older than the other, a dim
+`updated 6m ago` line shows its age.
 The interactive watch runs on the
 [**uncurses**](https://github.com/aymanbagabas/uncurses) toolkit with an event
 loop: it shows an *inline* `Loading...` frame, then enters the **alternate
@@ -118,7 +121,8 @@ watch event loop); everything else is testable modules:
 - `model.rs` — serde structs + `fetch_*` for the queries; query strings. Covers
   the three Mine queries plus the Reviews view: `REVIEWS_QUERY` (one POST with
   two aliased searches, `requested:` + `reviewed:`) and `fetch_reviewed_merged`
-  (reuses `merged_query`, now carrying `author`). Watch mode combines its two
+  (reuses `merged_query`, now carrying `author`). When a watch refresh fetches
+  both views, it combines their two
   merged searches in one aliased POST and reports errors per merged section;
   one-shot keeps its selected view's single merged-search request. My PRs and
   Merge Queue share a refresh-scoped cache of complete required rule contexts.
@@ -319,7 +323,8 @@ up (raw mode, hidden cursor, keeping the terminal's detected color profile), the
 paints the startup frame: a cached dashboard if one exists (entering the alt screen
 straight away), otherwise an **inline** `Loading...` frame. `run` loops fetch →
 paint → wait, resolving `me` on the first fetch and the default branch only if
-shipments are enabled, and returning `Ok(())` on a quit key. The first live paint
+shipments are enabled, and returning `Ok(())` on a quit key. Each fetch asks
+`Schedule::next` which views are due (a `Ctrl-R` from the wait makes both due). The first live paint
 calls `enter_alt` (once), which drops the inline frame to
 zero rows and switches to the alt screen — so loading looks like ordinary command
 output before the dashboard takes over the screen. `stop` consumes the app and calls
@@ -427,10 +432,18 @@ still performs all teardown through `finish`.
   the Reviews list (`prs::without_drafts` / `reviews::without_drafts`).
 - **Views / Tab:** two views, `Mine` (default) and `Reviews`, selected for
   one-shot output with `--view` and toggled live with `Tab`. While watching,
-  prowl fetches **both** views every refresh so Tab switches instantly from
-  `last_good` (no refetch); the two merged searches share one aliased POST.
-  `--once`/piped fetches only the selected view. A top tab strip marks the
-  active view.
+  `lib.rs::Schedule` fetches the active view on every refresh and the inactive
+  view on every second refresh (`Schedule::INACTIVE_EVERY`), so its data is at
+  most two intervals old. The first refresh, including after a cached start,
+  and every `Ctrl-R` refresh fetch both views. A refresh that skips a view keeps
+  that view's sections and section errors (`FetchOutcome::merge`), so Tab
+  switches instantly from `last_good` with no request; the next refresh fetches
+  the newly active view. When the shown view was fetched before the other, a dim
+  `updated 6m ago` status line (`Schedule::age_note`) shows its age. When both
+  views are due, the two merged searches share one aliased POST; a refresh that
+  skips one view sends only its own merged search, so a view never mixes data
+  of different ages. `--once`/piped fetches only the selected view. A top tab
+  strip marks the active view.
 - **Review state:** each open review row is `Awaiting` (requested, not yet
   reviewed by me), `ReReview` (requested again after I reviewed), `Updated` (I
   reviewed; last commit `committedDate` > my latest review `submittedAt`), or
@@ -442,7 +455,9 @@ still performs all teardown through `finish`.
   status changes (keyed by PR number, so re-sorting / new PRs / title edits do
   not ring). The first refresh is silent. Changed rows get a `▸` marker. Bell
   and change markers track the **Mine** view only (the Reviews view conveys
-  state through its per-row glyph instead). `bell false` in config or
+  state through its per-row glyph instead). While Reviews is active, Mine
+  changes are detected when the Mine view is next fetched (at most two
+  intervals). `bell false` in config or
   `--bell=false` disables it; explicit CLI values override config.
   `--no-bell` remains supported and cannot be combined with an explicit `--bell`.
 - **Unread markers:** `App::unread` accumulates refresh diffs for the current
