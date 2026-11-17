@@ -392,6 +392,76 @@ pub const MINE_QUERY: &str = r#"query($owner: String!, $name: String!, $q: Strin
   }
 }"#;
 
+const WATCH_MINE_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!, $q: String!, $after: String, $includeQueue: Boolean!, $me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef {
+      id
+      refUpdateRule { requiredStatusCheckContexts }
+      rules(first: 100) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          parameters {
+            __typename
+            ... on RequiredStatusChecksParameters {
+              requiredStatusChecks { context }
+            }
+          }
+        }
+      }
+    }
+    mergeQueue @include(if: $includeQueue) {
+      nextEntryEstimatedTimeToMerge
+      entries(first: 100) {
+        nodes {
+          position
+          enqueuedAt
+          headCommit {
+            id
+            statusCheckRollup {
+              contexts(first: 40) {
+                checkRunCountsByState { state count }
+                statusContextCountsByState { state count }
+                nodes { ... on CheckRun { startedAt } }
+              }
+            }
+          }
+          pullRequest { number title url headRefName baseRef { id } author { login } }
+        }
+      }
+    }
+  }
+  search(type: ISSUE, first: 5, after: $after, query: $q) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number title url mergeable mergeStateStatus isDraft updatedAt createdAt headRefName
+        baseRef { id }
+        reviewDecision
+        latestOpinionatedReviews(first: 100) { nodes { state } }
+        mergeQueueEntry { position state }
+        reviewThreads(first: 100) { totalCount nodes { isResolved } }
+        commits(last: 1) { nodes { commit { id statusCheckRollup { contexts(first: 1) {
+          checkRunCountsByState { state count }
+          statusContextCountsByState { state count }
+        } } } } }
+      }
+    }
+  }
+  requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...watchReview } }
+  reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...watchReview } }
+  reviewedMerged: search(type: ISSUE, first: $mergedLimit, query: $reviewedMerged) { nodes { ...watchMerged } }
+  mineMerged: search(type: ISSUE, first: $mergedLimit, query: $mineMerged) @include(if: $includeMineMerged) { nodes { ...watchMerged } }
+}
+fragment watchReview on PullRequest {
+  number title url headRefName isDraft updatedAt
+  author { login }
+  commits(last: 1) { nodes { commit { committedDate } } }
+  reviews(author: $me, first: 20, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) { nodes { submittedAt } }
+}
+fragment watchMerged on PullRequest {
+  number title url headRefName mergedAt author { login }
+}"#;
+
 #[derive(Debug, Deserialize)]
 pub struct MineData {
     repository: Option<DefaultBranchRepository>,
@@ -710,7 +780,14 @@ pub(crate) struct MineQueueResults {
     pub queue: Result<GraphqlData<(Vec<QueueEntryNode>, Option<i64>)>>,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+struct MineQueueOptions<'a> {
+    me: &'a str,
+    sort: OpenSort,
+    required_only: bool,
+    include_queue: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_mine_and_queue_with_context_memo(
     client: &Client,
     repo: &Repo,
@@ -719,7 +796,7 @@ pub(crate) fn fetch_mine_and_queue_with_context_memo(
     no_draft: bool,
     required_only: bool,
     context_cache: &mut RequiredContextCache,
-    mut memo: Option<&mut RequiredContextMemo>,
+    memo: Option<&mut RequiredContextMemo>,
 ) -> Result<MineQueueResults> {
     let q = mine_search(repo, me, sort, no_draft);
     let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
@@ -733,6 +810,129 @@ pub(crate) fn fetch_mine_and_queue_with_context_memo(
             "includeQueue": true,
         }),
     )?;
+    parse_mine_queue_response(
+        client,
+        repo,
+        context_cache,
+        &data,
+        errors,
+        MineQueueOptions {
+            me,
+            sort,
+            required_only,
+            include_queue: true,
+        },
+        memo,
+    )
+}
+
+pub(crate) struct WatchQueryOptions<'a> {
+    pub(crate) requested_qualifier: &'a str,
+    pub(crate) since: &'a str,
+    pub(crate) merged_limit: usize,
+    pub(crate) include_queue: bool,
+    pub(crate) include_mine_merged: bool,
+}
+
+pub(crate) struct MineReviewsQueueResults {
+    pub(crate) mine_queue: Result<MineQueueResults>,
+    pub(crate) reviews: ReviewsAndMerged,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_mine_queue_reviews_with_context_memo(
+    client: &Client,
+    repo: &Repo,
+    me: &str,
+    sort: OpenSort,
+    required_only: bool,
+    context_cache: &mut RequiredContextCache,
+    options: WatchQueryOptions<'_>,
+    memo: Option<&mut RequiredContextMemo>,
+) -> Result<MineReviewsQueueResults> {
+    let (requested, reviewed) = reviews_searches(repo, me, options.requested_qualifier);
+    let (data, errors) = client.graphql_with_errors::<serde_json::Value>(
+        WATCH_MINE_REVIEWS_QUERY,
+        serde_json::json!({
+            "owner": repo.owner,
+            "name": repo.name,
+            "q": mine_search(repo, me, sort),
+            "after": null,
+            "includeQueue": options.include_queue,
+            "me": me,
+            "requested": requested,
+            "reviewed": reviewed,
+            "reviewedMerged": reviewed_merged_search(repo, me, options.since),
+            "mineMerged": merged_search(repo, me, options.since),
+            "mergedLimit": options.merged_limit.clamp(1, 100),
+            "includeMineMerged": options.include_mine_merged,
+        }),
+    )?;
+    let mine_errors = errors
+        .iter()
+        .filter(|error| {
+            !matches!(
+                error
+                    .path
+                    .as_ref()
+                    .and_then(|path| path.first())
+                    .and_then(serde_json::Value::as_str),
+                Some("requested" | "reviewed" | "mineMerged" | "reviewedMerged")
+            )
+        })
+        .cloned()
+        .collect();
+    let review_errors = errors
+        .iter()
+        .filter(|error| {
+            !matches!(
+                error
+                    .path
+                    .as_ref()
+                    .and_then(|path| path.first())
+                    .and_then(serde_json::Value::as_str),
+                Some("search" | "repository")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mine_queue = parse_mine_queue_response(
+        client,
+        repo,
+        context_cache,
+        &data,
+        mine_errors,
+        MineQueueOptions {
+            me,
+            sort,
+            required_only,
+            include_queue: options.include_queue,
+        },
+        memo,
+    );
+    let reviews = parse_reviews_and_merged(&data, &review_errors, options.include_mine_merged);
+    Ok(MineReviewsQueueResults {
+        mine_queue,
+        reviews,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_mine_queue_response(
+    client: &Client,
+    repo: &Repo,
+    context_cache: &mut RequiredContextCache,
+    data: &serde_json::Value,
+    errors: Vec<GqlError>,
+    options: MineQueueOptions<'_>,
+    mut memo: Option<&mut RequiredContextMemo>,
+) -> Result<MineQueueResults> {
+    let MineQueueOptions {
+        me,
+        sort,
+        required_only,
+        include_queue,
+    } = options;
     let mine_error = mine_queue_graphql_error(&errors, false);
     let queue_error = mine_queue_graphql_error(&errors, true);
 
@@ -759,43 +959,22 @@ pub(crate) fn fetch_mine_and_queue_with_context_memo(
             .extend(rule_errors);
     }
 
-    let merge_queue = repository
-        .and_then(|repository| repository.get("mergeQueue"))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let queue = match serde_json::from_value::<Option<MergeQueue>>(merge_queue)
-        .context("parsing merge queue")
-    {
-        Ok(Some(merge_queue)) => {
-            let eta = merge_queue.next_entry_estimated_time_to_merge;
-            let mut nodes = merge_queue.entries.nodes;
-            let mut warnings = mine_queue_graphql_warnings(&errors, true);
-            let rule_data_trusted = warnings.is_empty();
-            apply_queue_required(
-                client,
-                &mut nodes,
-                required_only,
-                context_cache,
-                memo.as_deref_mut(),
-                rule_data_trusted,
-            )
-            .map(|required_warnings| {
-                warnings.extend(required_warnings);
-                GraphqlData {
-                    data: (nodes, eta),
-                    errors: warnings,
-                }
-            })
-        }
-        Ok(None) => {
-            if let Some(error) = queue_error {
-                Err(error)
-            } else {
+    let queue = if include_queue {
+        let merge_queue = repository
+            .and_then(|repository| repository.get("mergeQueue"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        match serde_json::from_value::<Option<MergeQueue>>(merge_queue)
+            .context("parsing merge queue")
+        {
+            Ok(Some(merge_queue)) => {
+                let eta = merge_queue.next_entry_estimated_time_to_merge;
+                let mut nodes = merge_queue.entries.nodes;
                 let mut warnings = mine_queue_graphql_warnings(&errors, true);
                 let rule_data_trusted = warnings.is_empty();
                 apply_queue_required(
                     client,
-                    &mut [],
+                    &mut nodes,
                     required_only,
                     context_cache,
                     memo.as_deref_mut(),
@@ -804,13 +983,41 @@ pub(crate) fn fetch_mine_and_queue_with_context_memo(
                 .map(|required_warnings| {
                     warnings.extend(required_warnings);
                     GraphqlData {
-                        data: (Vec::new(), None),
+                        data: (nodes, eta),
                         errors: warnings,
                     }
                 })
             }
+            Ok(None) => {
+                if let Some(error) = queue_error {
+                    Err(error)
+                } else {
+                    let mut warnings = mine_queue_graphql_warnings(&errors, true);
+                    let rule_data_trusted = warnings.is_empty();
+                    apply_queue_required(
+                        client,
+                        &mut [],
+                        required_only,
+                        context_cache,
+                        memo.as_deref_mut(),
+                        rule_data_trusted,
+                    )
+                    .map(|required_warnings| {
+                        warnings.extend(required_warnings);
+                        GraphqlData {
+                            data: (Vec::new(), None),
+                            errors: warnings,
+                        }
+                    })
+                }
+            }
+            Err(parse_error) => Err(queue_error.unwrap_or(parse_error)),
         }
-        Err(parse_error) => Err(queue_error.unwrap_or(parse_error)),
+    } else {
+        Ok(GraphqlData {
+            data: (Vec::new(), None),
+            errors: Vec::new(),
+        })
     };
     let first_page = data
         .get("search")
@@ -1771,8 +1978,7 @@ fn alias_errors(errors: &[GqlError], aliases: &[&str]) -> Vec<GqlError> {
 // Reviews (open PRs awaiting / under my review)
 // ----------------------------------------------------------------------------
 
-/// The review searches and merged searches share one request.
-/// The Mine merged alias is included only when the watch fetches both views.
+/// Standalone Reviews and merged searches when the combined watch query is not selected.
 pub const REVIEWS_QUERY: &str = r#"query($me: String!, $requested: String!, $reviewed: String!, $reviewedMerged: String!, $mineMerged: String!, $mergedLimit: Int!, $includeMineMerged: Boolean!) {
   requested: search(type: ISSUE, first: 50, query: $requested) { nodes { ...rev } }
   reviewed: search(type: ISSUE, first: 50, query: $reviewed) { nodes { ...rev } }
@@ -1923,7 +2129,15 @@ pub(crate) fn fetch_reviews_and_merged(
             "includeMineMerged": include_mine,
         }),
     )?;
-    let review_errors = alias_errors(&errors, &["requested", "reviewed"]);
+    Ok(parse_reviews_and_merged(&data, &errors, include_mine))
+}
+
+fn parse_reviews_and_merged(
+    data: &serde_json::Value,
+    errors: &[GqlError],
+    include_mine: bool,
+) -> ReviewsAndMerged {
+    let review_errors = alias_errors(errors, &["requested", "reviewed"]);
     let reviews = match serde_json::from_value(data.clone()) {
         Ok(data) => Ok(GraphqlData {
             data,
@@ -1939,11 +2153,11 @@ pub(crate) fn fetch_reviews_and_merged(
         )),
         Err(error) => Err(error).context("parsing Reviews searches"),
     };
-    Ok(ReviewsAndMerged {
+    ReviewsAndMerged {
         reviews,
-        mine_merged: include_mine.then(|| merged_alias(&data, &errors, "mineMerged")),
-        reviewed_merged: merged_alias(&data, &errors, "reviewedMerged"),
-    })
+        mine_merged: include_mine.then(|| merged_alias(data, errors, "mineMerged")),
+        reviewed_merged: merged_alias(data, errors, "reviewedMerged"),
+    }
 }
 
 #[cfg(test)]
@@ -1960,6 +2174,17 @@ mod tests {
         assert!(
             MINE_QUERY.contains("pageInfo { hasNextPage endCursor }"),
             "{MINE_QUERY}"
+        );
+    }
+
+    #[test]
+    fn watch_query_includes_the_mine_merged_search_once() {
+        assert_eq!(
+            WATCH_MINE_REVIEWS_QUERY
+                .matches("mineMerged: search")
+                .count(),
+            1,
+            "{WATCH_MINE_REVIEWS_QUERY}"
         );
     }
 
