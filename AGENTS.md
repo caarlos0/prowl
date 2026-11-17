@@ -480,7 +480,9 @@ still performs all teardown through `finish`.
   successful fetch its data is at most two intervals old. A view with a failed
   section is not marked fetched, so the next refresh retries it and its age
   stays that of its last successful fetch; a partial-data warning still counts
-  as fetched. The first refresh, including after a cached start, and every
+  as fetched. A failed shipment scan (REST) does not count: the Mine view's age
+  follows its GraphQL sections, and shipments keep their own age note. The
+  first refresh, including after a cached start, and every
   `Ctrl-R` refresh fetch both views. A refresh that skips a view keeps that
   view's sections, section errors, and warnings
   (`FetchOutcome::merge`), so Tab switches instantly from `last_good` with no

@@ -471,7 +471,9 @@ impl Schedule {
 
     /// Record a completed refresh of the `due` views. A view with a failed
     /// section keeps its previous time, so the next refresh retries it. A
-    /// partial-data warning still delivered data, so it counts as fetched.
+    /// partial-data warning still delivered data, so it counts as fetched. The
+    /// shipment scan is REST and tracked separately, so its failure does not
+    /// age the Mine view.
     fn record(
         &mut self,
         due: Due,
@@ -485,7 +487,10 @@ impl Schedule {
             at,
         });
         let succeeded = |view| {
-            due.includes(view) && !issues.iter().any(|i| !i.warning && i.scope.view() == view)
+            due.includes(view)
+                && !issues
+                    .iter()
+                    .any(|i| !i.warning && i.scope.view() == view && !i.scope.is_shipment_scan())
         };
         if due.mine && mine_data_updated {
             self.mine_data = fetched;
@@ -7571,5 +7576,56 @@ mod tests {
         }
         assert_eq!(per_refresh[0], [4, 0, 4, 0, 4, 0, 4]);
         assert_eq!(per_refresh[1], per_refresh[0]);
+    }
+
+    #[test]
+    fn shipment_only_failure_keeps_fresh_mine_view_current() {
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let (client, fake) = github::fake::client(tagged_watch());
+        let mut schedule = Schedule::default();
+        let mut branch = Some("main".to_string());
+        let mut last = None;
+        let mut issues = Vec::new();
+        for tick in 1..=3 {
+            if tick == 3 {
+                fake.set_response(RELEASES, 500, &[], r#"{"message":"rest down"}"#);
+                fake.set_response(GRAPHQL, 200, &[], &graphql(&[1]).1);
+            }
+            let due = schedule.next(View::Mine, false, true);
+            let outcome = fetch_scheduled(&cli, &client, &repo, "me", &mut branch, due);
+            let now = start + chrono::TimeDelta::minutes(5 * tick);
+            schedule.record(
+                due,
+                &outcome.issues,
+                now,
+                outcome.shipment_scan,
+                outcome.has_fresh_mine_data(),
+            );
+            let merged = outcome.merge(last.take(), std::mem::take(&mut issues), due);
+            if tick == 3 {
+                assert!(due.mine && due.reviews && due.shipments, "{due:?}");
+                let prs: Vec<_> = merged
+                    .sections
+                    .prs
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row.number)
+                    .collect();
+                assert_eq!(prs, [1]);
+                assert!(merged.issues.iter().all(|i| i.scope.is_shipment_scan()));
+                assert!(!merged.issues.is_empty());
+                assert_eq!(schedule.mine.map(|fetched| fetched.refresh), Some(3));
+                assert_eq!(schedule.age_note(View::Mine, now), None);
+                assert_eq!(
+                    schedule.shipments_age_note(now).as_deref(),
+                    Some("updated 10m ago")
+                );
+            }
+            issues = merged.issues;
+            last = Some(merged.sections);
+        }
     }
 }
