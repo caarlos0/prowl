@@ -129,6 +129,18 @@ impl FetchScope {
             Self::ReviewedMerged => "Reviewed & merged",
         }
     }
+
+    fn view(self) -> View {
+        match self {
+            Self::Mine
+            | Self::Queue
+            | Self::Merged
+            | Self::Upcoming
+            | Self::Shipments
+            | Self::ReleaseMetadata => View::Mine,
+            Self::Reviews | Self::ReviewedMerged => View::Reviews,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -293,6 +305,134 @@ impl FetchOutcome {
         }
         self
     }
+
+    /// Combine a watch refresh with the previous data. The sections and issues
+    /// of views this refresh skipped carry over unchanged; fetched sections are
+    /// reconciled as usual.
+    fn merge(
+        mut self,
+        previous: Option<Sections>,
+        previous_issues: Vec<FetchIssue>,
+        due: Due,
+    ) -> Self {
+        let mut previous = previous.unwrap_or(Sections::EMPTY);
+        if !due.mine {
+            self.sections.merged = previous.merged.take();
+            self.sections.queue = previous.queue.take();
+            self.sections.queue_next_eta = previous.queue_next_eta.take();
+            self.sections.prs = previous.prs.take();
+            self.sections.commits = previous.commits.take();
+        }
+        if !due.reviews {
+            self.sections.reviews = previous.reviews.take();
+            self.sections.reviewed_merged = previous.reviewed_merged.take();
+        }
+        let mut merged = self.reconcile(Some(previous));
+        merged.issues.extend(
+            previous_issues
+                .into_iter()
+                .filter(|issue| !due.includes(issue.scope.view())),
+        );
+        // Keep the fetch order (Mine before Reviews) on every refresh.
+        merged
+            .issues
+            .sort_by_key(|issue| issue.scope.view() == View::Reviews);
+        merged
+    }
+}
+
+/// When a view was last fetched: the refresh round and the wall-clock time.
+#[derive(Clone, Copy)]
+struct Fetched {
+    refresh: u64,
+    at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The views one watch refresh fetches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Due {
+    mine: bool,
+    reviews: bool,
+}
+
+impl Due {
+    fn includes(self, view: View) -> bool {
+        match view {
+            View::Mine => self.mine,
+            View::Reviews => self.reviews,
+        }
+    }
+}
+
+/// The watch refresh cadence. The active view is fetched on every refresh, the
+/// inactive view on every [`Self::INACTIVE_EVERY`]th, and `Ctrl-R` fetches both.
+/// A view that was never fetched is always due.
+#[derive(Default)]
+struct Schedule {
+    refresh: u64,
+    mine: Option<Fetched>,
+    reviews: Option<Fetched>,
+}
+
+impl Schedule {
+    const INACTIVE_EVERY: u64 = 2;
+
+    fn last(&self, view: View) -> Option<Fetched> {
+        match view {
+            View::Mine => self.mine,
+            View::Reviews => self.reviews,
+        }
+    }
+
+    /// Start the next refresh and select the views it fetches.
+    fn next(&mut self, active: View, manual: bool) -> Due {
+        self.refresh += 1;
+        let due = |view| {
+            view == active
+                || manual
+                || self
+                    .last(view)
+                    .is_none_or(|last| self.refresh - last.refresh >= Self::INACTIVE_EVERY)
+        };
+        Due {
+            mine: due(View::Mine),
+            reviews: due(View::Reviews),
+        }
+    }
+
+    /// Record a completed refresh of the `due` views. A view with a failed
+    /// section keeps its previous time, so the next refresh retries it. A
+    /// partial-data warning still delivered data, so it counts as fetched.
+    fn record(&mut self, due: Due, issues: &[FetchIssue], at: chrono::DateTime<chrono::Utc>) {
+        let fetched = Some(Fetched {
+            refresh: self.refresh,
+            at,
+        });
+        let succeeded = |view| {
+            due.includes(view) && !issues.iter().any(|i| !i.warning && i.scope.view() == view)
+        };
+        if succeeded(View::Mine) {
+            self.mine = fetched;
+        }
+        if succeeded(View::Reviews) {
+            self.reviews = fetched;
+        }
+    }
+
+    /// The age of `view`'s data, when it is older than the other view's.
+    fn age_note(&self, view: View, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+        let shown = self.last(view)?;
+        let other = self.last(view.toggle())?;
+        if shown.refresh >= other.refresh {
+            return None;
+        }
+        let age = timefmt::relative_age(now, shown.at);
+        Some(if age == "now" {
+            "updated just now".to_string()
+        } else {
+            format!("updated {age} ago")
+        })
+    }
 }
 
 fn retain<T>(fresh: &mut Option<T>, previous: &mut Option<T>, issue: &mut FetchIssue) {
@@ -396,8 +536,8 @@ fn fetch_merged_release_map(
 
 /// Fetch the sections for the requested views. `want_mine` covers the Mine view
 /// (open PRs, queue, merged, shipments, honoring `--only`); `want_reviews`
-/// covers the Reviews view (PRs to review, reviewed-and-merged). In watch mode
-/// both are fetched so Tab can switch instantly; `--once` fetches just one.
+/// covers the Reviews view (PRs to review, reviewed-and-merged). The watch asks
+/// for the views its [`Schedule`] says are due; `--once` fetches just one.
 fn fetch(
     cli: &Cli,
     client: &Client,
@@ -2260,6 +2400,8 @@ struct App<'a> {
     last_status: String,
     /// Section errors remain visible until the next refresh resolves them.
     fetch_issues: Vec<FetchIssue>,
+    /// Which views each refresh fetches, and when each was last fetched.
+    schedule: Schedule,
     /// Whether a fetch is in flight, so the footer can say `^R refreshing`.
     refreshing: bool,
     /// Whether the bell is armed. The first refresh after a cached start is
@@ -2311,6 +2453,7 @@ impl<'a> App<'a> {
             },
             last_status: String::new(),
             fetch_issues: Vec::new(),
+            schedule: Schedule::default(),
             refreshing: false,
             armed: false,
             in_alt: false,
@@ -2411,17 +2554,19 @@ impl<'a> App<'a> {
     }
 
     /// Drive the watch: loop fetch → paint → wait, returning `Ok(())` when the
-    /// user presses a quit key.
+    /// user presses a quit key. A `Ctrl-R` during the wait refreshes both views.
     fn run(&mut self) -> Result<()> {
+        let mut manual = false;
         loop {
             if termination_requested() {
                 return Ok(());
             }
-            if let Flow::Quit = self.fetch_responsive()? {
+            if let Flow::Quit = self.fetch_responsive(manual)? {
                 return Ok(());
             }
-            if let Flow::Quit = self.wait_interval()? {
-                return Ok(());
+            match self.wait_interval()? {
+                Flow::Quit => return Ok(()),
+                flow => manual = matches!(flow, Flow::Refresh),
             }
         }
     }
@@ -2441,22 +2586,23 @@ impl<'a> App<'a> {
     /// `me` and the default branch (when shipments need it) are resolved here
     /// too (once), so even the first round-trip never freezes input. `Ctrl-R`
     /// is ignored — a fetch is already in flight.
-    fn fetch_responsive(&mut self) -> Result<Flow> {
+    fn fetch_responsive(&mut self, manual: bool) -> Result<Flow> {
         // The footer says `^R refreshing` (with `^R` dimmed) for the duration.
         self.refreshing = true;
         self.repaint_last()?;
-        let flow = self.fetch_loop();
+        let flow = self.fetch_loop(manual);
         self.refreshing = false;
         flow
     }
 
     /// The fetch + input-poll loop itself; [`Self::fetch_responsive`] wraps it to
     /// keep the `refreshing` footer state balanced on every exit path.
-    fn fetch_loop(&mut self) -> Result<Flow> {
+    fn fetch_loop(&mut self, manual: bool) -> Result<Flow> {
         let (cli, client, repo) = (self.cli.clone(), self.client.clone(), self.repo.clone());
         let mut me = self.me.clone();
         let mut default_branch = self.default_branch.clone();
         let resolve = me.is_empty();
+        let due = self.schedule.next(self.ui.view, manual);
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -2464,8 +2610,15 @@ impl<'a> App<'a> {
                 if resolve {
                     me = client.me()?;
                 }
-                // Both views every refresh, so Tab switches instantly.
-                let outcome = fetch(&cli, &client, &repo, &me, &mut default_branch, true, true);
+                let outcome = fetch(
+                    &cli,
+                    &client,
+                    &repo,
+                    &me,
+                    &mut default_branch,
+                    due.mine,
+                    due.reviews,
+                );
                 Ok((me, default_branch, outcome))
             })();
             let _ = tx.send(fetched); // ignored if we already quit (rx dropped)
@@ -2482,7 +2635,9 @@ impl<'a> App<'a> {
                     // Cleared before painting, so the result frame already shows
                     // the plain `^R refresh` hint again.
                     self.refreshing = false;
-                    self.apply(outcome)?;
+                    self.schedule
+                        .record(due, &outcome.issues, chrono::Utc::now());
+                    self.apply(outcome, due)?;
                     return Ok(Flow::Continue);
                 }
                 Ok(Err(e)) => {
@@ -2503,8 +2658,9 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Wait out the refresh interval, staying responsive: `Ctrl-R` refreshes now, `?`
-    /// toggles help, quit/suspend/resize are honored, other keys are discarded.
+    /// Wait out the refresh interval, staying responsive: `Ctrl-R` returns
+    /// [`Flow::Refresh`] to refresh now, `?` toggles help, quit/suspend/resize
+    /// are honored, other keys are discarded.
     fn wait_interval(&mut self) -> Result<Flow> {
         let deadline = Instant::now() + self.cli.interval.dur;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
@@ -2519,9 +2675,8 @@ impl<'a> App<'a> {
             }
             while let Some(ev) = self.program.try_read_event()? {
                 match self.handle_event(&ev)? {
-                    Flow::Quit => return Ok(Flow::Quit),
-                    Flow::Refresh => return Ok(Flow::Continue), // refresh now
                     Flow::Continue => {}
+                    flow => return Ok(flow),
                 }
             }
         }
@@ -2785,10 +2940,15 @@ impl<'a> App<'a> {
     }
 
     /// Render a successful fetch: diff against the previous snapshot, paint, ring
-    /// the bell on a change (once armed), and cache the result.
-    fn apply(&mut self, outcome: FetchOutcome) -> Result<()> {
+    /// the bell on a change (once armed), and cache the result. Views the
+    /// refresh skipped keep their previous sections and errors.
+    fn apply(&mut self, outcome: FetchOutcome, due: Due) -> Result<()> {
         let selected = self.selected_url();
-        let outcome = outcome.reconcile(self.last_good.take());
+        let outcome = outcome.merge(
+            self.last_good.take(),
+            std::mem::take(&mut self.fetch_issues),
+            due,
+        );
         let FetchOutcome { sections, issues } = outcome;
         let mut tracker = Tracker::build(sections.prs.as_deref(), sections.merged.as_deref());
         tracker.preserve_untrusted(
@@ -2826,6 +2986,7 @@ impl<'a> App<'a> {
         self.fetch_issues
             .iter()
             .map(FetchIssue::line)
+            .chain(self.schedule.age_note(self.ui.view, chrono::Utc::now()))
             .chain((!self.last_status.is_empty()).then(|| self.last_status.clone()))
             .collect::<Vec<_>>()
             .join("\n")
@@ -5332,6 +5493,183 @@ mod tests {
         );
         assert_eq!(shipped(&current.sections), shipped_before);
         assert_eq!(current.status().lines().count(), 2);
+    }
+
+    /// Four watch refreshes through the real schedule, fetch, and merge. The
+    /// GraphQL fixture changes on every refresh, so a skipped view must keep the
+    /// rows of the refresh that last fetched it.
+    #[test]
+    fn inactive_view_refreshes_every_second_interval() {
+        fn counts(requests: &[String]) -> (usize, usize) {
+            let gets = requests.iter().filter(|r| r.starts_with("GET ")).count();
+            (gets, requests.len() - gets)
+        }
+        let cli = Cli::try_parse_from(["prowl"]).unwrap();
+        let repo = Repo::parse("o/r").unwrap();
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let fetch_views = |client: &Client, mine, reviews| {
+            let mut branch = Some("main".to_string());
+            fetch(&cli, client, &repo, "me", &mut branch, mine, reviews)
+        };
+        let render = |sections: &Sections, view| {
+            render_to_string(
+                sections,
+                &ui(view),
+                &Changes::default(),
+                None,
+                true,
+                Profile::Disabled,
+            )
+        };
+        for active in [View::Mine, View::Reviews] {
+            let inactive = active.toggle();
+            // (GET, POST) of a refresh that skips the inactive view. With Mine
+            // active, Mine merged leaves the Reviews request as its own search.
+            let skipped_counts = match active {
+                View::Mine => (4, 3),
+                View::Reviews => (0, 1),
+            };
+            let (client, fake) = github::fake::client(tagged_watch());
+            let mut schedule = Schedule::default();
+            let mut last_good = None;
+            let mut issues = Vec::new();
+            let mut inactive_shown = String::new();
+            // (refresh, Ctrl-R, PRs in the fixture, inactive view due)
+            for (tick, manual, numbers, inactive_due) in [
+                (1, false, &[3, 2, 1][..], true),
+                (2, false, &[2, 1][..], false),
+                (3, false, &[1][..], true),
+                (4, true, &[3][..], true),
+            ] {
+                let label = format!("{active:?} active, refresh {tick}");
+                let routes = tagged_watch_with_merged(numbers);
+                let graphql = &routes.iter().find(|(route, _)| route == GRAPHQL).unwrap().1;
+                fake.set_response(GRAPHQL, 200, &[], graphql);
+                // Baseline: a refresh that fetches both views.
+                let (base_client, base_fake) = github::fake::client(routes.clone());
+                let base = fetch_views(&base_client, true, true);
+                let before = counts(&base_fake.requests());
+
+                let sent = fake.requests().len();
+                let due = schedule.next(active, manual);
+                let outcome = fetch_views(&client, due.mine, due.reviews);
+                let after = counts(&fake.requests()[sent..]);
+                let now = start + chrono::TimeDelta::minutes(5 * tick);
+                schedule.record(due, &outcome.issues, now);
+                let outcome = outcome.merge(last_good.take(), std::mem::take(&mut issues), due);
+                println!(
+                    "TICK_COUNTS {label}: before GET={} POST={} after GET={} POST={}",
+                    before.0, before.1, after.0, after.1
+                );
+
+                assert!(due.includes(active), "{label}: {due:?}");
+                assert_eq!(due.includes(inactive), inactive_due, "{label}: {due:?}");
+                assert_eq!(before, (4, 3), "{label}");
+                assert_eq!(
+                    after,
+                    if inactive_due { before } else { skipped_counts },
+                    "{label}"
+                );
+                assert!(outcome.issues.is_empty(), "{label}: {:?}", outcome.issues);
+                assert_eq!(
+                    render(&outcome.sections, active),
+                    render(&base.sections, active),
+                    "{label}: active view output"
+                );
+
+                // Tab paints the inactive view from retained data, with no request.
+                let sent = fake.requests().len();
+                let shown = render(&outcome.sections, inactive);
+                assert_eq!(fake.requests().len(), sent, "{label}: Tab requested");
+                if inactive_due {
+                    assert_eq!(shown, render(&base.sections, inactive), "{label}");
+                    assert_eq!(schedule.age_note(inactive, now), None, "{label}");
+                } else {
+                    assert_eq!(shown, inactive_shown, "{label}: retained rows");
+                    assert!(shown.contains("#3"), "{label}: {shown}");
+                    assert_eq!(
+                        schedule.age_note(inactive, now).as_deref(),
+                        Some("updated 5m ago"),
+                        "{label}"
+                    );
+                }
+                assert_eq!(schedule.age_note(active, now), None, "{label}");
+                inactive_shown = shown;
+                last_good = Some(outcome.sections);
+                issues = outcome.issues;
+            }
+            // After Tab, the next refresh fetches the newly active view.
+            assert!(schedule.next(inactive, false).includes(inactive));
+        }
+    }
+
+    #[test]
+    fn skipped_view_keeps_its_errors_in_fetch_order() {
+        let error = anyhow::anyhow!("boom");
+        let mut queue = FetchIssue::new(FetchScope::Queue, &error);
+        queue.stale = true;
+        let previous = vec![queue, FetchIssue::new(FetchScope::ReviewedMerged, &error)];
+        let outcome = FetchOutcome {
+            sections: Sections::EMPTY,
+            issues: vec![FetchIssue::new(FetchScope::Reviews, &error)],
+        }
+        .merge(
+            None,
+            previous,
+            Due {
+                mine: false,
+                reviews: true,
+            },
+        );
+
+        assert_eq!(
+            outcome.status(),
+            "error: Merge Queue stale: boom\nerror: Reviews unavailable: boom"
+        );
+    }
+
+    #[test]
+    fn failed_view_keeps_its_age_and_is_retried() {
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let at = |tick: i64| start + chrono::TimeDelta::minutes(5 * tick);
+        let failed = [FetchIssue::new(
+            FetchScope::ReviewedMerged,
+            &anyhow::anyhow!("boom"),
+        )];
+        let mut schedule = Schedule::default();
+        for tick in 1..=2 {
+            let due = schedule.next(View::Mine, false);
+            schedule.record(due, &[], at(tick));
+        }
+
+        let due = schedule.next(View::Mine, false);
+        assert!(due.reviews, "{due:?}");
+        schedule.record(due, &failed, at(3));
+
+        assert_eq!(
+            schedule.age_note(View::Reviews, at(3)).as_deref(),
+            Some("updated 10m ago")
+        );
+        let due = schedule.next(View::Mine, false);
+        assert!(due.reviews, "retry after the failure: {due:?}");
+    }
+
+    #[test]
+    fn partial_view_counts_as_fetched() {
+        let start = timefmt::parse_ts("2026-01-10T12:00:00Z").unwrap();
+        let at = |tick: i64| start + chrono::TimeDelta::minutes(5 * tick);
+        let partial = [FetchIssue {
+            warning: true,
+            ..FetchIssue::new(FetchScope::ReviewedMerged, &anyhow::anyhow!("denied"))
+        }];
+        let mut schedule = Schedule::default();
+        let due = schedule.next(View::Mine, false);
+        assert!(due.reviews, "{due:?}");
+        schedule.record(due, &partial, at(1));
+
+        assert_eq!(schedule.age_note(View::Reviews, at(1)), None);
+        let due = schedule.next(View::Mine, false);
+        assert!(!due.reviews, "partial data is not retried: {due:?}");
     }
 
     #[test]
