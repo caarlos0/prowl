@@ -1,87 +1,170 @@
 # prowl
 
-> A tiny terminal radar for your GitHub pull requests.
+[![build](https://github.com/caarlos0/prowl/actions/workflows/build.yml/badge.svg)](https://github.com/caarlos0/prowl/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/caarlos0/prowl)](https://github.com/caarlos0/prowl/releases/latest)
+
+A tiny terminal radar for your GitHub pull requests.
 
 <img alt="prowl" width="1300" src="https://github.com/user-attachments/assets/d9dff616-2631-4115-9344-d0c5f42c83ef" />
 
-A tiny terminal dashboard that watches a GitHub repo's **open PRs**, its
-**merge queue**, your **recently merged PRs**, and the **commits you've
-shipped** per release. It refreshes on an interval and **rings the terminal
-bell** the moment one of your PRs merges or an open PR's CI/merge status
-changes — and flags whatever changed until you mark it as read. On startup it
-paints instantly from a local cache, then refreshes in the background. A PR
-that's in the merge queue is listed only there, not also under your open PRs.
+## Why prowl
 
-Press **Tab** to switch to a **reviews** view: the PRs awaiting (or under) your
-review — each flagged with a glyph for whether you still owe a first review, the
-author asked for a re-review, or there are new commits since you looked — plus
-the PRs you reviewed that recently merged. `--review-scope` tunes whether that
-list includes only PRs that request you directly or also your teams'.
+Keep one terminal pane open and know what needs you now. prowl shows your open
+PRs with their CI and review state, the merge queue, what you merged and which
+release shipped it, and the PRs waiting for your review. It rings the terminal
+bell when one of your PRs merges or changes status. It starts instantly from a
+local cache, then refreshes in the background.
 
-It talks to the GitHub API directly. On first run it walks you through a
-one-time browser **device login** (or set `GITHUB_TOKEN`).
+## Features
 
-Each open PR leads with a Catppuccin-colored approval glyph: a **single check**
-means a reviewer approved it, and a **double check** means GitHub reports that
-**all required reviews are approved**. Without required reviews, approvals keep
-the single check. If more reviews are required or another reviewer requests
-changes, an existing approval still earns a single check. A PR
-that **conflicts** with its base branch marks its own title in red, so it costs
-no column. Everything else that could hold a PR back is broken out to the right:
-a red/yellow/green **check semaphore** (`FAIL` / `RUN` / `PASS` check-run
-counts) and the number of unresolved review **threads**. `RUN` includes running,
-queued, and waiting checks. In **My open PRs** and **Merge Queue**, it also counts
-required checks that have not reported yet, using the PR's base-branch protection
-and active repository/organization rulesets. Once a required check reports, it
-counts only in its reported state, not twice.
-
-Merge-queue entries get the same semaphore for their speculative merge commit,
-next to how long they've been queued and how long that build has been running.
-Required checks count in `RUN` even before that commit exists; `BUILD` stays
-`—` until a job starts. The queue keeps every entry in position order.
-Use `--required` to count only checks required to merge each pull request; in
-the merge queue, `BUILD` then starts at the first required job.
-
-On a TTY prowl uses Nerd Font icons; with `--ascii` (or when piped) approval
-falls back to `Y` all required reviews approved, `y` a reviewer approved it, and
-`n` nobody approved it. The conflict marker falls back to `!`.
-`--branch` adds the head branch to every PR table, and `--no-draft`
-hides drafts. Each PR number is a clickable link to the PR. Tables use the full
-terminal width, giving most space to the title and then the optional branch. As
-the terminal gets narrower, detail columns disappear from the right; the
-`FAIL` / `RUN` / `PASS` semaphore always disappears as one group.
-`+ resize for more` in the footer means a wider terminal would reveal more information.
-There is no minimum terminal size. Very narrow terminals clip mandatory columns.
+- Two views, **Mine** and **Reviews**. Press `Tab` to switch.
+- A check semaphore (`FAIL` / `RUN` / `PASS`) that also counts required checks that have not reported yet.
+- Approval glyphs and a conflict marker, so you see what blocks a PR at a glance.
+- Merge Queue with `WAIT`, `BUILD`, and the queue ETA.
+- My Shipments (your commits per release) and a `RELEASE` column on merged PRs.
+- Terminal bell and unread markers. Press `r` / `R` to mark them as read.
+- Keyboard and mouse support, live `/` search, open in the browser, and link copy that works over SSH.
+- Instant start from cache, a layout that adapts to the terminal width, and plain output when piped.
 
 ## Install
 
-```sh
-brew install --cask caarlos0/tap/prowl    # homebrew
-npm install -g @caarlos0/prowl            # npm
-npx @caarlos0/prowl                       # run without installing
-cargo install --path .                    # from source
-```
-
-## Login
-
-On first use, prowl runs a one-time GitHub device login and caches the token in
-your OS keyring (a `chmod 600` file on Linux/headless). You can also trigger it
-explicitly, or skip it entirely with an env var:
+Homebrew:
 
 ```sh
-prowl --login                 # authorize once in the browser
-GITHUB_TOKEN=… prowl --once    # or just bring your own token
+brew install --cask caarlos0/tap/prowl
 ```
+
+npm:
+
+```sh
+npm install -g @caarlos0/prowl
+npx @caarlos0/prowl   # or run it without installing
+```
+
+Linux packages (`.apk`, `.deb`, `.rpm`) and prebuilt archives (`.tar.gz`, or
+`.zip` on Windows) are on the
+[releases page](https://github.com/caarlos0/prowl/releases). Archives cover
+Linux and macOS on x86_64 and arm64, and Windows on x86_64.
+
+From source:
+
+```sh
+cargo install --path .
+```
+
+A [Nerd Font](https://www.nerdfonts.com/) is recommended for the icons. Without
+one, pass `--ascii`.
+
+## Quick start
+
+```sh
+prowl                     # watch the repo in the current directory
+prowl --repo owner/name   # watch a specific repo
+prowl --once              # print one snapshot and exit
+```
+
+On first run, prowl starts a GitHub device login in your browser.
+
+## Authentication
+
+prowl looks for a token in this order:
+
+1. `PROWL_TOKEN`
+2. `GITHUB_TOKEN`
+3. The OS keyring, or a `chmod 600` file when no keyring is available
+4. The OAuth device flow
+
+`prowl --login` forces the device flow and stores the new token.
+
+## Views
+
+### Mine
+
+The default view has four sections:
+
+- **My open PRs**: sorted by last update, newest first. Use `--sort-open created` to sort by creation time. A PR in the merge queue is listed only under Merge Queue.
+- **Merge Queue**: each entry shows `WAIT` (time in the queue), `BUILD` (time its merge commit has been building, `—` until a job starts), and its own check semaphore.
+- **My merged PRs**: recently merged PRs and the release that shipped each one. `—` means not released yet, `?` means unknown.
+- **My Shipments**: how many commits you shipped in the next release and in the last four.
+
+Each open PR shows:
+
+| Column | Meaning |
+| --- | --- |
+| Approval glyph | Double check (`Y` in ASCII): GitHub reports all required reviews approved. Single check (`y`): a reviewer approved. Pending glyph (`n`): nobody approved. |
+| Red marker on the title (`!` in ASCII) | The PR conflicts with its base branch. |
+| `THREADS` | Unresolved review threads (`100+` when capped). |
+| `FAIL` / `RUN` / `PASS` | Check counts. `RUN` includes queued and waiting checks, and required checks that have not reported yet. |
+
+Use `--required` to count only the checks required to merge. Use `--branch` to
+add a `BRANCH` column and `--no-draft` to hide drafts.
+
+### Reviews
+
+- **Reviews**: open PRs that wait for you or that you already reviewed. By default prowl includes PRs that request you directly or through one of your teams. Use `--review-scope direct` for direct requests only.
+- **Reviewed & merged**: merged PRs that you reviewed.
+
+Each review row starts with its state:
+
+| State | Meaning |
+| --- | --- |
+| `Awaiting` | You are asked to review, and you have not yet. |
+| `ReReview` | You reviewed, and you are asked again. |
+| `Updated` | You reviewed, and the author pushed new commits. |
+| `Reviewed` | You reviewed, and nothing new happened. |
+
+When a search is capped at 50 PRs, the header shows how many are listed and how
+many exist.
+
+## Keys and mouse
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `↓` / `↑` | Move the selection |
+| `g` / `G` | Jump to the first / last row |
+| `Ctrl-D` / `Ctrl-U` | Move the selection half a page |
+| `PgUp` / `PgDn` | Scroll the viewport without changing the selection |
+| `Enter` | Open the selected PR or release in your browser |
+| `Shift+Enter` | Open every link in the selected section |
+| `y` / `Y` | Copy the selected link / every link in the section |
+| `/` | Filter by number, title, branch, author, or release tag |
+| `Esc` | Clear the filter (quits when there is none) |
+| `r` / `R` | Mark the selected PR / all PRs as read |
+| `Ctrl-R` | Refresh now |
+| `Tab` | Switch view |
+| `?` | Toggle the help legend |
+| `q` / `Ctrl-C` | Quit |
+| `Ctrl-Z` | Suspend to your shell |
+
+Use the mouse wheel to scroll. Click a row to select it, click a PR number,
+release tag, or `upcoming` to open that link, and click a tab to switch views.
+Most terminals let you hold `Shift` to select text.
+
+`Shift+Enter` needs a terminal that supports the Kitty keyboard protocol.
+Otherwise it acts like `Enter`. Copying uses OSC 52. In tmux, set
+`set -g set-clipboard on`.
+
+By default `y` copies the plain URL. Use `--link-format '[{title}]({url})'` to
+copy Markdown links. `{title}` is the PR title, release tag, or `upcoming`, and
+`{url}` is the link.
+
+The active view refreshes on every interval and the other view on every second
+one. A dim `updated 6m ago` line shows when the view you see is older than the
+other.
 
 ## Configuration
 
-prowl reads `~/.config/prowl/config` once at startup. If `XDG_CONFIG_HOME` is
-set, it reads `$XDG_CONFIG_HOME/prowl/config` instead; `APPDATA` is the next
-fallback, before `~/.config`. Empty environment variables are ignored.
+prowl reads a config file once at startup, from the first of these that is set:
 
-Use a long flag name without `--`, a space, and its value on each line:
+1. `$XDG_CONFIG_HOME/prowl/config`
+2. `$APPDATA/prowl/config`
+3. `~/.config/prowl/config`
+
+Write one setting per line: a long flag name without `--`, a space, and its
+value.
 
 ```text
+# refresh every 30 seconds, without the bell
 interval 30s
 bell false
 branch true
@@ -90,127 +173,45 @@ only mine,queue,merged
 link-format [{title}]({url})
 ```
 
-CLI values override the file, and the file overrides built-in defaults.
-Repeated entries use the last value. Boolean values are `true` or `false`;
-`--bell=true` enables the bell even when the file says `bell false`.
-The existing `--no-bell` still works as an alias for `--bell=false`.
+CLI values override the file, and the file overrides the defaults. Repeated
+entries use the last value. Blank lines and lines that start with `#` are
+ignored. The rest of the line is the literal value, so do not add shell quotes.
+A missing file is fine. An invalid setting stops startup with an error that
+names the file and line. `--help` and `--version` never read the file.
 
-Blank lines and lines starting with `#` are ignored. The rest of each setting
-line is its literal value, including spaces and `#`; do not add shell quotes
-or expect environment-variable expansion. Leading and trailing whitespace is
-ignored. A missing file is fine; invalid settings and unreadable files stop
-startup with an error. `--help` and `--version` do not read the file.
+## Flags
 
-## Usage
+Run `prowl --help` for the full list.
 
-```sh
-prowl                     # watch the repo in the current directory
-prowl --repo owner/name   # watch a specific repo
-prowl --once              # render once and exit
-prowl --sort-open created # newest-created open PRs first
-```
+| Flag | Description |
+| --- | --- |
+| `--repo <OWNER/NAME>` | Repository to watch. Detected from the current directory by default. |
+| `--interval <DUR>` | Refresh interval, such as `30s`, `10m`, `2h`. Default `5m`. |
+| `--once` | Render once and exit. |
+| `--view <mine\|reviews>` | View to show first. |
+| `--only <SECTIONS>` | Comma-separated sections: `queue`, `mine`, `merged`, `shipments`. |
+| `--review-scope <direct\|all>` | Whose review requests the Reviews view includes. Default `all`. |
+| `--sort-open <updated\|created>` | Sort order of My open PRs. Default `updated`. |
+| `--branch` | Show each PR's head branch. |
+| `--no-draft` | Hide draft PRs. |
+| `--required` | Count only the checks required to merge. |
+| `--merged-window <DUR>` | How far back merged PRs reach. Default `2d`. |
+| `--merged-limit <N>` | Maximum merged PRs to list. Default `20`. |
+| `--include-pre-releases` | Count pre-releases in My Shipments. |
+| `--ascii` | Use ASCII letters instead of Nerd Font glyphs. |
+| `--bell=false` | Turn off the terminal bell. `--no-bell` is an alias. |
+| `--link-format <FORMAT>` | Format of copied links. Default `{url}`. |
+| `--no-cache` | Do not read or write the on-disk cache. |
+| `--no-help` | Hide the help legend in one-shot and piped output. |
+| `--login` | Run the GitHub device login and exit. |
 
-**My open PRs** sorts by last update time, newest first, by default.
-`--sort-open created` sorts by creation time instead, also newest first.
-Set `sort-open created` in the config file to make it the default;
-`--sort-open updated` overrides that setting for one run. This option changes
-only My open PRs, not the merge queue, merged PRs, or either reviews list.
+## Piped output and scripting
 
-Prowl fetches your open PRs in pages of five, instead of stopping at 50.
-It also batches check details for five PRs at a time to avoid oversized requests.
+With `--once`, prowl prints one snapshot and exits. When the output is piped or
+redirected, it is plain text without colors, 120 columns wide, with every row.
+On a terminal, PR numbers and release tags are hyperlinks.
 
-While watching, press `Ctrl-R` to refresh now, `Tab` to switch between your PRs and
-your reviews, `?` to toggle the help legend, and `q` (or `Ctrl-C`) to quit;
-`Ctrl-Z` suspends it back to your shell. The dashboard takes over the alternate
-screen, so quitting hands your shell back exactly as you left it. A footer glued
-to the bottom of the screen (`^R refresh (every 5m) - tab switch view - enter open
-- r/R read - y copy - / search - ? help`) shows the keys and the refresh interval.
-`^R` means `Ctrl-R`. While a refresh is in flight the hint reads `^R refreshing`
-and `Ctrl-R` presses are ignored until it finishes. The active view refreshes on
-every interval and the other view on every second one, so `Tab` switches
-instantly; a dim `updated 6m ago` line shows when the shown view is older than
-the other. REST shipment scans run every second Mine refresh, with their age
-shown while Mine data is newer; the RELEASE column uses `?` for PRs missing from
-the cached map. `Ctrl-R` refreshes both views and shipments. On narrow screens
-the footer removes low-priority labels and hints instead of clipping.
-`PgUp`/`PgDn` scroll independently; selection movement follows the row.
-Every enabled section stays available in both views, regardless of terminal size.
-The search prompt, status line, and footer stay at the bottom.
-Press `?` to show help at the top of the scrolling body.
-The legend is contextual to the active view:
-approval glyphs and the conflict marker for your PRs, review glyphs for your
-reviews.
+## Contributing and license
 
-Move the selection cursor through the listed PRs and releases with `j`/`k` (or
-`↓`/`↑`), `g`/`G` for the first/last row, and `Ctrl-D`/`Ctrl-U` to jump half a
-page; press `Enter` to open the highlighted PR (or release) in your browser. The
-cursor only appears once you start moving it, and stays on the same URL when the
-terminal is resized or refreshed if that URL still exists.
-One-shot and piped output keep the full dashboard height.
-
-Use the mouse wheel to scroll three lines without a selection change.
-Click a row to select it. Click a PR number, release tag, or `upcoming` link
-to open that exact URL. Click a tab to switch views.
-Mouse controls work during a refresh and while the search prompt is open.
-They apply only to watch mode; one-shot output keeps the terminal's normal link behavior.
-Most terminals let you hold `Shift` to bypass mouse controls for text selection.
-
-Press `Shift+Enter` to open every matching link in the selected section, like
-`Y` does for copying. It uses the first non-empty section when nothing is
-selected and honors the current filter, including offscreen rows. Links open in
-display order; if an opener fails, prowl stops opening the remaining links
-and shows the failed link.
-This shortcut requires a terminal that can report `Shift+Enter` separately
-from `Enter`. Prowl enables the Kitty keyboard protocol when supported; if the
-terminal sends plain `Enter` instead, only the selected link opens. While
-typing a search, either key applies the filter without opening links.
-
-Changed PRs keep their `▸` marker (`>` in ASCII mode) until you press `r` to
-mark the selected PR as read, or `R` to mark all PRs as read, including offscreen
-and filtered rows. Refreshing, moving the selection, opening a PR, switching
-views, and failed refreshes do not clear markers. With no PR selected, `r`
-does nothing. Markers last only for the current session and track your PRs,
-not the Reviews view; `R` clears them from either view. A new event marks the PR
-again, and only new events ring the bell.
-
-Press `y` to copy the selected row's link, or `Y` to copy every link in the
-section the cursor is in — your open PRs, the merge queue, the merged list, your
-shipments, either reviews list — as a markdown list:
-
-```markdown
-- https://github.com/owner/name/pull/1
-- https://github.com/owner/name/pull/2
-```
-
-Use `--link-format` to change both copy commands from URL-only to a custom
-format. For Markdown links:
-
-```sh
-prowl --link-format '[{title}]({url})'
-```
-
-`{title}` is the full PR title, the release tag, or `upcoming`; `{url}` is the
-link destination. These placeholders are replaced literally, without Markdown
-escaping; all other text is kept as written. The default is `{url}`. Section
-copies still prepend `- ` to each formatted link:
-
-```markdown
-- [Fix parser](https://github.com/owner/name/pull/1)
-- [Update docs](https://github.com/owner/name/pull/2)
-```
-
-With no cursor yet, `Y` copies the first non-empty section; with a filter
-applied, it copies only the matching rows. Copying uses the OSC 52 escape, so it
-sets the clipboard of the terminal you're looking at even over SSH — as long as
-that terminal supports it (in tmux, `set -g set-clipboard on`).
-
-Press `/` to search: type to filter the rows live by number, title, branch,
-author, or release tag; `Enter` applies the filter and drops you back to the list (so the
-cursor and `Enter` work on the matches), and `Esc` clears it (with no
-filter to clear, `Esc` quits).
-The prompt preserves uppercase letters and composed text.
-For example, `Release` stays `Release` in the prompt; the filter still ignores case.
-
-Run `prowl --help` for all flags (interval, `--only`, `--view`,
-`--review-scope`, `--branch`, `--no-draft`, `--required`, `--link-format`,
-merged window, etc.) and the full watch-mode key list.
+See [CONTRIBUTING.md](CONTRIBUTING.md). prowl is released under the MIT license;
+see [LICENSE.md](LICENSE.md).
