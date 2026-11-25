@@ -319,7 +319,7 @@ fn main() {
     let cli = Cli::parse_from(["prowl"]);
 
     // A few rows carry the unread change marker and one is
-    // selected, so the shot shows both affordances.
+    // selected, so the shot shows both affordances. Help stays hidden.
     let changes = Changes {
         status_changed: [408, 412].into_iter().collect(),
         newly_merged: [394].into_iter().collect(),
@@ -328,7 +328,7 @@ fn main() {
     let ui = Ui {
         view,
         selected: Some(1),
-        show_help: true,
+        show_help: false,
         ..Ui::once(&cli)
     };
     let sections = sections();
