@@ -1,3 +1,5 @@
+<img alt="prowl logo" width="128" src="logo.svg" />
+
 # prowl
 
 [![build](https://github.com/caarlos0/prowl/actions/workflows/build.yml/badge.svg)](https://github.com/caarlos0/prowl/actions/workflows/build.yml)

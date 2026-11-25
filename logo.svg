@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#1e1e2e"/>
+  <rect x="12" y="12" width="488" height="488" rx="86" fill="none" stroke="#313244" stroke-width="4"/>
+
+  <!-- Horizontal main branch perch -->
+  <line x1="72" y1="352" x2="440" y2="352" stroke="#6c7086" stroke-width="16" stroke-linecap="round"/>
+  <!-- Incoming PR branch curving up into merge node -->
+  <path d="M128 424 C172 424 198 352 256 352" fill="none" stroke="#89b4fa" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="122" cy="424" r="16" fill="#1e1e2e" stroke="#89b4fa" stroke-width="10"/>
+  <circle cx="96" cy="352" r="14" fill="#1e1e2e" stroke="#6c7086" stroke-width="10"/>
+  <circle cx="416" cy="352" r="14" fill="#1e1e2e" stroke="#6c7086" stroke-width="10"/>
+
+  <!-- Perched Owl Body (neutral Catppuccin slate/silver, no purple) -->
+  <path d="M188 158 L174 110 L220 138 Q256 128 292 138 L338 110 L324 158 C348 186 352 248 332 298 C318 330 288 344 256 344 C224 344 194 330 180 298 C160 248 164 186 188 158 Z"
+        fill="#bac2de"/>
+
+  <!-- Wing fold -->
+  <path d="M188 224 C176 262 186 302 214 322 C208 286 210 256 220 232 Z" fill="#6c7086" opacity="0.75"/>
+  <path d="M324 224 C336 262 326 302 298 322 C304 286 302 256 292 232 Z" fill="#6c7086" opacity="0.75"/>
+
+  <!-- Subtle chest feathers -->
+  <path d="M232 280 Q256 296 280 280" fill="none" stroke="#9399b2" stroke-width="7" stroke-linecap="round"/>
+  <path d="M240 302 Q256 314 272 302" fill="none" stroke="#9399b2" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- Eyes -->
+  <circle cx="222" cy="196" r="28" fill="#181825"/>
+  <circle cx="222" cy="196" r="14" fill="#a6e3a1"/>
+  <circle cx="222" cy="196" r="6" fill="#11111b"/>
+
+  <circle cx="290" cy="196" r="28" fill="#181825"/>
+  <circle cx="290" cy="196" r="14" fill="#a6e3a1"/>
+  <circle cx="290" cy="196" r="6" fill="#11111b"/>
+
+  <!-- Beak -->
+  <polygon points="256,216 242,238 256,254 270,238" fill="#fab387"/>
+
+  <!-- Glowing Merge Node under talons -->
+  <circle cx="256" cy="352" r="26" fill="#a6e3a1" opacity="0.22"/>
+  <circle cx="256" cy="352" r="16" fill="#a6e3a1"/>
+  <circle cx="256" cy="352" r="7" fill="#1e1e2e"/>
+
+  <!-- Talons gripping perch -->
+  <path d="M226 336 L226 364 M286 336 L286 364" stroke="#fab387" stroke-width="12" stroke-linecap="round"/>
+</svg>
