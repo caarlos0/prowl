@@ -5,7 +5,7 @@
 
 A tiny terminal radar for your GitHub pull requests.
 
-<img alt="prowl" width="1300" src="https://github.com/user-attachments/assets/95e71a97-5ede-4660-ae6d-0b98ac1704c6" />
+<img alt="prowl" width="1300" src="https://github.com/user-attachments/assets/2933f2fb-38a1-487c-9022-85d3b54a8cdc" />
 
 ## Why prowl
 
